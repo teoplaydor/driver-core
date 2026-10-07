@@ -81,6 +81,21 @@ public class ProfileTest {
         check(gs.contains("видеокарта (WebGPU): 4 узлов") && gs.contains("процессор: 3 узлов, 0.00 с (55% прогона) — Gather ×2")
                 && gs.contains(", …") && gs.contains("пересылок между процессором и ускорителем: 2"), "GPU summary");
 
+        // How the vision encoder computes attention (for the report): a graph with it spelled out
+        if (args.length > 1) {
+            String graph = io.github.teoplaydor.semsearch.core.OnnxPatcher.graphSummary(new File(args[1]));
+            System.out.println(graph);
+            check(graph.contains("35 узлов, opset ai.onnx=17") && graph.contains("MatMul ×12") && graph.contains("Softmax ×2"), "graph: size, opset, op counts");
+            check(graph.contains("по частям — MatMul → Softmax ×2 → MatMul"), "attention spelled out, not fused");
+            check(graph.contains("#0 Softmax(#-1)") && graph.contains("#-1 Add(#-2,attention_mask)")
+                    && graph.contains("#-3 MatMul(#-10,#-7)") && graph.contains("#1 MatMul(#0,#-4)")
+                    && graph.contains("#-12 MatMul(pixel_values,layers.0/self_attn.q_w)"),
+                    "first block wired by producers");
+            check(graph.contains("q_proj/MatMul") || graph.contains("MatMul(pixel_values"), "block starts at the projections");
+            String v = io.github.teoplaydor.semsearch.core.OnnxPatcher.graphSummary(new File(args[0], "onnx/vision_encoder.onnx"));
+            check(v.contains("Внимание: не найдено") && !v.contains("Первый блок"), "no attention in the dummy encoder");
+        }
+
         System.out.println(bad == 0 ? "PROFILE OK" : bad + " FAILED");
         if (bad != 0) System.exit(1);
     }

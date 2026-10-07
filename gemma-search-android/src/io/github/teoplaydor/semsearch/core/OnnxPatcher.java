@@ -156,6 +156,150 @@ public final class OnnxPatcher {
         return null;
     }
 
+    /** A graph node, as much of NodeProto as a structural summary needs. */
+    public static final class Node {
+        public String opType = "", domain = "", name = "";
+        public final java.util.List<String> inputs = new java.util.ArrayList<String>(), outputs = new java.util.ArrayList<String>();
+    }
+
+    /**
+     * The graph's nodes in file (topological) order and the opsets (domain → version), streamed like
+     * {@link #inputDims}: ModelProto.opset_import (8) and graph (7) → node (1); initializers are skipped.
+     */
+    public static java.util.List<Node> nodes(File f, java.util.Map<String, Long> opsets) throws IOException {
+        java.util.List<Node> out = new java.util.ArrayList<Node>();
+        java.io.DataInputStream in = new java.io.DataInputStream(new java.io.BufferedInputStream(new FileInputStream(f), 1 << 16));
+        try {
+            long[] pos = {0};
+            long end = f.length();
+            while (pos[0] < end) {
+                long key = varint(in, pos);
+                int field = (int) (key >>> 3), wire = (int) (key & 7);
+                if (field == 8 && wire == 2) {
+                    byte[] b = readBytes(in, pos);
+                    Reader r = new Reader(b, 0, b.length);
+                    String domain = "";
+                    long version = 0;
+                    while (r.more()) {
+                        long k = r.varint();
+                        int f2 = (int) (k >>> 3), w = (int) (k & 7);
+                        if (f2 == 1 && w == 2) domain = r.string();
+                        else if (f2 == 2 && w == 0) version = r.varint();
+                        else r.skip(w);
+                    }
+                    if (opsets != null) opsets.put(domain.isEmpty() ? "ai.onnx" : domain, version);
+                } else if (field == 7 && wire == 2) {
+                    long graphEnd = pos[0] + varint(in, pos);
+                    while (pos[0] < graphEnd) {
+                        long k = varint(in, pos);
+                        int gf = (int) (k >>> 3), gw = (int) (k & 7);
+                        if (gf == 1 && gw == 2) out.add(parseNode(readBytes(in, pos)));
+                        else skipStream(in, gw, pos);
+                    }
+                } else {
+                    skipStream(in, wire, pos);
+                }
+            }
+        } finally {
+            in.close();
+        }
+        return out;
+    }
+
+    private static byte[] readBytes(java.io.DataInputStream in, long[] pos) throws IOException {
+        int len = (int) varint(in, pos);
+        byte[] b = new byte[len];
+        in.readFully(b);
+        pos[0] += len;
+        return b;
+    }
+
+    private static Node parseNode(byte[] b) throws IOException {
+        Node n = new Node();
+        Reader r = new Reader(b, 0, b.length);
+        while (r.more()) {
+            long k = r.varint();
+            int f = (int) (k >>> 3), w = (int) (k & 7);
+            if (w != 2) {
+                r.skip(w);
+                continue;
+            }
+            switch (f) {
+                case 1: n.inputs.add(r.string()); break;
+                case 2: n.outputs.add(r.string()); break;
+                case 3: n.name = r.string(); break;
+                case 4: n.opType = r.string(); break;
+                case 7: n.domain = r.string(); break;
+                default: r.skip(w);
+            }
+        }
+        return n;
+    }
+
+    private static final String[] FUSED_ATTENTION = {"MultiHeadAttention", "Attention", "GroupQueryAttention",
+            "PackedMultiHeadAttention", "SparseAttention"};
+
+    /**
+     * How a transformer graph computes attention, for the speed report: size, opsets, the most frequent ops,
+     * whether attention is a fused op or spelled out (MatMul → Softmax → MatMul), and the ops of the first
+     * attention block in order (to plan a rewrite to a fused, flash-attention op).
+     */
+    public static String graphSummary(File f) throws IOException {
+        java.util.Map<String, Long> opsets = new java.util.TreeMap<String, Long>();
+        java.util.List<Node> nodes = nodes(f, opsets);
+        final java.util.Map<String, Integer> count = new java.util.HashMap<String, Integer>();
+        for (Node n : nodes) {
+            String op = n.domain.isEmpty() || "ai.onnx".equals(n.domain) ? n.opType : n.domain + ":" + n.opType;
+            count.put(op, count.containsKey(op) ? count.get(op) + 1 : 1);
+        }
+        java.util.List<String> ops = new java.util.ArrayList<String>(count.keySet());
+        java.util.Collections.sort(ops, new java.util.Comparator<String>() {
+            @Override
+            public int compare(String a, String b) {
+                return count.get(b) - count.get(a);
+            }
+        });
+        StringBuilder sb = new StringBuilder();
+        sb.append(f.getName()).append(": ").append(nodes.size()).append(" узлов, opset");
+        for (java.util.Map.Entry<String, Long> e : opsets.entrySet()) sb.append(' ').append(e.getKey()).append('=').append(e.getValue());
+        sb.append("\nЧаще всего:");
+        for (int i = 0; i < ops.size() && i < 14; i++) sb.append(i == 0 ? " " : ", ").append(ops.get(i)).append(" ×").append(count.get(ops.get(i)));
+        int fused = 0;
+        for (String a : FUSED_ATTENTION) {
+            for (String op : ops) if (op.equals(a) || op.endsWith(":" + a)) fused += count.get(op);
+        }
+        int softmax = count.containsKey("Softmax") ? count.get("Softmax") : 0;
+        sb.append("\nВнимание: ").append(fused > 0 ? "слитое (" + fused + " узлов)" : softmax > 0
+                ? "по частям — MatMul → Softmax ×" + softmax + " → MatMul, слитых узлов нет" : "не найдено");
+        // the first attention block: from ~24 nodes before the first Softmax to a few after it
+        int first = -1;
+        for (int i = 0; i < nodes.size() && first < 0; i++) if ("Softmax".equals(nodes.get(i).opType)) first = i;
+        if (first >= 0 && fused == 0) {
+            sb.append("\nПервый блок внимания:");
+            java.util.Map<String, String> producer = new java.util.HashMap<String, String>();
+            for (int i = Math.max(0, first - 24); i <= Math.min(nodes.size() - 1, first + 6); i++) {
+                Node n = nodes.get(i);
+                StringBuilder in = new StringBuilder();
+                for (String x : n.inputs) {
+                    if (x.isEmpty()) continue;
+                    String p = producer.get(x);
+                    in.append(in.length() > 0 ? "," : "").append(p != null ? p : shortName(x));
+                }
+                String id = "#" + (i - first);
+                sb.append("\n ").append(id).append(' ').append(n.opType).append('(').append(in).append(')');
+                for (String o : n.outputs) producer.put(o, id);
+            }
+        }
+        return sb.toString();
+    }
+
+    /** "/vision_tower/encoder/layers.0/self_attn/q_proj/MatMul_output_0" → "q_proj/MatMul_output_0". */
+    static String shortName(String s) {
+        String[] parts = s.split("/");
+        String t = parts.length >= 2 ? parts[parts.length - 2] + "/" + parts[parts.length - 1] : s;
+        return t.length() > 40 ? t.substring(t.length() - 40) : t;
+    }
+
     private static long varint(java.io.DataInputStream in, long[] pos) throws IOException {
         long v = 0;
         for (int shift = 0; shift < 64; shift += 7) {
@@ -307,6 +451,13 @@ public final class OnnxPatcher {
 
         boolean more() {
             return pos < end;
+        }
+
+        String string() throws IOException {
+            int len = (int) varint();
+            String v = new String(b, pos, len, UTF8);
+            pos += len;
+            return v;
         }
 
         long varint() throws IOException {

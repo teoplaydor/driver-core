@@ -75,7 +75,9 @@ python3 test/accel/make_fp16_vision.py "$T/models/dummy/onnx/vision_encoder.onnx
 javac --release 8 -XDstringConcat=inline -nowarn -encoding UTF-8 -cp "$T/cls:$T/ort-desktop.jar" -d "$T/cls" test/accel/Fp16Test.java
 java -Dfile.encoding=UTF-8 -Dstdout.encoding=UTF-8 -cp "$T/cls:build/deps/ort-classes:$T/ort-desktop.jar" Fp16Test "$T/models/dummy"
 javac --release 8 -XDstringConcat=inline -nowarn -encoding UTF-8 -cp "$T/cls:$T/ort-desktop.jar" -d "$T/cls" test/accel/ProfileTest.java
-java -Dfile.encoding=UTF-8 -Dstdout.encoding=UTF-8 -cp "$T/cls:build/deps/ort-classes:$T/ort-desktop.jar" ProfileTest "$T/models/dummy"
+python3 test/accel/make_attention_graph.py "$T/accel/attention.onnx"
+java -Dfile.encoding=UTF-8 -Dstdout.encoding=UTF-8 -cp "$T/cls:build/deps/ort-classes:$T/ort-desktop.jar" ProfileTest "$T/models/dummy" \
+  "$T/accel/attention.onnx"
 
 echo "== 2d. LiteRT-LM: JNI contract, install"
 L="$T/litert"

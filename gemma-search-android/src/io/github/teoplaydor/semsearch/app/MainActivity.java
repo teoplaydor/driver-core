@@ -773,7 +773,7 @@ public final class MainActivity extends Activity implements Engine.Listener, Vie
             // the automatic check after "Check the NPU" finished: show what it found, once
             engine.prefs().edit().putBoolean("g_report_unseen", false).apply();
             String r = engine.gemmaReport();
-            if (r != null) sheet = Sheet.message(root, "Скорость на этом телефоне", r, null, null);
+            if (r != null) showReport("Скорость на этом телефоне", r);
         }
         Engine.State st = engine.state;
         boolean dl = st == Engine.State.DOWNLOADING, loading = st == Engine.State.LOADING;
@@ -982,7 +982,8 @@ public final class MainActivity extends Activity implements Engine.Listener, Vie
         });
     }
 
-    private void showReport(String title, final String report) {
+    /** A report with "Copy" (the person pastes it into the chat). */
+    void showReport(String title, final String report) {
         sheet = Sheet.message(root, title, report, "Скопировать", new Runnable() {
             @Override
             public void run() {

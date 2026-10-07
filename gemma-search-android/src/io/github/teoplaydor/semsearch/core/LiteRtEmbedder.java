@@ -133,6 +133,9 @@ public final class LiteRtEmbedder implements Embedder {
         return handle;
     }
 
+    /** Created without a budget (the bundle had no signature for the one asked): every picture gets its default. */
+    public boolean budgetFixed() { return fixedBudget; }
+
     @Override
     public boolean supportsImages() { return true; }
 

@@ -625,7 +625,8 @@ final class SettingsPanel extends FrameLayout implements Engine.Listener {
             @Override
             public void run() {
                 String r = e.photoModel() == FastModel.GEMMA ? e.gemmaReport() : e.fastReport();
-                Sheet.message(root(), "Скорость на этом телефоне", r != null ? r : "Подбора ещё не было.", null, null);
+                if (r != null) a.showReport("Скорость на этом телефоне", r);
+                else Sheet.message(root(), "Скорость на этом телефоне", "Подбора ещё не было.", null, null);
             }
         });
         fp32Delete = quiet(card, "Удалить версию для NPU", Ui.DANGER, new Runnable() {

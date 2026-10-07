@@ -596,6 +596,9 @@ public final class Engine {
         if (withVision) {
             loadedAccel = accel;
             accelLabel = ACCEL_NAMES[accel];
+            if (m instanceof LiteRtEmbedder && ((LiteRtEmbedder) m).budgetFixed()) {
+                accelLabel += " · детализация сборки, не " + maxBudget();
+            }
         }
         return m;
     }
@@ -1331,6 +1334,8 @@ public final class Engine {
     private static volatile boolean liteRtLoaded;
     /** Libraries of the runtime that did not load (e.g. an OpenCL accelerator on a phone without OpenCL). */
     static volatile String liteRtLoadIssues;
+    /** The last LiteRT-LM engine had to be created with the bundle's own detail (no signature for maxBudget()). */
+    static volatile boolean liteRtBudgetFixed;
 
     /** EmbeddingGemma 2 on LiteRT-LM: loads its native libraries once per process, under the crash probe. */
     private Embedder openLiteRt(int accel, int nThreads, int batch) throws Exception {
@@ -1351,8 +1356,11 @@ public final class Engine {
             if (!cache.exists()) cache.mkdirs();
             String backend = accel == ACCEL_LITERT_GPU ? LiteRtEmbedder.GPU : LiteRtEmbedder.CPU;
             try {
-                return new LiteRtEmbedder(rt.modelFile(i), backend, nThreads, maxBudget(), cache, batch, JPEG);
+                LiteRtEmbedder m = new LiteRtEmbedder(rt.modelFile(i), backend, nThreads, maxBudget(), cache, batch, JPEG);
+                liteRtBudgetFixed = false;
+                return m;
             } catch (RuntimeException noSuchBudget) {
+                liteRtBudgetFixed = true;
                 // a bundle without a signature for this many picture tokens: its own default for every picture
                 android.util.Log.w("SemSearch", "LiteRT-LM with " + maxBudget() + " tokens", noSuchBudget);
                 return new LiteRtEmbedder(rt.modelFile(i), backend, nThreads, 0, cache, batch, JPEG);
@@ -1430,6 +1438,49 @@ public final class Engine {
             if (m != null) m.close();
         }
         return r;
+    }
+
+    /** One variant at another detail level, under its crash probe. */
+    private Measure measureAt(ModelConfig cfg, HfTokenizer tok, HfRepo.Plan plan, int[] c, int budget) {
+        return measureAt(cfg, tok, plan, c, budget, null);
+    }
+
+    private Measure measureAt(ModelConfig cfg, HfTokenizer tok, HfRepo.Plan plan, int[] c, int budget, float[] reference) {
+        status = "Подбираю ускорение: " + ACCEL_NAMES[c[0]] + ", детализация " + budget;
+        notifyChanged();
+        mark("подбор ускорения: " + ACCEL_NAMES[c[0]] + ", детализация " + budget);
+        probe(c[0], true);
+        Measure m = measure(cfg, tok, plan, c[0], c[1], c[2], budget, reference);
+        probe(c[0], false);
+        mark("");
+        return m;
+    }
+
+    private static void appendMeasure(StringBuilder rep, int[] c, Measure o) {
+        rep.append("\n• ").append(ACCEL_NAMES[c[0]]).append(": ");
+        if (o.error != null) rep.append("не работает — ").append(o.error);
+        else if (isLiteRt(c[0])) rep.append(String.format(java.util.Locale.ROOT, "%.2f с", o.perPhotoMs / 1000.0));
+        else rep.append(String.format(java.util.Locale.ROOT, "%.2f с (%.2f + %.2f)", o.perPhotoMs / 1000.0,
+                    o.visionMs / 1000.0, o.textMs / 1000.0));
+    }
+
+    /** {screenshots, all} of the last {@link #screenshotShare()}. */
+    private final int[] shareCounts = new int[2];
+
+    /** Share of screenshots and scans among the photos to index (auto detail gives them more tokens), or -1. */
+    double screenshotShare() {
+        if (!AutoIndex.hasMediaAccess(ctx)) return -1;
+        try {
+            List<Media.Entry> all = Media.recentImages(ctx.getContentResolver(), photoLimit());
+            if (all.isEmpty()) return -1;
+            int n = 0;
+            for (Media.Entry e : all) if (e.textHeavy) n++;
+            shareCounts[0] = n;
+            shareCounts[1] = all.size();
+            return n / (double) all.size();
+        } catch (Exception e) {
+            return -1;
+        }
     }
 
     /** Marks a risky accelerator run (NPU driver, LiteRT-LM native code): a crash inside disables that variant. */
@@ -1537,9 +1588,10 @@ public final class Engine {
                         plan1.add(new int[]{a, auto, 1});
                     }
                     float[] reference = null;
-                    int[] best = null, offer = null;
-                    double bestMs = Double.MAX_VALUE, offerMs = Double.MAX_VALUE;
-                    float offerCos = 0;
+                    float[] bestEmb = null, lrtBestEmb = null;
+                    int[] best = null, offer = null, lrtBest = null;
+                    double bestMs = Double.MAX_VALUE, offerMs = Double.MAX_VALUE, lrtBestMs = Double.MAX_VALUE;
+                    float offerCos = 0, lrtBestCos = 0;
                     int step = 0;
                     for (int phase = 0; phase < 3; phase++) {
                         List<int[]> cands = new ArrayList<int[]>();
@@ -1583,8 +1635,15 @@ public final class Engine {
                             if (ok && m.perPhotoMs < bestMs) {
                                 bestMs = m.perPhotoMs;
                                 best = c;
+                                bestEmb = m.emb;
                             }
                             if (ownSpace) prefs.edit().putFloat("litert_cos_" + c[0], m.cos).apply();
+                            if (ownSpace && m.perPhotoMs < lrtBestMs) {
+                                lrtBestMs = m.perPhotoMs;
+                                lrtBest = c;
+                                lrtBestCos = m.cos;
+                                lrtBestEmb = m.emb;
+                            }
                             if (ownSpace && !ok && m.perPhotoMs < offerMs) {
                                 offerMs = m.perPhotoMs;
                                 offer = c;
@@ -1593,42 +1652,112 @@ public final class Engine {
                         }
                     }
                     if (best == null) throw new IllegalStateException("ни один вариант не сработал");
+                    // The other end of the detail scale. With auto detail screenshots get it: the winner and the
+                    // fastest LiteRT-LM variant are measured there too (after a pause — the phone is warm by now)
+                    // and the choice weighs both by the gallery's real share of screenshots.
+                    int other = budget == PHOTO_BUDGETS[0] ? PHOTO_BUDGETS[PHOTO_BUDGETS.length - 1] : PHOTO_BUDGETS[0];
+                    if (isNpu(best[0]) && other > maxBudget()) other = 0; // the NPU graph is compiled for maxBudget()
+                    boolean weigh = autoDetail() && other > budget;
+                    // the fastest LiteRT-LM variant (when not the winner) is measured there as well: its detail is verified
+                    int[] rival = lrtBest != null && !isLiteRt(best[0]) ? lrtBest : null;
+                    Measure bestOther = null, rivalOther = null;
+                    if (other > 0) {
+                        if (weigh) {
+                            status = "Даю телефону остыть перед замером скриншотов…";
+                            notifyChanged();
+                            Thread.sleep(20000);
+                        }
+                        bestOther = measureAt(cfg, tok, plan, best, other);
+                        // LiteRT-LM on screenshots, compared with the ONNX model at the same detail
+                        if (rival != null) {
+                            rivalOther = measureAt(cfg, tok, plan, rival, other,
+                                    bestOther.error == null ? bestOther.emb : null);
+                        }
+                    }
+                    double share = weigh ? screenshotShare() : 0;
+                    boolean shareKnown = share >= 0;
+                    if (!shareKnown) share = 0.25;
+                    double bestScore = bestMs, rivalScore = Double.MAX_VALUE;
+                    if (bestOther != null && bestOther.error == null && weigh) {
+                        bestScore = (1 - share) * bestMs + share * bestOther.perPhotoMs;
+                        if (rivalOther != null && rivalOther.error == null) {
+                            rivalScore = (1 - share) * lrtBestMs + share * rivalOther.perPhotoMs;
+                        }
+                    }
+                    int[] onnxWinner = best;
+                    boolean switched = false;
+                    // weighed: both measured on screenshots too — then only the average per snapshot decides
+                    boolean weighed = rivalScore < Double.MAX_VALUE;
+                    if (weighed) {
+                        offer = null;
+                        offerMs = Double.MAX_VALUE;
+                    }
+                    if (weighed && rivalScore < bestScore / 1.15) {
+                        if (lrtBestCos >= 0.98f) {
+                            // same vectors and faster on this gallery: LiteRT-LM becomes the accelerator
+                            best = rival;
+                            bestMs = lrtBestMs;
+                            switched = true;
+                        } else {
+                            offer = rival;
+                            offerMs = rivalScore;
+                            offerCos = lrtBestCos;
+                        }
+                    }
                     prefs.edit().putInt("accel", best[0]).putInt("threads", best[1] == auto ? 0 : best[1])
                             .putInt("batch", best[2]).putBoolean("accel_chosen", true).apply();
                     rep.append(String.format(java.util.Locale.ROOT, "\nВыбрано: %s, потоков %d%s — %.2f с на фото (%d токенов)",
                             ACCEL_NAMES[best[0]], best[1], best[2] > 1 ? ", пачка " + best[2] : "", bestMs / 1000.0, budget));
-                    if (offer != null && offerMs < bestMs / 1.15) {
+                    if (switched) {
+                        rep.append(String.format(java.util.Locale.ROOT, "\n(вместо %s: с учётом скриншотов в среднем %.2f с на "
+                                + "снимок против %.2f с)", ACCEL_NAMES[onnxWinner[0]], rivalScore / 1000.0, bestScore / 1000.0));
+                    }
+                    if (bestOther != null) {
+                        rep.append(weigh ? "\n\nСкриншоты и документы (" + other + " токенов, после паузы на остывание):"
+                                : other < budget ? "\n\nС детализацией «Авто» обычные фото (" + other + " токенов):"
+                                : "\n\nПри " + other + " токенах:");
+                        appendMeasure(rep, onnxWinner, bestOther);
+                        if (rivalOther != null) {
+                            appendMeasure(rep, rival, rivalOther);
+                            if (rivalOther.error == null && bestOther.error == null) {
+                                rep.append(String.format(java.util.Locale.ROOT, ", совпадение с ONNX на %d токенах %.3f", other, rivalOther.cos));
+                            }
+                        }
+                        // does LiteRT-LM really change detail? (a bundle without the signature falls back to its own)
+                        float[] lrtAtBudget = isLiteRt(onnxWinner[0]) ? bestEmb : rivalOther != null ? lrtBestEmb : null;
+                        Measure lrtAtOther = isLiteRt(onnxWinner[0]) ? bestOther : rivalOther;
+                        if (lrtAtBudget != null && lrtAtOther != null && lrtAtOther.error == null) {
+                            float same = 0;
+                            for (int j = 0; j < lrtAtBudget.length; j++) same += lrtAtBudget[j] * lrtAtOther.emb[j];
+                            rep.append(same >= 0.9995f
+                                    ? String.format(java.util.Locale.ROOT, "\n⚠ LiteRT-LM выдаёт одно и то же при %d и %d токенах — детализация "
+                                    + "в этой сборке не меняется", budget, other)
+                                    : String.format(java.util.Locale.ROOT, "\nLiteRT-LM: %d и %d токенов дают разные векторы (%.3f) — "
+                                    + "детализация применяется", budget, other, same));
+                        }
+                        if (liteRtBudgetFixed) {
+                            rep.append("\n⚠ Сборка LiteRT-LM не принимает " + maxBudget() + " токенов: работает со своей детализацией");
+                        }
+                        if (weigh && bestOther.error == null) {
+                            rep.append(shareKnown ? String.format(java.util.Locale.ROOT, "\nВ галерее скриншотов и документов %d%% "
+                                    + "(%d из %d)", Math.round(share * 100), shareCounts[0], shareCounts[1])
+                                    : "\nДоля скриншотов неизвестна (нет доступа к галерее), считаю 25%");
+                            rep.append(String.format(java.util.Locale.ROOT, ". В среднем на снимок: %s %.2f с", ACCEL_NAMES[onnxWinner[0]],
+                                    bestScore / 1000.0));
+                            if (rivalScore < Double.MAX_VALUE) {
+                                rep.append(String.format(java.util.Locale.ROOT, ", %s %.2f с", ACCEL_NAMES[rival[0]], rivalScore / 1000.0));
+                            }
+                        }
+                    }
+                    double vs = weighed ? bestScore : bestMs;
+                    if (offer != null && offerMs < vs / 1.15) {
                         prefs.edit().putInt("litert_offer", offer[0]).putInt("litert_offer_ms", (int) offerMs).apply();
-                        rep.append(String.format(java.util.Locale.ROOT, "\n\n%s быстрее в %.1f раза: %.2f с на фото, но его векторы "
-                                        + "немного отличаются от ONNX-версии (совпадение %.3f), и смешивать их в одном индексе нельзя. "
-                                        + "Перейти можно с переиндексацией всей галереи: «Перейти на LiteRT-LM» в настройках.",
-                                ACCEL_NAMES[offer[0]], bestMs / offerMs, offerMs / 1000.0, offerCos));
+                        rep.append(String.format(java.util.Locale.ROOT, "\n\n%s быстрее в %.1f раза (%.2f с на снимок против %.2f с), "
+                                        + "но его векторы немного отличаются от ONNX-версии (совпадение %.3f), и смешивать их в одном "
+                                        + "индексе нельзя. Перейти можно с переиндексацией всей галереи: «Перейти на LiteRT-LM» в настройках.",
+                                ACCEL_NAMES[offer[0]], vs / offerMs, offerMs / 1000.0, vs / 1000.0, offerCos));
                     } else {
                         prefs.edit().remove("litert_offer").apply();
-                    }
-                    // the same choice at the other end of the detail scale
-                    int other = budget == PHOTO_BUDGETS[0] ? PHOTO_BUDGETS[PHOTO_BUDGETS.length - 1] : PHOTO_BUDGETS[0];
-                    // the NPU graph is compiled for at most maxBudget() tokens
-                    if (isNpu(best[0]) && other > maxBudget()) other = 0;
-                    if (other > 0) {
-                        status = "Подбираю ускорение: детализация " + other;
-                        notifyChanged();
-                        mark("подбор ускорения: " + ACCEL_NAMES[best[0]] + ", детализация " + other);
-                        probe(best[0], true);
-                        Measure o = measure(cfg, tok, plan, best[0], best[1], best[2], other, null);
-                        probe(best[0], false);
-                        mark("");
-                        if (o.error != null) {
-                            rep.append("\nПри ").append(other).append(" токенах не работает — ").append(o.error);
-                        } else {
-                            String t = isLiteRt(best[0]) ? String.format(java.util.Locale.ROOT, "%.2f с", o.perPhotoMs / 1000.0)
-                                    : String.format(java.util.Locale.ROOT, "%.2f с (%.2f + %.2f)", o.perPhotoMs / 1000.0,
-                                    o.visionMs / 1000.0, o.textMs / 1000.0);
-                            if (autoDetail()) rep.append("\nСкриншоты и документы (").append(other).append(" токенов): ").append(t);
-                            else if (other < budget) rep.append("\nС детализацией «Авто» обычные фото шли бы за ").append(t)
-                                    .append(" (").append(other).append(" токенов), скриншоты — как сейчас");
-                            else rep.append("\nПри ").append(other).append(" токенах: ").append(t);
-                        }
                     }
                     // where the accelerator's graph actually runs
                     if (isGpu(best[0]) || isNpu(best[0])) {
@@ -1639,6 +1768,13 @@ public final class Engine {
                         rep.append("\n\n").append(profileVision(cfg, tok, plan, best, budget));
                         prefs.edit().remove("npu_probe").commit();
                         mark("");
+                    }
+                    try {
+                        // how the vision encoder computes attention (the cost that grows quadratically with detail)
+                        rep.append("\n\nУстройство визуального энкодера:\n")
+                                .append(OnnxPatcher.graphSummary(new File(modelDir, plan.visionModel)));
+                    } catch (Exception ex) {
+                        rep.append("\n\nУстройство визуального энкодера не прочитано: ").append(ex.getMessage());
                     }
                     if (!space && (!fp16 || !lrt)) {
                         rep.append("\n\n").append(!fp16 && !lrt ? "fp16-версия и LiteRT-LM не проверены"
