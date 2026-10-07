@@ -31,7 +31,7 @@ final class SettingsPanel extends FrameLayout implements Engine.Listener {
     // live parts
     private TextView modelValue, modelHint, indexValue, indexStatus, accelValue, photosValue, videosValue, detailValue,
             threadsValue, bridgeValue, dimsValue, photoModelValue, gemmaValue, sourceValue, sideValue;
-    private TextView modelButton, indexButton, errorButton, deleteButton, fp32Button;
+    private TextView modelButton, indexButton, errorButton, deleteButton, fp32Button, reportLink, compareButton;
     private ProgressLine modelProgress, indexProgress;
     private Toggle autoToggle, idleToggle, batteryToggle;
     private View batteryRow;
@@ -79,7 +79,7 @@ final class SettingsPanel extends FrameLayout implements Engine.Listener {
         buildSpeed();
         buildSearch();
         buildLook();
-        TextView about = Ui.text(c, "SigLIP 2 и EmbeddingGemma 2 (Google, Apache 2.0) · версия " + BuildInfo.version(c)
+        TextView about = Ui.text(c, "EmbeddingGemma 2 (Google DeepMind, Apache 2.0) · версия " + BuildInfo.version(c)
                 + "\nВсё считается на телефоне, файлы никуда не отправляются.", 12, Ui.TEXT3, Ui.REGULAR);
         about.setPadding(Ui.dp(c, 6), Ui.dp(c, 18), Ui.dp(c, 6), 0);
         list.addView(about);
@@ -87,6 +87,11 @@ final class SettingsPanel extends FrameLayout implements Engine.Listener {
     }
 
     // ------------------------------------------------------------------ building blocks
+
+    /** "NPU (NNAPI, fp32)" → "NPU, fp32", "Видеокарта (WebGPU)" → "Видеокарта". */
+    private static String shortAccel(String name) {
+        return name.replace(" (NNAPI, fp32)", ", fp32").replace(" (NNAPI)", "").replace(" (WebGPU)", "");
+    }
 
     private static View rowOf(TextView value) {
         return (View) value.getParent();
@@ -477,6 +482,8 @@ final class SettingsPanel extends FrameLayout implements Engine.Listener {
                             @Override
                             public void chosen(int i) {
                                 e.prefs().edit().putInt("photo_detail", i).apply();
+                                // the NPU graph is compiled for one budget
+                                if (Engine.isNpu(e.loadedAccel) && e.ready() && !e.indexing) e.loadModel();
                                 onEngineChanged();
                             }
                         });
@@ -515,8 +522,16 @@ final class SettingsPanel extends FrameLayout implements Engine.Listener {
                     @Override
                     public void chosen(int i) {
                         if (i == e.accel()) return;
-                        if (i >= Engine.ACCEL_GPU && e.gpuBroken()) {
+                        if (Engine.isGpu(i) && e.gpuBroken()) {
                             a.toast("Видеокарта на этом телефоне уже приводила к сбою — оставляю процессор");
+                            return;
+                        }
+                        if (Engine.isNpu(i) && e.npuBroken(i)) {
+                            a.toast("Этот вариант NPU уже приводил к сбою — оставляю процессор");
+                            return;
+                        }
+                        if (Engine.isNpu(i) && e.gemmaNeedsFp32()) {
+                            a.toast("Сначала «Проверить NPU»: нужна полная версия визуального энкодера");
                             return;
                         }
                         e.prefs().edit().putInt("accel", i).apply();
@@ -526,23 +541,34 @@ final class SettingsPanel extends FrameLayout implements Engine.Listener {
                 });
             }
         });
-        fp32Button = action(card, "Проверить NPU и видеокарту", false, new Runnable() {
+        fp32Button = action(card, "Проверить NPU", false, new Runnable() {
             @Override
             public void run() {
-                Sheet.confirm(root(), "Проверить NPU и видеокарту?", String.format(Locale.ROOT, "Им нужна полная версия модели — "
-                        + "докачаю ≈%d МБ, потом сравню скорость и точность всех вариантов и оставлю лучший.",
-                        e.fp32EstimateBytes() >> 20), "Докачать и проверить", new Runnable() {
-                    @Override
-                    public void run() {
-                        e.downloadFast(true);
-                    }
-                });
+                final boolean gemma = e.photoModel() == FastModel.GEMMA;
+                long mb = (gemma ? e.gemmaFp32EstimateBytes() : e.fp32EstimateBytes()) >> 20;
+                Sheet.confirm(root(), "Проверить NPU?", String.format(Locale.ROOT, "NPU работает с полной версией "
+                        + "визуальной части модели — докачаю ≈%d МБ. Потом сравню скорость и точность всех вариантов "
+                        + "(процессор, видеокарта, NPU) и оставлю самый быстрый из точных.", mb), "Докачать и проверить",
+                        new Runnable() {
+                            @Override
+                            public void run() {
+                                if (gemma) e.downloadGemmaFp32();
+                                else e.downloadFast(true);
+                            }
+                        });
             }
         });
         action(card, "Подобрать самое быстрое", false, new Runnable() {
             @Override
             public void run() {
                 a.runBenchmark();
+            }
+        });
+        reportLink = quiet(card, "Отчёт последнего подбора", Ui.ACCENT, new Runnable() {
+            @Override
+            public void run() {
+                String r = e.photoModel() == FastModel.GEMMA ? e.gemmaReport() : e.fastReport();
+                Sheet.message(root(), "Скорость на этом телефоне", r != null ? r : "Подбора ещё не было.", null, null);
             }
         });
         threadsValue = row(card, "Потоки процессора", null, new Runnable() {
@@ -603,7 +629,7 @@ final class SettingsPanel extends FrameLayout implements Engine.Listener {
                 a.runDiagnostics();
             }
         });
-        action(card, "Сравнить модели на моих фото", false, new Runnable() {
+        compareButton = action(card, "Сравнить модели на моих фото", false, new Runnable() {
             @Override
             public void run() {
                 a.openCompare();
@@ -663,10 +689,16 @@ final class SettingsPanel extends FrameLayout implements Engine.Listener {
         errorButton.setVisibility(st == Engine.State.ERROR && e.errorDetails != null ? VISIBLE : GONE);
         deleteButton.setVisibility(e.hasModelFiles() && !busy ? VISIBLE : GONE);
         photoModelValue.setText(FastModel.NAMES[e.photoModel()]);
+        // EmbeddingGemma 2 is the photo model; the SigLIP option stays hidden unless it is in use
+        rowOf(photoModelValue).setVisibility(fast ? VISIBLE : GONE);
+        compareButton.setVisibility(fast ? VISIBLE : GONE);
+        String report = fast ? e.fastReport() : e.gemmaReport();
+        reportLink.setVisibility(report != null ? VISIBLE : GONE);
         rowOf(gemmaValue).setVisibility(fast ? VISIBLE : GONE);
         gemmaValue.setText(e.gemmaDownloaded() ? "скачана" : "не скачана");
         rowOf(sourceValue).setVisibility(!fast || e.gemmaDownloaded() ? VISIBLE : GONE);
-        fp32Button.setVisibility(fast && e.fastNeedsFp32() && !busy && FastModel.acceleratorLikely() ? VISIBLE : GONE);
+        fp32Button.setVisibility((fast ? e.fastNeedsFp32() : e.gemmaNeedsFp32()) && !busy && FastModel.acceleratorLikely()
+                ? VISIBLE : GONE);
         rowOf(detailValue).setVisibility(fast ? GONE : VISIBLE);
         rowOf(threadsValue).setVisibility(fast ? GONE : VISIBLE);
         rowOf(dimsValue).setVisibility(fast ? GONE : VISIBLE);
@@ -696,8 +728,7 @@ final class SettingsPanel extends FrameLayout implements Engine.Listener {
         int vl = e.prefs().getInt("video_limit", 1);
         videosValue.setText(vl == 0 ? "нет" : Engine.VIDEO_LIMITS[vl] + " последних");
         detailValue.setText(new String[]{"быстрая", "средняя", "максимальная"}[Math.max(0, Math.min(2, e.prefs().getInt("photo_detail", 0)))]);
-        accelValue.setText(fast ? (e.accelLabel.isEmpty() ? "проверяю…" : e.accelLabel.replace(" (WebGPU)", "").replace(" (NNAPI)", ""))
-                : Engine.ACCEL_NAMES[e.accel()].replace(" (WebGPU)", ""));
+        accelValue.setText(shortAccel(fast ? (e.accelLabel.isEmpty() ? "проверяю…" : e.accelLabel) : Engine.ACCEL_NAMES[e.accel()]));
         int t = e.prefs().getInt("threads", 0);
         threadsValue.setText(t == 0 ? "авто" : String.valueOf(t));
         bridgeValue.setText(new String[]{"русский + перевод", "только перевод", "без перевода"}[e.bridgeMode()]);

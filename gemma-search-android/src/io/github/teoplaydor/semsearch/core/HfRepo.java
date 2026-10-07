@@ -148,6 +148,29 @@ public final class HfRepo {
 
     /** Chooses config/tokenizer files and the best available quantisation of each ONNX component. */
     public static Plan plan(List<RemoteFile> files, boolean withVision) throws IOException {
+        return plan(files, withVision, false);
+    }
+
+    /**
+     * @param fp32Vision also the full-precision vision encoder (onnx/vision_encoder.onnx + its data):
+     *                   NNAPI (the NPU) runs fp32 graphs only, not the 4-bit one
+     */
+    public static Plan plan(List<RemoteFile> files, boolean withVision, boolean fp32Vision) throws IOException {
+        Plan p = planDefault(files, withVision);
+        if (withVision && fp32Vision) {
+            String full = "onnx/vision_encoder.onnx";
+            if (find(files, full) == null) throw new IOException("В репозитории нет полной версии " + full);
+            if (!full.equals(p.visionModel)) {
+                pickComponent(files, "vision_encoder", p, new String[]{""});
+                p.totalBytes = 0;
+                for (RemoteFile f : p.files) p.totalBytes += Math.max(0, f.size);
+            }
+            p.accelVision = full;
+        }
+        return p;
+    }
+
+    private static Plan planDefault(List<RemoteFile> files, boolean withVision) throws IOException {
         Plan p = new Plan();
         for (RemoteFile f : files) {
             String n = f.path;

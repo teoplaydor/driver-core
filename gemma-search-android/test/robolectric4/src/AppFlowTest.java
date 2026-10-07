@@ -167,6 +167,11 @@ public class AppFlowTest {
         assertFalse(s.hasMedia(IndexStore.KIND_PHOTO, 42));
         assertEquals(3, s.count(IndexStore.KIND_NOTE));
 
+        // The NPU needs the full-precision vision encoder: without it the choice falls back to the CPU.
+        e.prefs().edit().putInt("accel", Engine.ACCEL_NPU).apply();
+        assertEquals(Engine.ACCEL_CPU, e.accel());
+        e.prefs().edit().putInt("accel", Engine.ACCEL_CPU).apply();
+
         // Regression (0.6.0): the automatic first accelerator check of the fast model runs without a
         // callback, and posting its report crashed the app right after the model loaded. Whatever happens
         // inside (here ONNX Runtime can't even start), it must end quietly with a report and an error state.

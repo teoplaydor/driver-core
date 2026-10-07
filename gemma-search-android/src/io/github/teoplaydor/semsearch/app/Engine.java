@@ -118,7 +118,7 @@ public final class Engine {
         manifest = new File(modelDir, "manifest.json");
         if (!prefs.contains("photo_model")) {
             // Existing installs keep EmbeddingGemma 2 for photos; new ones start with the fast model.
-            prefs.edit().putInt("photo_model", manifest.exists() ? FastModel.GEMMA : FastModel.B16).apply();
+            prefs.edit().putInt("photo_model", FastModel.GEMMA).apply();
         }
         CrashLog.install(ctx.getApplicationContext());
         String died = prefs.getString("last_step", "");
@@ -131,6 +131,15 @@ public final class Engine {
         if (checkProbe != null) {
             // It died measuring this accelerator + batch: the auto-check skips it from now on.
             prefs.edit().putBoolean("s_broken_" + checkProbe, true).remove("s_probe_check").apply();
+        }
+        String npuProbe = prefs.getString("npu_probe", null);
+        if (npuProbe != null) {
+            // It died starting EmbeddingGemma's vision encoder on the NPU (driver crash): not again.
+            prefs.edit().putBoolean("npu_broken_" + npuProbe, true).remove("npu_probe").putInt("accel", 0).apply();
+        }
+        if (!prefs.getBoolean("migrated_070", false)) {
+            // 0.7: EmbeddingGemma 2 is the photo model again (SigLIP 2 did not hold up on real photos).
+            prefs.edit().putInt("photo_model", FastModel.GEMMA).putBoolean("migrated_070", true).apply();
         }
         String probe = prefs.getString("s_probe", null);
         if (probe != null) {
@@ -264,7 +273,7 @@ public final class Engine {
 
     /** Which model embeds photos and videos: {@link FastModel#GEMMA}, {@link FastModel#B16} or {@link FastModel#B32}. */
     public int photoModel() {
-        return Math.max(0, Math.min(FastModel.NAMES.length - 1, prefs.getInt("photo_model", FastModel.B16)));
+        return Math.max(0, Math.min(FastModel.NAMES.length - 1, prefs.getInt("photo_model", FastModel.GEMMA)));
     }
 
     public boolean gemmaDownloaded() { return manifest.exists(); }
@@ -321,6 +330,20 @@ public final class Engine {
     }
 
     public void download(final String repo, final String token, final boolean vision) {
+        download(repo, token, vision, false);
+    }
+
+    /** Downloads EmbeddingGemma's full-precision vision encoder for the NPU, then checks every accelerator. */
+    public void downloadGemmaFp32() {
+        prefs.edit().putBoolean("npu_check_pending", true).apply();
+        download(repo(), prefs.getString("token", ""), true, true);
+    }
+
+    public String gemmaReport() {
+        return prefs.getString("g_report", null);
+    }
+
+    private void download(final String repo, final String token, final boolean vision, final boolean fp32) {
         if (state == State.DOWNLOADING || state == State.LOADING) return;
         prefs.edit().putString("repo", repo).putString("token", token).putBoolean("vision", vision).apply();
         cancelDownload = false;
@@ -334,7 +357,7 @@ public final class Engine {
             public void run() {
                 try {
                     HfRepo r = new HfRepo(repo, token);
-                    HfRepo.Plan plan = HfRepo.plan(r.listFiles(), vision);
+                    HfRepo.Plan plan = HfRepo.plan(r.listFiles(), vision, fp32 || gemmaFp32Vision() != null);
                     dlTotal = plan.totalBytes;
                     if (!modelDir.exists() && !modelDir.mkdirs()) throw new Exception("нет доступа к памяти");
                     r.download(plan, modelDir, new HfRepo.Progress() {
@@ -401,9 +424,17 @@ public final class Engine {
                             return;
                         }
                         step = "инициализация";
+                        mark("загрузка EmbeddingGemma 2 (" + ACCEL_NAMES[accel()] + ")");
                         model = loadGemma(plan, true);
                         photo = model;
                         mediaSig = notesSig = gemmaSig(plan);
+                        if (isNpu(loadedAccel)) {
+                            // the NPU compiles the graph on its first run: a driver crash there must not loop
+                            step = "первый запуск на NPU";
+                            prefs.edit().putString("npu_probe", String.valueOf(loadedAccel)).commit();
+                            photo.embedImage(new PatternSource(640, 480, 1), photoBudget());
+                            prefs.edit().remove("npu_probe").commit();
+                        }
                     } else {
                         HfRepo.Plan plan = FastModel.plan(ctx, pm);
                         if (plan == null || !HfRepo.isComplete(plan, FastModel.dir(ctx, pm))) {
@@ -470,6 +501,17 @@ public final class Engine {
                 }
                 notifyChanged();
                 if (autoCheck) checkFast(null); // first start of a fast model: find its best accelerator once
+                if (state == State.READY && full && photoModel() == FastModel.GEMMA
+                        && prefs.getBoolean("npu_check_pending", false) && gemmaFp32Vision() != null) {
+                    prefs.edit().putBoolean("npu_check_pending", false).apply();
+                    benchmark(new Callback<String>() {
+                        @Override
+                        public void done(String report, Exception e) {
+                            prefs.edit().putBoolean("g_report_unseen", true).apply();
+                            notifyChanged();
+                        }
+                    });
+                }
             }
         });
     }
@@ -886,14 +928,53 @@ public final class Engine {
 
     // ------------------------------------------------------------------ acceleration
 
-    public static final int ACCEL_CPU = 0, ACCEL_CPU_INT8 = 1, ACCEL_GPU = 2, ACCEL_GPU_INT8 = 3;
+    public static final int ACCEL_CPU = 0, ACCEL_CPU_INT8 = 1, ACCEL_GPU = 2, ACCEL_GPU_INT8 = 3, ACCEL_NPU = 4,
+            ACCEL_NPU_FP32 = 5;
+    /** For the NPU variants the vision encoder (most of the work per photo) runs there, the text model on the CPU in int8. */
     public static final String[] ACCEL_NAMES = {"Процессор", "Процессор, int8", "Видеокарта (WebGPU)",
-            "Видеокарта (WebGPU), int8"};
+            "Видеокарта (WebGPU), int8", "NPU (NNAPI)", "NPU (NNAPI, fp32)"};
+
+    public static boolean isGpu(int a) {
+        return a == ACCEL_GPU || a == ACCEL_GPU_INT8;
+    }
+
+    public static boolean isNpu(int a) {
+        return a == ACCEL_NPU || a == ACCEL_NPU_FP32;
+    }
 
     public int accel() {
-        int a = prefs.getInt("accel", ACCEL_CPU);
-        if (a >= ACCEL_GPU && prefs.getBoolean("gpu_broken", false)) a = ACCEL_CPU;
-        return Math.max(0, Math.min(ACCEL_NAMES.length - 1, a));
+        int a = Math.max(0, Math.min(ACCEL_NAMES.length - 1, prefs.getInt("accel", ACCEL_CPU)));
+        if (isGpu(a) && prefs.getBoolean("gpu_broken", false)) a = ACCEL_CPU;
+        if (isNpu(a) && (npuBroken(a) || gemmaFp32Vision() == null)) a = ACCEL_CPU;
+        return a;
+    }
+
+    public boolean npuBroken(int a) {
+        return prefs.getBoolean("npu_broken_" + a, false);
+    }
+
+    /** EmbeddingGemma's full-precision vision encoder (needed by the NPU), when downloaded. */
+    File gemmaFp32Vision() {
+        HfRepo.Plan p = gemmaPlan();
+        if (p == null || p.accelVision == null) return null;
+        File f = new File(modelDir, p.accelVision);
+        return f.exists() ? f : null;
+    }
+
+    /** EmbeddingGemma serves photos and its NPU graph is not on the phone yet. */
+    public boolean gemmaNeedsFp32() {
+        if (photoModel() != FastModel.GEMMA) return false;
+        HfRepo.Plan p = gemmaPlan();
+        return p != null && p.visionModel != null && gemmaFp32Vision() == null;
+    }
+
+    /** About 7× the 4-bit vision encoder (fp32 weights). */
+    public long gemmaFp32EstimateBytes() {
+        HfRepo.Plan p = gemmaPlan();
+        if (p == null || p.visionModel == null) return 0;
+        long q4 = 0;
+        for (HfRepo.RemoteFile f : p.files) if (f.path.startsWith(p.visionModel)) q4 += Math.max(0, f.size);
+        return 7 * q4;
     }
 
     public boolean gpuBroken() { return prefs.getBoolean("gpu_broken", false); }
@@ -917,9 +998,28 @@ public final class Engine {
 
     private EmbeddingGemma2 createModel(ModelConfig cfg, HfTokenizer tok, HfRepo.Plan plan, int accel, int nThreads)
             throws Exception {
-        boolean int8 = accel == ACCEL_CPU_INT8 || accel == ACCEL_GPU_INT8;
-        boolean gpu = accel >= ACCEL_GPU;
+        return createModel(cfg, tok, plan, accel, nThreads, batchSize());
+    }
+
+    private EmbeddingGemma2 createModel(ModelConfig cfg, HfTokenizer tok, HfRepo.Plan plan, int accel, int nThreads,
+                                        int batch) throws Exception {
+        boolean npu = isNpu(accel) && plan.visionModel != null;
+        boolean int8 = accel == ACCEL_CPU_INT8 || accel == ACCEL_GPU_INT8 || isNpu(accel);
+        boolean gpu = isGpu(accel);
         File text = graphFile(plan.textModel, int8);
+        if (npu) {
+            File vision = plan.accelVision == null ? null : new File(modelDir, plan.accelVision);
+            if (vision == null || !vision.exists()) {
+                throw new java.io.IOException("для NPU нужна полная версия визуального энкодера — «Проверить NPU» в настройках");
+            }
+            prefs.edit().putString("npu_probe", String.valueOf(accel)).commit();
+            try {
+                return new EmbeddingGemma2(cfg, tok, text, vision, nThreads, accel == ACCEL_NPU
+                        ? EmbeddingGemma2.VisionAccel.NPU : EmbeddingGemma2.VisionAccel.NPU_FP32, batch, photoBudget());
+            } finally {
+                prefs.edit().remove("npu_probe").commit();
+            }
+        }
         File vision = plan.visionModel == null ? null : graphFile(plan.visionModel, int8);
         if (gpu) prefs.edit().putBoolean("gpu_probe", true).commit();
         try {
@@ -942,7 +1042,7 @@ public final class Engine {
         Measure r = new Measure();
         EmbeddingGemma2 m = null;
         try {
-            m = createModel(cfg, tok, plan, accel, nThreads);
+            m = createModel(cfg, tok, plan, accel, nThreads, batch);
             List<io.github.teoplaydor.semsearch.core.ImagePreprocessor.Source> imgs =
                     new ArrayList<io.github.teoplaydor.semsearch.core.ImagePreprocessor.Source>();
             for (int k = 0; k < batch; k++) imgs.add(new PatternSource(640, 480, 2 + k));
@@ -994,10 +1094,7 @@ public final class Engine {
             public void run() {
                 StringBuilder rep = new StringBuilder();
                 try {
-                    if (model != null) {
-                        model.close();
-                        model = null;
-                    }
+                    closeModels();
                     HfRepo.Plan plan = HfRepo.loadManifest(manifest);
                     if (plan == null || plan.visionModel == null) throw new IllegalStateException("нет визуального энкодера");
                     ModelConfig cfg = EmbeddingGemma2.loadConfig(modelDir);
@@ -1008,8 +1105,13 @@ public final class Engine {
                             .append(", быстрых ").append(auto).append("\n(картинка + текст на одно фото)\n\n");
 
                     List<int[]> plan1 = new ArrayList<int[]>(); // {accel, threads, batch}
+                    boolean fp32 = plan.accelVision != null && new File(modelDir, plan.accelVision).exists();
                     for (int a = 0; a < ACCEL_NAMES.length; a++) {
-                        if (a >= ACCEL_GPU && gpuBroken()) continue;
+                        if (isGpu(a) && gpuBroken()) continue;
+                        if (isNpu(a) && (!fp32 || npuBroken(a))) {
+                            if (fp32) rep.append("• ").append(ACCEL_NAMES[a]).append(": пропущено — в прошлый раз уронило драйвер\n");
+                            continue;
+                        }
                         plan1.add(new int[]{a, auto, 1});
                     }
                     float[] reference = null;
@@ -1035,7 +1137,11 @@ public final class Engine {
                             String name = ACCEL_NAMES[c[0]] + ", потоков " + c[1] + (c[2] > 1 ? ", пачка " + c[2] : "");
                             status = "Подбираю ускорение (" + step + "): " + name;
                             notifyChanged();
+                            mark("подбор ускорения: " + name);
+                            if (isNpu(c[0])) prefs.edit().putString("npu_probe", String.valueOf(c[0])).commit();
                             Measure m = measure(cfg, tok, plan, c[0], c[1], c[2], budget, reference);
+                            prefs.edit().remove("npu_probe").commit();
+                            mark("");
                             if (m.error != null) {
                                 rep.append("• ").append(name).append(": не работает — ").append(m.error).append('\n');
                                 continue;
@@ -1057,11 +1163,18 @@ public final class Engine {
                             .putInt("batch", best[2]).putBoolean("accel_chosen", true).apply();
                     rep.append(String.format(java.util.Locale.ROOT, "\nВыбрано: %s, потоков %d%s — %.2f с на фото",
                             ACCEL_NAMES[best[0]], best[1], best[2] > 1 ? ", пачка " + best[2] : "", bestMs / 1000.0));
+                    if (!fp32 && FastModel.acceleratorLikely()) {
+                        rep.append(String.format(java.util.Locale.ROOT, "\n\nNPU не проверен: ему нужна полная версия визуального "
+                                + "энкодера (≈%d МБ) — кнопка «Проверить NPU» в настройках.", gemmaFp32EstimateBytes() >> 20));
+                    }
+                    prefs.edit().putString("g_report", rep.toString()).apply();
                     post(cb, rep.toString(), null);
                 } catch (Throwable e) {
                     rep.append("\nОшибка: ").append(e.getMessage() != null ? e.getMessage() : e.toString());
+                    prefs.edit().putString("g_report", rep.toString()).apply();
                     post(cb, rep.toString(), null);
                 }
+                mark("");
                 loadModel();
             }
         });

@@ -769,6 +769,12 @@ public final class MainActivity extends Activity implements Engine.Listener, Vie
 
     @Override
     public void onEngineChanged() {
+        if (engine.prefs().getBoolean("g_report_unseen", false) && !isFinishing()) {
+            // the automatic check after "Check the NPU" finished: show what it found, once
+            engine.prefs().edit().putBoolean("g_report_unseen", false).apply();
+            String r = engine.gemmaReport();
+            if (r != null) sheet = Sheet.message(root, "Скорость на этом телефоне", r, null, null);
+        }
         Engine.State st = engine.state;
         boolean dl = st == Engine.State.DOWNLOADING, loading = st == Engine.State.LOADING;
         // status line: only while something is running

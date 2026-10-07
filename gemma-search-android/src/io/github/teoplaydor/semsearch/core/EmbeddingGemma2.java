@@ -38,6 +38,8 @@ public final class EmbeddingGemma2 implements Embedder {
     private final OrtSession visionSession;
     private final HfTokenizer tokenizer;
     private final ModelConfig cfg;
+    /** With an NPU (NNAPI) the vision graph runs with fixed shapes: this many images of this many patches. */
+    private int fixedBatch, fixedPatches;
     private int embeddingDim = -1;
     private volatile long lastVisionMs, lastTextMs;
 
@@ -51,6 +53,25 @@ public final class EmbeddingGemma2 implements Embedder {
      */
     public EmbeddingGemma2(ModelConfig config, HfTokenizer tok, File textModel, File visionModel, int threads,
                            boolean gpuVision) throws IOException, OrtException {
+        this(config, tok, textModel, visionModel, threads, gpuVision ? VisionAccel.GPU : VisionAccel.CPU, 0, 0);
+    }
+
+    /** Where the vision encoder runs; the text model always stays on the CPU. */
+    public enum VisionAccel {
+        CPU, GPU,
+        /** NNAPI with fp16 arithmetic allowed (NPUs are fastest in fp16); needs the fp32 graph. */
+        NPU,
+        /** NNAPI in strict fp32. */
+        NPU_FP32
+    }
+
+    /**
+     * @param batch   images per vision run for an NPU (it needs static shapes); ignored otherwise
+     * @param budget  largest soft-token budget the NPU graph must take (photos and video frames are
+     *                padded up to {@code budget × pool²} patches; padding is masked out by the model)
+     */
+    public EmbeddingGemma2(ModelConfig config, HfTokenizer tok, File textModel, File visionModel, int threads,
+                           VisionAccel accel, int batch, int budget) throws IOException, OrtException {
         cfg = config;
         tokenizer = tok;
         resolveSpecialTokens();
@@ -60,14 +81,48 @@ public final class EmbeddingGemma2 implements Embedder {
         } catch (OrtException e) {
             throw new IOException("текстовая модель " + textModel.getName() + ": " + e.getMessage(), e);
         }
+        boolean npu = accel == VisionAccel.NPU || accel == VisionAccel.NPU_FP32;
+        if (npu) {
+            fixedBatch = Math.max(1, batch);
+            fixedPatches = Math.max(budget(cfg.image, budget).maxPatches(), cfg.video != null ? cfg.video.maxPatches() : 0);
+        }
         try {
-            visionSession = visionModel != null && visionModel.exists()
-                    ? env.createSession(visionModel.getPath(), options(threads, gpuVision)) : null;
+            OrtSession.SessionOptions o = npu ? npuOptions(visionModel, threads, accel == VisionAccel.NPU, fixedBatch, fixedPatches)
+                    : options(threads, accel == VisionAccel.GPU);
+            visionSession = visionModel != null && visionModel.exists() ? env.createSession(visionModel.getPath(), o) : null;
         } catch (OrtException e) {
             textSession.close();
-            throw new IOException("визуальный энкодер " + visionModel.getName() + (gpuVision ? " (GPU)" : "")
-                    + ": " + e.getMessage(), e);
+            throw new IOException("визуальный энкодер " + visionModel.getName() + " (" + accel + "): " + e.getMessage(), e);
         }
+    }
+
+    /**
+     * NNAPI options for the vision encoder: basic graph optimisations only (ORT's fused kernels are not
+     * NNAPI ops and would split the graph) and every symbolic input dimension fixed — batch to
+     * {@code batch}, patches to {@code patches} — because NNAPI compiles static shapes only.
+     */
+    static OrtSession.SessionOptions npuOptions(File graph, int threads, boolean fp16, int batch, int patches)
+            throws OrtException, IOException {
+        OrtSession.SessionOptions o = new OrtSession.SessionOptions();
+        o.setOptimizationLevel(OrtSession.SessionOptions.OptLevel.BASIC_OPT);
+        if (threads > 0) o.setIntraOpNumThreads(threads);
+        for (java.util.List<String> dims : OnnxPatcher.inputDims(graph).values()) {
+            for (int i = 0; i < dims.size() && i < 2; i++) {
+                String d = dims.get(i);
+                if (d.isEmpty() || Character.isDigit(d.charAt(0)) || "?".equals(d)) continue;
+                o.setSymbolicDimensionValue(d, i == 0 ? batch : patches);
+            }
+        }
+        o.addNnapi(fp16 ? java.util.EnumSet.of(ai.onnxruntime.providers.NNAPIFlags.USE_FP16,
+                ai.onnxruntime.providers.NNAPIFlags.CPU_DISABLED)
+                : java.util.EnumSet.of(ai.onnxruntime.providers.NNAPIFlags.CPU_DISABLED));
+        return o;
+    }
+
+    /** Test hook: the NPU's static-shape path (padding, fixed runs) on whatever provider is loaded. */
+    public void staticShapesForTest(int batch, int budget) {
+        fixedBatch = batch;
+        fixedPatches = Math.max(budget(cfg.image, budget).maxPatches(), cfg.video != null ? cfg.video.maxPatches() : 0);
     }
 
     public static ModelConfig loadConfig(File dir) throws IOException {
@@ -233,6 +288,53 @@ public final class EmbeddingGemma2 implements Embedder {
 
     /** Runs the vision encoder on a batch (same token budget) and returns all soft tokens in order. */
     private float[] encodeVisionBatch(List<ImagePreprocessor.Patches> ps) throws OrtException {
+        if (fixedBatch > 0) return encodeFixed(ps);
+        return encodeVisionRun(ps);
+    }
+
+    /**
+     * Static shapes for the NPU: every image padded to {@code fixedPatches} patches (zeros at position -1,
+     * exactly what the processor does for an image smaller than its budget), runs of {@code fixedBatch}
+     * images (a short last run is filled with copies whose soft tokens come last and are dropped).
+     */
+    private float[] encodeFixed(List<ImagePreprocessor.Patches> ps) throws OrtException {
+        List<ImagePreprocessor.Patches> padded = new ArrayList<ImagePreprocessor.Patches>();
+        int total = 0;
+        for (ImagePreprocessor.Patches p : ps) {
+            padded.add(pad(p, fixedPatches));
+            total += p.numSoftTokens;
+        }
+        float[] out = new float[total * cfg.hiddenSize];
+        int off = 0;
+        for (int start = 0; start < padded.size(); start += fixedBatch) {
+            int count = Math.min(fixedBatch, padded.size() - start);
+            List<ImagePreprocessor.Patches> run = new ArrayList<ImagePreprocessor.Patches>(padded.subList(start, start + count));
+            while (run.size() < fixedBatch) run.add(run.get(run.size() - 1));
+            int want = 0;
+            for (int i = 0; i < count; i++) want += run.get(i).numSoftTokens;
+            float[] f = encodeVisionRun(run);
+            System.arraycopy(f, 0, out, off, want * cfg.hiddenSize);
+            off += want * cfg.hiddenSize;
+        }
+        return out;
+    }
+
+    static ImagePreprocessor.Patches pad(ImagePreprocessor.Patches p, int patches) {
+        if (p.maxPatches == patches) return p;
+        if (p.maxPatches > patches) throw new IllegalStateException("budget larger than the NPU graph: " + p.maxPatches);
+        ImagePreprocessor.Patches q = new ImagePreprocessor.Patches();
+        q.maxPatches = patches;
+        q.patchDim = p.patchDim;
+        q.numSoftTokens = p.numSoftTokens;
+        q.pixelValues = new float[patches * p.patchDim];
+        System.arraycopy(p.pixelValues, 0, q.pixelValues, 0, p.pixelValues.length);
+        q.positionIds = new long[patches * 2];
+        java.util.Arrays.fill(q.positionIds, -1L);
+        System.arraycopy(p.positionIds, 0, q.positionIds, 0, p.positionIds.length);
+        return q;
+    }
+
+    private float[] encodeVisionRun(List<ImagePreprocessor.Patches> ps) throws OrtException {
         int b = ps.size();
         int maxPatches = ps.get(0).maxPatches, patchDim = ps.get(0).patchDim;
         float[] pixels;
@@ -271,7 +373,7 @@ public final class EmbeddingGemma2 implements Embedder {
                 long[] shape = t.getInfo().getShape();
                 float[] data = toFloats(t);
                 long rows = data.length / cfg.hiddenSize;
-                if (rows != expected) {
+                if (rows != expected && !(fixedBatch > 0 && rows >= expected)) {
                     throw new IllegalStateException("vision encoder returned " + java.util.Arrays.toString(shape)
                             + " for " + expected + " soft tokens");
                 }

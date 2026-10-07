@@ -65,6 +65,8 @@ java -cp "$T/cls:$T/ort-desktop.jar" AccuracyLevelTest "$T/accel"
 python3 test/accel/quantize_dummy.py "$T/models/dummy" >/dev/null 2>&1
 java -cp "$T/cls:build/deps/ort-classes:$T/ort-desktop.jar" AccelPipelineTest "$T/models/dummy"
 java -cp "$T/cls:build/deps/ort-classes:$T/ort-desktop.jar" BatchParityTest "$T/models/dummy"
+javac --release 8 -XDstringConcat=inline -nowarn -encoding UTF-8 -cp "$T/cls:$T/ort-desktop.jar" -d "$T/cls" test/accel/NpuShapesTest.java
+java -cp "$T/cls:build/deps/ort-classes:$T/ort-desktop.jar" NpuShapesTest "$T/models/dummy"
 
 echo "== 3. Hub download"
 python3 tools/mock_hub.py 18765 & HUB=$!

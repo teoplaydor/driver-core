@@ -44,6 +44,150 @@ public final class OnnxPatcher {
         return count[0];
     }
 
+    /**
+     * Names of the graph inputs and, per dimension, its symbolic name (dim_param) or fixed size. Streams
+     * the file (ModelProto.graph (7) → GraphProto.input (11) → ValueInfoProto name (1) / type (2) →
+     * TypeProto.tensor_type (1) → shape (2) → dim (1): dim_value (1) | dim_param (2)) and skips everything
+     * else, so a graph with embedded weights is never loaded into memory.
+     */
+    public static java.util.Map<String, java.util.List<String>> inputDims(File f) throws IOException {
+        java.util.Map<String, java.util.List<String>> out = new java.util.LinkedHashMap<String, java.util.List<String>>();
+        java.io.DataInputStream in = new java.io.DataInputStream(new java.io.BufferedInputStream(new FileInputStream(f), 1 << 16));
+        try {
+            long[] pos = {0};
+            long end = f.length();
+            while (pos[0] < end) {
+                long key = varint(in, pos);
+                int field = (int) (key >>> 3), wire = (int) (key & 7);
+                if (field == 7 && wire == 2) {
+                    long graphEnd = pos[0] + varint(in, pos);
+                    while (pos[0] < graphEnd) {
+                        long k = varint(in, pos);
+                        int gf = (int) (k >>> 3), gw = (int) (k & 7);
+                        if (gf == 11 && gw == 2) {
+                            int len = (int) varint(in, pos);
+                            byte[] vi = new byte[len];
+                            in.readFully(vi);
+                            pos[0] += len;
+                            parseValueInfo(vi, out);
+                        } else {
+                            skipStream(in, gw, pos);
+                        }
+                    }
+                    break;
+                }
+                skipStream(in, wire, pos);
+            }
+        } finally {
+            in.close();
+        }
+        return out;
+    }
+
+    private static void parseValueInfo(byte[] b, java.util.Map<String, java.util.List<String>> out) throws IOException {
+        Reader r = new Reader(b, 0, b.length);
+        String name = null;
+        java.util.List<String> dims = new java.util.ArrayList<String>();
+        while (r.more()) {
+            long key = r.varint();
+            int field = (int) (key >>> 3), wire = (int) (key & 7);
+            if (field == 1 && wire == 2) {
+                int len = (int) r.varint();
+                name = new String(b, r.pos, len, UTF8);
+                r.pos += len;
+            } else if (field == 2 && wire == 2) {
+                int len = (int) r.varint();
+                int typeEnd = r.pos + len;
+                // TypeProto.tensor_type (1) → shape (2) → dim (1)
+                byte[] tensor = sub(b, r, typeEnd, 1);
+                r.pos = typeEnd;
+                if (tensor == null) continue;
+                Reader tr = new Reader(tensor, 0, tensor.length);
+                byte[] shape = sub(tensor, tr, tensor.length, 2);
+                if (shape == null) continue;
+                Reader sr = new Reader(shape, 0, shape.length);
+                while (sr.more()) {
+                    long k = sr.varint();
+                    int sf = (int) (k >>> 3), sw = (int) (k & 7);
+                    if (sf == 1 && sw == 2) {
+                        int dl = (int) sr.varint();
+                        Reader dr = new Reader(shape, sr.pos, sr.pos + dl);
+                        String d = "?";
+                        while (dr.more()) {
+                            long dk = dr.varint();
+                            int df = (int) (dk >>> 3), dw = (int) (dk & 7);
+                            if (df == 1 && dw == 0) {
+                                d = String.valueOf(dr.varint());
+                            } else if (df == 2 && dw == 2) {
+                                int pl = (int) dr.varint();
+                                d = new String(shape, dr.pos, pl, UTF8);
+                                dr.pos += pl;
+                            } else {
+                                dr.skip(dw);
+                            }
+                        }
+                        dims.add(d);
+                        sr.pos += dl;
+                    } else {
+                        sr.skip(sw);
+                    }
+                }
+            } else {
+                r.skip(wire);
+            }
+        }
+        if (name != null) out.put(name, dims);
+    }
+
+    /** The first length-delimited field {@code field} in [r.pos, end), or null. */
+    private static byte[] sub(byte[] b, Reader r, int end, int field) throws IOException {
+        Reader x = new Reader(b, r.pos, end);
+        while (x.more()) {
+            long key = x.varint();
+            int f = (int) (key >>> 3), w = (int) (key & 7);
+            if (f == field && w == 2) {
+                int len = (int) x.varint();
+                byte[] out = new byte[len];
+                System.arraycopy(b, x.pos, out, 0, len);
+                return out;
+            }
+            x.skip(w);
+        }
+        return null;
+    }
+
+    private static long varint(java.io.DataInputStream in, long[] pos) throws IOException {
+        long v = 0;
+        for (int shift = 0; shift < 64; shift += 7) {
+            int b = in.readUnsignedByte();
+            pos[0]++;
+            v |= (long) (b & 0x7f) << shift;
+            if ((b & 0x80) == 0) return v;
+        }
+        throw new IOException("bad varint");
+    }
+
+    private static void skipStream(java.io.DataInputStream in, int wire, long[] pos) throws IOException {
+        long n;
+        switch (wire) {
+            case 0: varint(in, pos); return;
+            case 1: n = 8; break;
+            case 2: n = varint(in, pos); break;
+            case 5: n = 4; break;
+            default: throw new IOException("unsupported wire type " + wire);
+        }
+        long left = n;
+        while (left > 0) {
+            long k = in.skip(left);
+            if (k <= 0) {
+                in.readByte();
+                k = 1;
+            }
+            left -= k;
+        }
+        pos[0] += n;
+    }
+
     // ---------------------------------------------------------------- message rewriting
 
     private static byte[] rewriteModel(byte[] b, int level, int[] count) throws IOException {
