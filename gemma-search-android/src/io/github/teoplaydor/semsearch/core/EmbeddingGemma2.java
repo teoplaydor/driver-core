@@ -151,20 +151,39 @@ public final class EmbeddingGemma2 implements Embedder {
      * @param maxSoftTokens token budget per image, or 0 for the processor default (280).
      */
     public float[] embedImage(ImagePreprocessor.Source image, int maxSoftTokens) throws OrtException {
+        return embedImages(java.util.Collections.singletonList(image), maxSoftTokens)[0];
+    }
+
+    /**
+     * Several photos at once: one vision-encoder run over the batch (better GPU utilisation),
+     * then the text model per photo. Same results as calling {@link #embedImage} one by one.
+     */
+    public float[][] embedImages(List<ImagePreprocessor.Source> images, int maxSoftTokens) throws OrtException {
         if (!supportsImages()) throw new IllegalStateException("vision encoder is not loaded");
         ModelConfig.ImageParams p = budget(cfg.image, maxSoftTokens);
-        ImagePreprocessor.Patches patches = ImagePreprocessor.process(image, p);
+        List<ImagePreprocessor.Patches> patches = new ArrayList<ImagePreprocessor.Patches>();
+        for (ImagePreprocessor.Source img : images) patches.add(ImagePreprocessor.process(img, p));
         long t0 = System.nanoTime();
-        float[] feats = encodeVision(patches);
+        float[] feats = encodeVisionBatch(patches);
         lastVisionMs = (System.nanoTime() - t0) / 1000000;
-        StringBuilder sb = new StringBuilder(cfg.boiToken == null ? "" : cfg.boiToken);
-        for (int i = 0; i < patches.numSoftTokens; i++) sb.append(cfg.imageToken);
-        if (cfg.eoiToken != null) sb.append(cfg.eoiToken);
-        int[] ids = tokenizer.encode(sb.toString());
-        long t1 = System.nanoTime();
-        float[] emb = runTextModel(ids, feats, patches.numSoftTokens, new float[0], 0);
-        lastTextMs = (System.nanoTime() - t1) / 1000000;
-        return emb;
+        float[][] out = new float[images.size()][];
+        long textNs = 0;
+        int off = 0;
+        for (int k = 0; k < patches.size(); k++) {
+            int n = patches.get(k).numSoftTokens;
+            float[] f = new float[n * cfg.hiddenSize];
+            System.arraycopy(feats, off, f, 0, f.length);
+            off += f.length;
+            StringBuilder sb = new StringBuilder(cfg.boiToken == null ? "" : cfg.boiToken);
+            for (int i = 0; i < n; i++) sb.append(cfg.imageToken);
+            if (cfg.eoiToken != null) sb.append(cfg.eoiToken);
+            int[] ids = tokenizer.encode(sb.toString());
+            long t1 = System.nanoTime();
+            out[k] = runTextModel(ids, f, n, new float[0], 0);
+            textNs += System.nanoTime() - t1;
+        }
+        lastTextMs = textNs / 1000000;
+        return out;
     }
 
     /** A video is a sequence of frames, each an image-like block of video soft tokens. */
@@ -209,13 +228,38 @@ public final class EmbeddingGemma2 implements Embedder {
     }
 
     private float[] encodeVision(ImagePreprocessor.Patches p) throws OrtException {
+        return encodeVisionBatch(java.util.Collections.singletonList(p));
+    }
+
+    /** Runs the vision encoder on a batch (same token budget) and returns all soft tokens in order. */
+    private float[] encodeVisionBatch(List<ImagePreprocessor.Patches> ps) throws OrtException {
+        int b = ps.size();
+        int maxPatches = ps.get(0).maxPatches, patchDim = ps.get(0).patchDim;
+        float[] pixels;
+        long[] positions;
+        int expected = 0;
+        if (b == 1) {
+            pixels = ps.get(0).pixelValues;
+            positions = ps.get(0).positionIds;
+            expected = ps.get(0).numSoftTokens;
+        } else {
+            pixels = new float[b * maxPatches * patchDim];
+            positions = new long[b * maxPatches * 2];
+            for (int k = 0; k < b; k++) {
+                ImagePreprocessor.Patches p = ps.get(k);
+                if (p.maxPatches != maxPatches) throw new IllegalArgumentException("mixed token budgets in a batch");
+                System.arraycopy(p.pixelValues, 0, pixels, k * maxPatches * patchDim, p.pixelValues.length);
+                System.arraycopy(p.positionIds, 0, positions, k * maxPatches * 2, p.positionIds.length);
+                expected += p.numSoftTokens;
+            }
+        }
         Map<String, OnnxTensor> in = new HashMap<String, OnnxTensor>();
         try {
             for (String name : visionSession.getInputNames()) {
                 if ("pixel_values".equals(name)) {
-                    in.put(name, floatTensor(visionSession, name, p.pixelValues, new long[]{1, p.maxPatches, p.patchDim}));
+                    in.put(name, floatTensor(visionSession, name, pixels, new long[]{b, maxPatches, patchDim}));
                 } else if ("pixel_position_ids".equals(name) || "image_position_ids".equals(name)) {
-                    in.put(name, OnnxTensor.createTensor(env, LongBuffer.wrap(p.positionIds), new long[]{1, p.maxPatches, 2}));
+                    in.put(name, OnnxTensor.createTensor(env, LongBuffer.wrap(positions), new long[]{b, maxPatches, 2}));
                 } else {
                     throw new IllegalStateException("unexpected vision encoder input: " + name);
                 }
@@ -227,9 +271,9 @@ public final class EmbeddingGemma2 implements Embedder {
                 long[] shape = t.getInfo().getShape();
                 float[] data = toFloats(t);
                 long rows = data.length / cfg.hiddenSize;
-                if (rows != p.numSoftTokens) {
+                if (rows != expected) {
                     throw new IllegalStateException("vision encoder returned " + java.util.Arrays.toString(shape)
-                            + " for " + p.numSoftTokens + " soft tokens");
+                            + " for " + expected + " soft tokens");
                 }
                 return data;
             } finally {

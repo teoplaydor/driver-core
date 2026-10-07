@@ -69,6 +69,13 @@ public class AppIndexingTest {
             img.argb(32, 32);
             return bag(imageConcepts[next++]);
         }
+        public float[][] embedImages(List<ImagePreprocessor.Source> imgs, int budget) {
+            batches.add(imgs.size());
+            float[][] r = new float[imgs.size()][];
+            for (int i = 0; i < r.length; i++) r[i] = embedImage(imgs.get(i), budget);
+            return r;
+        }
+        final List<Integer> batches = new ArrayList<>();
         public float[] embedVideo(List<ImagePreprocessor.Source> frames, int budget) { throw new IllegalStateException("no video"); }
         public boolean supportsImages() { return true; }
         public boolean supportsVideo() { return true; }
@@ -111,9 +118,12 @@ public class AppIndexingTest {
         MainActivity a = Robolectric.setupActivity(MainActivity.class);
         Engine e = Engine.get(a);
         waitFor("store", () -> e.store() != null);
-        e.attachModelForTest(new FakeEmbedder(concepts));
+        FakeEmbedder fake = new FakeEmbedder(concepts);
+        e.attachModelForTest(fake);
         waitFor("ready", e::ready);
 
+        // Photos go through the model in batches of 3 (the benchmark's "пачка").
+        e.prefs().edit().putInt("batch", 3).apply();
         // The real "Start indexing" path: permission check → MediaStore → decode → embed → SQLite.
         Method req = MainActivity.class.getDeclaredMethod("requestMediaAndIndex");
         req.setAccessible(true);
@@ -121,6 +131,8 @@ public class AppIndexingTest {
         waitFor("indexing", () -> !e.indexing && e.idxTotal > 0);
         System.out.println("index status: " + e.idxStatus.replace('\n', ' '));
         assertEquals(5, e.store().count(IndexStore.KIND_PHOTO));
+        System.out.println("vision batches: " + fake.batches);
+        assertEquals(Arrays.asList(3, 2), fake.batches);
         assertEquals(0, e.store().count(IndexStore.KIND_VIDEO));
         assertTrue("first error is reported: " + e.idxStatus, e.idxStatus.contains("Первая ошибка: VID_7.mp4"));
         assertTrue(e.idxStatus, e.idxStatus.startsWith("Готово: 5 файлов, пропущено 1"));

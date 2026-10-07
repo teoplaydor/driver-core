@@ -56,8 +56,6 @@ public final class Engine {
     private final ExecutorService net = Executors.newSingleThreadExecutor();
     /** Decodes the next photo while the current one is being embedded. */
     private final ExecutorService decoder = Executors.newSingleThreadExecutor();
-    private Future<Bitmap> prefetch;
-    private Media.Entry prefetchEntry;
     private long sumWaitMs, sumVisionMs, sumTextMs;
     private int timedPhotos;
     public volatile int threads;
@@ -566,13 +564,20 @@ public final class Engine {
      * its default token budget, falls back to it and remembers that.
      */
     private float[] embedPhoto(Bitmap b) throws Exception {
+        return embedPhotos(java.util.Collections.singletonList(b))[0];
+    }
+
+    private float[][] embedPhotos(List<Bitmap> bitmaps) throws Exception {
+        List<io.github.teoplaydor.semsearch.core.ImagePreprocessor.Source> src =
+                new ArrayList<io.github.teoplaydor.semsearch.core.ImagePreprocessor.Source>();
+        for (Bitmap b : bitmaps) src.add(new Media.BitmapSource(b));
         int budget = photoBudget();
         try {
-            return model.embedImage(new Media.BitmapSource(b), budget);
+            return model.embedImages(src, budget);
         } catch (Exception e) {
             if (budget == model.defaultImageTokens()) throw e;
             prefs.edit().putInt("photo_detail", PHOTO_BUDGETS.length - 1).apply();
-            return model.embedImage(new Media.BitmapSource(b), 0);
+            return model.embedImages(src, 0);
         }
     }
 
@@ -621,9 +626,53 @@ public final class Engine {
         }
     }
 
+    private static final class Measure {
+        double perPhotoMs = Double.MAX_VALUE, visionMs, textMs;
+        float cos = 1f;
+        float[] emb;
+        String error;
+    }
+
+    /** Embeds synthetic photos (after a warm-up) and returns the best of two timed runs. */
+    private Measure measure(ModelConfig cfg, HfTokenizer tok, HfRepo.Plan plan, int accel, int nThreads, int batch,
+                            int budget, float[] reference) {
+        Measure r = new Measure();
+        EmbeddingGemma2 m = null;
+        try {
+            m = createModel(cfg, tok, plan, accel, nThreads);
+            List<io.github.teoplaydor.semsearch.core.ImagePreprocessor.Source> imgs =
+                    new ArrayList<io.github.teoplaydor.semsearch.core.ImagePreprocessor.Source>();
+            for (int k = 0; k < batch; k++) imgs.add(new PatternSource(640, 480, 2 + k));
+            m.embedImages(imgs, budget); // warm-up: allocations, GPU shader compilation
+            for (int run = 0; run < 2; run++) {
+                long t0 = System.currentTimeMillis();
+                float[][] e = m.embedImages(imgs, budget);
+                double per = (System.currentTimeMillis() - t0) / (double) batch;
+                if (per < r.perPhotoMs) {
+                    r.perPhotoMs = per;
+                    long[] tm = m.lastTimingsMs();
+                    r.visionMs = tm[0] / (double) batch;
+                    r.textMs = tm[1] / (double) batch;
+                    r.emb = e[0];
+                }
+            }
+            if (reference != null) {
+                float c = 0;
+                for (int j = 0; j < r.emb.length; j++) c += r.emb[j] * reference[j];
+                r.cos = c;
+            }
+        } catch (Throwable e) {
+            r.error = e.getMessage() != null ? e.getMessage() : e.toString();
+        } finally {
+            if (m != null) m.close();
+        }
+        return r;
+    }
+
     /**
-     * Measures photo embedding speed for each accelerator (and a few thread counts) on this phone,
-     * rejects variants whose result drifts from the plain CPU one, and keeps the fastest.
+     * Measures photo embedding speed on this phone: every accelerator, then thread counts and
+     * batch sizes for the best one. Variants whose result drifts from the plain CPU one are
+     * rejected (so the existing index stays comparable); the fastest is saved.
      */
     public void benchmark(final Callback<String> cb) {
         if (indexing) {
@@ -649,74 +698,58 @@ public final class Engine {
                     int budget = photoBudget();
                     int auto = autoThreads(), cores = Runtime.getRuntime().availableProcessors();
                     rep.append("Детализация ").append(budget).append(" токенов, ядер ").append(cores)
-                            .append(", быстрых ").append(auto).append("\n\n");
-                    List<int[]> cands = new ArrayList<int[]>();
+                            .append(", быстрых ").append(auto).append("\n(картинка + текст на одно фото)\n\n");
+
+                    List<int[]> plan1 = new ArrayList<int[]>(); // {accel, threads, batch}
                     for (int a = 0; a < ACCEL_NAMES.length; a++) {
                         if (a >= ACCEL_GPU && gpuBroken()) continue;
-                        cands.add(new int[]{a, auto});
+                        plan1.add(new int[]{a, auto, 1});
                     }
                     float[] reference = null;
-                    long bestMs = Long.MAX_VALUE;
-                    int bestA = ACCEL_CPU, bestT = auto, bestCpuA = ACCEL_CPU;
-                    long bestCpuMs = Long.MAX_VALUE;
-                    for (int i = 0; i < cands.size(); i++) {
-                        int a = cands.get(i)[0], t = cands.get(i)[1];
-                        String name = ACCEL_NAMES[a] + ", потоков " + t;
-                        status = "Подбираю ускорение " + (i + 1) + "/" + cands.size() + ": " + name;
-                        notifyChanged();
-                        EmbeddingGemma2 m = null;
-                        try {
-                            m = createModel(cfg, tok, plan, a, t);
-                            m.embedImage(new PatternSource(640, 480, 1), budget); // warm-up (GPU shader compile)
-                            long best = Long.MAX_VALUE;
-                            float[] emb = null;
-                            for (int k = 0; k < 2; k++) {
-                                long t0 = System.currentTimeMillis();
-                                emb = m.embedImage(new PatternSource(640, 480, 2), budget);
-                                best = Math.min(best, System.currentTimeMillis() - t0);
-                            }
-                            String sim = "";
-                            boolean ok = true;
-                            if (reference == null) {
-                                reference = emb;
-                            } else {
-                                float cos = 0;
-                                for (int j = 0; j < emb.length; j++) cos += emb[j] * reference[j];
-                                ok = cos >= 0.98f;
-                                sim = String.format(java.util.Locale.ROOT, ", совпадение %.3f", cos);
-                            }
-                            rep.append(String.format(java.util.Locale.ROOT, "• %s: %.2f с на фото%s%s\n", name,
-                                    best / 1000.0, sim, ok ? "" : " — отклонено, результат расходится"));
-                            if (ok && best < bestMs) {
-                                bestMs = best;
-                                bestA = a;
-                                bestT = t;
-                            }
-                            if (ok && a < ACCEL_GPU && best < bestCpuMs) {
-                                bestCpuMs = best;
-                                bestCpuA = a;
-                            }
-                        } catch (Throwable e) {
-                            rep.append("• ").append(name).append(": не работает — ")
-                                    .append(e.getMessage() != null ? e.getMessage() : e.toString()).append('\n');
-                        } finally {
-                            if (m != null) m.close();
-                        }
-                        // After the accelerators, try other thread counts for the best CPU variant.
-                        if (i == cands.size() - 1 && cands.size() <= ACCEL_NAMES.length && bestCpuMs < Long.MAX_VALUE) {
+                    int[] best = null;
+                    double bestMs = Double.MAX_VALUE;
+                    int step = 0;
+                    for (int phase = 0; phase < 3; phase++) {
+                        List<int[]> cands = new ArrayList<int[]>();
+                        if (phase == 0) {
+                            cands.addAll(plan1);
+                        } else if (phase == 1 && best != null) {
                             java.util.LinkedHashSet<Integer> ts = new java.util.LinkedHashSet<Integer>();
-                            if (auto > 2) ts.add(auto - 1);
                             ts.add(Math.min(cores, auto + 2));
+                            ts.add(Math.max(2, cores / 2));
                             ts.add(cores);
                             ts.remove(auto);
-                            for (int tt : ts) cands.add(new int[]{bestCpuA, tt});
+                            for (int t : ts) cands.add(new int[]{best[0], t, 1});
+                        } else if (phase == 2 && best != null) {
+                            for (int b : new int[]{2, 4}) cands.add(new int[]{best[0], best[1], b});
+                        }
+                        for (int[] c : cands) {
+                            step++;
+                            String name = ACCEL_NAMES[c[0]] + ", потоков " + c[1] + (c[2] > 1 ? ", пачка " + c[2] : "");
+                            status = "Подбираю ускорение (" + step + "): " + name;
+                            notifyChanged();
+                            Measure m = measure(cfg, tok, plan, c[0], c[1], c[2], budget, reference);
+                            if (m.error != null) {
+                                rep.append("• ").append(name).append(": не работает — ").append(m.error).append('\n');
+                                continue;
+                            }
+                            if (reference == null) reference = m.emb;
+                            boolean ok = m.cos >= 0.98f;
+                            rep.append(String.format(java.util.Locale.ROOT, "• %s: %.2f с (%.2f + %.2f)%s%s\n", name,
+                                    m.perPhotoMs / 1000.0, m.visionMs / 1000.0, m.textMs / 1000.0,
+                                    reference == m.emb ? "" : String.format(java.util.Locale.ROOT, ", совпадение %.3f", m.cos),
+                                    ok ? "" : " — отклонено, результат расходится"));
+                            if (ok && m.perPhotoMs < bestMs) {
+                                bestMs = m.perPhotoMs;
+                                best = c;
+                            }
                         }
                     }
-                    if (bestMs == Long.MAX_VALUE) throw new IllegalStateException("ни один вариант не сработал");
-                    prefs.edit().putInt("accel", bestA).putInt("threads", bestT == auto ? 0 : bestT)
-                            .putBoolean("accel_chosen", true).apply();
-                    rep.append(String.format(java.util.Locale.ROOT, "\nВыбрано: %s, потоков %d — %.2f с на фото",
-                            ACCEL_NAMES[bestA], bestT, bestMs / 1000.0));
+                    if (best == null) throw new IllegalStateException("ни один вариант не сработал");
+                    prefs.edit().putInt("accel", best[0]).putInt("threads", best[1] == auto ? 0 : best[1])
+                            .putInt("batch", best[2]).putBoolean("accel_chosen", true).apply();
+                    rep.append(String.format(java.util.Locale.ROOT, "\nВыбрано: %s, потоков %d%s — %.2f с на фото",
+                            ACCEL_NAMES[best[0]], best[1], best[2] > 1 ? ", пачка " + best[2] : "", bestMs / 1000.0));
                     post(cb, rep.toString(), null);
                 } catch (Throwable e) {
                     rep.append("\nОшибка: ").append(e.getMessage() != null ? e.getMessage() : e.toString());
@@ -815,86 +848,140 @@ public final class Engine {
         });
     }
 
+    /** Photos per vision-encoder run while indexing (pref "batch", chosen by the benchmark). */
+    public int batchSize() {
+        return Math.max(1, Math.min(8, prefs.getInt("batch", 1)));
+    }
+
     private final Runnable indexStep = new Runnable() {
         @Override
         public void run() {
-            Media.Entry e;
+            List<Media.Entry> batch = new ArrayList<Media.Entry>();
             synchronized (queue) {
                 if (cancelIndex || queue.isEmpty() || model == null) {
-                    if (prefetch != null) prefetch.cancel(false);
-                    prefetch = null;
-                    prefetchEntry = null;
+                    for (Future<Bitmap> f : prefetched.values()) f.cancel(false);
+                    prefetched.clear();
                     String err = timingSplit() + (idxFirstError != null ? "\nПервая ошибка: " + idxFirstError : "");
                     finishIndex((cancelIndex ? "Остановлено: " + idxDone + " из " + idxTotal
                             : "Готово: " + (idxDone - idxErrors) + " файлов" + (idxErrors > 0 ? ", пропущено " + idxErrors : ""))
                             + err);
                     return;
                 }
-                e = queue.remove(0);
-            }
-            try {
-                float[] emb;
-                if (e.kind == IndexStore.KIND_PHOTO) {
-                    long w0 = System.currentTimeMillis();
-                    Future<Bitmap> mine = prefetchEntry == e && prefetch != null ? prefetch : decodeAsync(e);
-                    prefetch = null;
-                    prefetchEntry = null;
-                    synchronized (queue) {
-                        if (!queue.isEmpty() && queue.get(0).kind == IndexStore.KIND_PHOTO) {
-                            prefetchEntry = queue.get(0);
-                        }
-                    }
-                    Bitmap b;
-                    try {
-                        b = mine.get();
-                    } catch (ExecutionException ex) {
-                        if (prefetchEntry != null) prefetch = decodeAsync(prefetchEntry);
-                        throw ex.getCause();
-                    }
-                    long waited = System.currentTimeMillis() - w0;
-                    if (prefetchEntry != null) prefetch = decodeAsync(prefetchEntry);
-                    try {
-                        emb = embedPhoto(b);
-                    } finally {
-                        b.recycle();
-                    }
-                    long[] tm = model.lastTimingsMs();
-                    sumWaitMs += waited;
-                    sumVisionMs += tm[0];
-                    sumTextMs += tm[1];
-                    timedPhotos++;
-                } else {
-                    List<Bitmap> frames = Media.videoFrames(ctx, e.uri, VIDEO_FRAMES, 640);
-                    try {
-                        List<io.github.teoplaydor.semsearch.core.ImagePreprocessor.Source> src =
-                                new ArrayList<io.github.teoplaydor.semsearch.core.ImagePreprocessor.Source>();
-                        for (Bitmap f : frames) src.add(new Media.BitmapSource(f));
-                        emb = model.embedVideo(src, 0);
-                    } finally {
-                        for (Bitmap f : frames) f.recycle();
+                batch.add(queue.remove(0));
+                if (batch.get(0).kind == IndexStore.KIND_PHOTO) {
+                    int n = batchSize();
+                    while (batch.size() < n && !queue.isEmpty() && queue.get(0).kind == IndexStore.KIND_PHOTO) {
+                        batch.add(queue.remove(0));
                     }
                 }
-                store.add(e.kind, e.id, e.uri.toString(), e.name, null, e.date, emb);
-                idxDone++;
-            } catch (Throwable t) {
-                idxErrors++;
-                idxDone++;
-                if (idxFirstError == null) {
-                    idxFirstError = (e.name != null ? e.name + ": " : "") + (t.getMessage() != null ? t.getMessage() : t.toString());
-                    android.util.Log.e("SemSearch", "index " + e.uri, t);
-                }
             }
-            idxProcessed++;
+            if (batch.get(0).kind == IndexStore.KIND_VIDEO) {
+                indexVideo(batch.get(0));
+            } else {
+                indexPhotos(batch);
+            }
+            idxProcessed += batch.size();
             long spent = System.currentTimeMillis() - idxStarted;
             double per = spent / 1000.0 / Math.max(1, idxProcessed);
             int left = idxTotal - idxDone;
-            String split = timingSplit();
-            idxStatus = String.format(java.util.Locale.ROOT, "%d из %d · %.1f с на файл · осталось ~%s",
-                    idxDone, idxTotal, per, eta((long) (per * left))) + split;
+            idxStatus = String.format(java.util.Locale.ROOT, "%d из %d · %.2f с на файл · осталось ~%s",
+                    idxDone, idxTotal, per, eta((long) (per * left))) + timingSplit();
             notifyChanged();
             ml.submit(this);
         }
     };
+
+    /** Decoding started ahead of time for upcoming photos (keyed by MediaStore id). */
+    private final java.util.HashMap<Long, Future<Bitmap>> prefetched = new java.util.HashMap<Long, Future<Bitmap>>();
+
+    private void indexPhotos(List<Media.Entry> batch) {
+        long w0 = System.currentTimeMillis();
+        List<Future<Bitmap>> futures = new ArrayList<Future<Bitmap>>();
+        for (Media.Entry e : batch) {
+            Future<Bitmap> f = prefetched.remove(e.id);
+            futures.add(f != null ? f : decodeAsync(e));
+        }
+        // Start decoding the next batch while this one goes through the model.
+        synchronized (queue) {
+            int n = 0;
+            for (Media.Entry e : queue) {
+                if (e.kind != IndexStore.KIND_PHOTO || n >= batchSize()) break;
+                if (!prefetched.containsKey(e.id)) prefetched.put(e.id, decodeAsync(e));
+                n++;
+            }
+        }
+        List<Media.Entry> ok = new ArrayList<Media.Entry>();
+        List<Bitmap> bitmaps = new ArrayList<Bitmap>();
+        for (int i = 0; i < batch.size(); i++) {
+            try {
+                bitmaps.add(futures.get(i).get());
+                ok.add(batch.get(i));
+            } catch (Throwable t) {
+                fail(batch.get(i), t instanceof ExecutionException && t.getCause() != null ? t.getCause() : t);
+            }
+        }
+        long waited = System.currentTimeMillis() - w0;
+        if (ok.isEmpty()) return;
+        try {
+            float[][] embs;
+            try {
+                embs = embedPhotos(bitmaps);
+            } catch (Throwable batchError) {
+                if (bitmaps.size() == 1) throw batchError;
+                // One bad photo (or a batch the encoder rejects) must not sink the others.
+                embs = new float[bitmaps.size()][];
+                for (int i = 0; i < bitmaps.size(); i++) {
+                    try {
+                        embs[i] = embedPhotos(java.util.Collections.singletonList(bitmaps.get(i)))[0];
+                    } catch (Throwable t) {
+                        fail(ok.get(i), t);
+                    }
+                }
+            }
+            long[] tm = model.lastTimingsMs();
+            sumWaitMs += waited;
+            sumVisionMs += tm[0];
+            sumTextMs += tm[1];
+            timedPhotos += ok.size();
+            for (int i = 0; i < ok.size(); i++) {
+                if (embs[i] == null) continue;
+                Media.Entry e = ok.get(i);
+                store.add(e.kind, e.id, e.uri.toString(), e.name, null, e.date, embs[i]);
+                idxDone++;
+            }
+        } catch (Throwable t) {
+            for (Media.Entry e : ok) fail(e, t);
+        } finally {
+            for (Bitmap b : bitmaps) b.recycle();
+        }
+    }
+
+    private void indexVideo(Media.Entry e) {
+        try {
+            List<Bitmap> frames = Media.videoFrames(ctx, e.uri, VIDEO_FRAMES, 640);
+            try {
+                List<io.github.teoplaydor.semsearch.core.ImagePreprocessor.Source> src =
+                        new ArrayList<io.github.teoplaydor.semsearch.core.ImagePreprocessor.Source>();
+                for (Bitmap f : frames) src.add(new Media.BitmapSource(f));
+                float[] emb = model.embedVideo(src, 0);
+                store.add(e.kind, e.id, e.uri.toString(), e.name, null, e.date, emb);
+                idxDone++;
+            } finally {
+                for (Bitmap f : frames) f.recycle();
+            }
+        } catch (Throwable t) {
+            fail(e, t);
+        }
+    }
+
+    private void fail(Media.Entry e, Throwable t) {
+        idxErrors++;
+        idxDone++;
+        if (idxFirstError == null) {
+            idxFirstError = (e.name != null ? e.name + ": " : "") + (t.getMessage() != null ? t.getMessage() : t.toString());
+            android.util.Log.e("SemSearch", "index " + e.uri, t);
+        }
+    }
 
     /** Where the time per photo goes: waiting for decode, vision encoder, text model. */
     private String timingSplit() {

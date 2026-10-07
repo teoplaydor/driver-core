@@ -12,6 +12,9 @@ public interface Embedder extends Closeable {
     /** @param maxSoftTokens token budget per image, or 0 for the model default. */
     float[] embedImage(ImagePreprocessor.Source image, int maxSoftTokens) throws Exception;
 
+    /** Batch version of {@link #embedImage}: same results, one vision-encoder run. */
+    float[][] embedImages(List<ImagePreprocessor.Source> images, int maxSoftTokens) throws Exception;
+
     float[] embedVideo(List<ImagePreprocessor.Source> frames, int maxSoftTokens) throws Exception;
 
     boolean supportsImages();

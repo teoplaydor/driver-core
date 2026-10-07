@@ -51,10 +51,11 @@ echo "== 2c. int8 compute (accuracy_level) and GPU fallback"
 python3 -m pip install -q onnxruntime onnx_ir
 python3 test/accel/make_q4_model.py "$T/accel" >/dev/null 2>&1
 javac --release 8 -XDstringConcat=inline -nowarn -encoding UTF-8 -cp "$T/cls:$T/ort-desktop.jar" -d "$T/cls" \
-  test/accel/AccuracyLevelTest.java test/accel/AccelPipelineTest.java
+  test/accel/AccuracyLevelTest.java test/accel/AccelPipelineTest.java test/accel/BatchParityTest.java
 java -cp "$T/cls:$T/ort-desktop.jar" AccuracyLevelTest "$T/accel"
 python3 test/accel/quantize_dummy.py "$T/models/dummy" >/dev/null 2>&1
 java -cp "$T/cls:build/deps/ort-classes:$T/ort-desktop.jar" AccelPipelineTest "$T/models/dummy"
+java -cp "$T/cls:build/deps/ort-classes:$T/ort-desktop.jar" BatchParityTest "$T/models/dummy"
 
 echo "== 3. Hub download"
 python3 tools/mock_hub.py 18765 & HUB=$!

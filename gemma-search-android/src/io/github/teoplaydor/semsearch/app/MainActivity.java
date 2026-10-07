@@ -1282,6 +1282,7 @@ public final class MainActivity extends Activity implements Engine.Listener {
         indexButton.setText(engine.indexing ? "Остановить" : "Начать индексацию");
         if (engine.ready()) {
             accelInfo.setText("Сейчас: " + Engine.ACCEL_NAMES[engine.loadedAccel] + ", потоков " + engine.threads
+                    + (engine.batchSize() > 1 ? ", пачка " + engine.batchSize() : "")
                     + (engine.prefs.getBoolean("accel_chosen", false) ? "" : " · ещё не подбиралось"));
         }
         indexStatus.setText(engine.idxStatus);
