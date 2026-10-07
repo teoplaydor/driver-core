@@ -147,6 +147,9 @@ namespace SemSearch
             string vision = plan.VisionModel == null ? null : GraphFile(plan.VisionModel, accel == AccelCpuInt8);
             if (gpu)
             {
+                if (!DirectMl.Downloaded)
+                    throw new InvalidOperationException("компонент DirectML не скачан" + (dmlError != null ? ": " + dmlError : ""));
+                DirectMl.Prepare();
                 S.GpuProbe = true;
                 S.Save();
             }
@@ -164,6 +167,27 @@ namespace SemSearch
                 }
             }
         }
+
+        /// <summary>Fetches DirectML.dll for the GPU path once; failures surface when the GPU session is created.</summary>
+        private async Task EnsureDirectMlAsync()
+        {
+            try
+            {
+                Status = "Скачиваю DirectML для видеокарты (~9 МБ, один раз)…";
+                Notify();
+                await DirectMl.EnsureAsync((done, total) =>
+                {
+                    Status = $"Скачиваю DirectML для видеокарты: {done / 1048576.0:F1} из {total / 1048576.0:F1} МБ";
+                    Notify();
+                }, CancellationToken.None);
+            }
+            catch (Exception e)
+            {
+                dmlError = e.Message;
+            }
+        }
+
+        private string dmlError;
 
         public Task LoadModelAsync()
         {
@@ -191,12 +215,20 @@ namespace SemSearch
                     var cfg = EmbeddingGemma2.LoadConfig(ModelDir);
                     var tok = EmbeddingGemma2.LoadTokenizer(ModelDir);
                     int accel = S.Accel;
+                    string fallback = null;
+                    if (accel == AccelGpu && !S.GpuBroken && !DirectMl.Downloaded)
+                    {
+                        step = "загрузка DirectML";
+                        await EnsureDirectMlAsync();
+                    }
+                    step = "инициализация";
                     try
                     {
                         model = CreateModel(cfg, tok, plan, accel, S.Threads);
                     }
-                    catch (Exception) when (accel != AccelCpu)
+                    catch (Exception e) when (accel != AccelCpu)
                     {
+                        fallback = AccelNames[accel] + " не запустился: " + e.Message;
                         accel = AccelCpu;
                         S.Accel = AccelCpu;
                         S.Save();
@@ -214,7 +246,8 @@ namespace SemSearch
                         S.Save();
                     }
                     Status = $"Модель готова ({sw.Elapsed.TotalSeconds:F1} с), {model.EmbeddingDim} изм., {AccelNames[accel]}"
-                             + (S.Threads > 0 ? ", потоков " + S.Threads : "") + (model.SupportsImages ? "" : " · только текст");
+                             + (S.Threads > 0 ? ", потоков " + S.Threads : "") + (model.SupportsImages ? "" : " · только текст")
+                             + (fallback != null ? "\n" + fallback : "");
                     Current = State.Ready;
                 }
                 catch (Exception e)
@@ -686,6 +719,7 @@ namespace SemSearch
                     foreach (var c in cands)
                     {
                         string name = AccelNames[c[0]] + (c[1] > 0 ? ", потоков " + c[1] : ", потоков авто") + (c[2] > 1 ? ", пачка " + c[2] : "");
+                        if (c[0] == AccelGpu && !DirectMl.Downloaded) await EnsureDirectMlAsync();
                         Status = "Подбираю ускорение: " + name;
                         Notify();
                         var m = Run(cfg, tok, plan, c[0], c[1], c[2], reference);

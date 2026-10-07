@@ -22,7 +22,16 @@
     <EnableCompressionInSingleFile>true</EnableCompressionInSingleFile>
     <DebugType>none</DebugType>
     <InvariantGlobalization>false</InvariantGlobalization>
+    <!-- DirectML.dll (GPU) is fetched on first use, see DirectMlRuntime.cs: the exe has to fit a 30 MB chat upload. -->
     <Microsoft_AI_DirectML_SkipDebugLayerCopy>true</Microsoft_AI_DirectML_SkipDebugLayerCopy>
+    <Microsoft_AI_DirectML_SkipLibraryCopy>true</Microsoft_AI_DirectML_SkipLibraryCopy>
+    <!-- Trim only the framework libraries marked trimmable; WinForms, ONNX Runtime and the app stay whole. -->
+    <PublishTrimmed>true</PublishTrimmed>
+    <TrimMode>partial</TrimMode>
+    <_SuppressWinFormsTrimError>true</_SuppressWinFormsTrimError>
+    <SuppressTrimAnalysisWarnings>true</SuppressTrimAnalysisWarnings>
+    <BuiltInComInteropSupport>true</BuiltInComInteropSupport>
+    <JsonSerializerIsReflectionEnabledByDefault>true</JsonSerializerIsReflectionEnabledByDefault>
   </PropertyGroup>
   <ItemGroup>
     <FrameworkReference Include="Microsoft.WindowsDesktop.App.WindowsForms" />
@@ -33,10 +42,10 @@
     <!-- App-local Visual C++ runtime for onnxruntime.dll (PCs without the VC++ Redistributable); build.sh fetches it. -->
     <Content Include="..\redist\*.dll" Link="%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
   </ItemGroup>
-  <!-- The WindowsDesktop runtime pack also carries WPF (~20 MB compressed) and the DirectML debug layer;
-       WinForms references none of it, so keep it out of the exe. -->
+  <!-- The WindowsDesktop runtime pack also carries WPF (~20 MB compressed), the WinForms designer and the DirectML
+       debug layer; the app references none of it, so keep it out of the exe. -->
   <PropertyGroup>
-    <_DropPattern>^(Presentation.*|ReachFramework|System\.Windows\.Controls\.Ribbon|System\.Windows\.Input\.Manipulations|System\.Windows\.Presentation|System\.Xaml|UIAutomation.*|WindowsBase|WindowsFormsIntegration|DirectWriteForwarder|D3DCompiler_47_cor3|PenImc_cor3|wpfgfx_cor3|DirectML\.Debug)$</_DropPattern>
+    <_DropPattern>^(Presentation.*|ReachFramework|System\.Printing|System\.Windows\.Forms\.Design.*|System\.CodeDom|Microsoft\.VisualBasic\.Forms|System\.Windows\.Controls\.Ribbon|System\.Windows\.Input\.Manipulations|System\.Windows\.Presentation|System\.Xaml|UIAutomation.*|WindowsBase|WindowsFormsIntegration|DirectWriteForwarder|D3DCompiler_47_cor3|PenImc_cor3|wpfgfx_cor3|DirectML\.Debug)$</_DropPattern>
   </PropertyGroup>
   <Target Name="DropUnusedRuntimePackAssets" AfterTargets="ResolveRuntimePackAssets">
     <ItemGroup>

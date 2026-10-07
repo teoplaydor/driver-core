@@ -34,6 +34,8 @@ internal static class Program
         Docs();
         Exif();
         Hub(Path.Combine(t, "..", "..", "tools", "mock_hub.py"));
+        Zip();
+        if (Environment.GetEnvironmentVariable("SEMSEARCH_ONLINE") == "1") ZipOnline();
         Console.WriteLine(failures == 0 ? "ALL TESTS PASSED" : failures + " FAILED");
         return failures == 0 ? 0 : 1;
     }
@@ -335,6 +337,95 @@ internal static class Program
         finally
         {
             server.Kill();
+        }
+    }
+
+    private static string Sha(byte[] b) => Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(b)).ToLowerInvariant();
+
+    /// <summary>One entry out of a remote zip by range requests (local server drops the big range once).</summary>
+    private static void Zip()
+    {
+        string dir = Path.Combine(Path.GetTempPath(), "semsearch-zip-test");
+        if (Directory.Exists(dir)) Directory.Delete(dir, true);
+        Directory.CreateDirectory(dir);
+        var rnd = new Random(3);
+        byte[] stored = new byte[300_000], text = Encoding.UTF8.GetBytes(string.Concat(Enumerable.Repeat("DirectML ", 200_000)));
+        rnd.NextBytes(stored);
+        using (var z = new System.IO.Compression.ZipArchive(File.Create(Path.Combine(dir, "pkg.zip")), System.IO.Compression.ZipArchiveMode.Create))
+        {
+            foreach (var (name, data, level) in new[] { ("lib/readme.txt", Encoding.UTF8.GetBytes("hi"), System.IO.Compression.CompressionLevel.Optimal),
+                         ("bin/x64-win/stored.bin", stored, System.IO.Compression.CompressionLevel.NoCompression),
+                         ("bin/x64-win/DirectML.dll", text, System.IO.Compression.CompressionLevel.Optimal) })
+            {
+                using var e = z.CreateEntry(name, level).Open();
+                e.Write(data, 0, data.Length);
+            }
+        }
+        string nupkg = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+            ".nuget/packages/microsoft.ai.directml/1.15.4/microsoft.ai.directml.1.15.4.nupkg");
+        if (File.Exists(nupkg)) File.Copy(nupkg, Path.Combine(dir, "real.nupkg"));
+        int port;
+        using (var l = new System.Net.Sockets.TcpListener(System.Net.IPAddress.Loopback, 0))
+        {
+            l.Start();
+            port = ((System.Net.IPEndPoint)l.LocalEndpoint).Port;
+        }
+        string script = Path.Combine(AppContext.BaseDirectory, "range_server.py");
+        using var server = System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo("python3", $"\"{script}\" {port} \"{dir}\"")
+            { UseShellExecute = false, RedirectStandardOutput = true, RedirectStandardError = true });
+        try
+        {
+            for (int i = 0; i < 100; i++)
+            {
+                try { using var c = new System.Net.Sockets.TcpClient("127.0.0.1", port); break; }
+                catch (Exception) { System.Threading.Thread.Sleep(100); }
+            }
+            string url = $"http://127.0.0.1:{port}/pkg.zip", outFile = Path.Combine(dir, "out", "x.bin");
+            RemoteZip.ExtractAsync(url, "bin/x64-win/DirectML.dll", outFile, Sha(text), null, default).GetAwaiter().GetResult();
+            bool deflated = File.ReadAllBytes(outFile).SequenceEqual(text);
+            RemoteZip.ExtractAsync(url, "bin/x64-win/stored.bin", outFile, Sha(stored), null, default).GetAwaiter().GetResult();
+            Check(deflated && File.ReadAllBytes(outFile).SequenceEqual(stored), "remote zip: deflated and stored entries by range, after a dropped connection");
+            string bad = null, missing = null;
+            try { RemoteZip.ExtractAsync(url, "bin/x64-win/stored.bin", outFile + "2", new string('0', 64), null, default).GetAwaiter().GetResult(); }
+            catch (IOException e) { bad = e.Message; }
+            try { RemoteZip.ExtractAsync(url, "nope.dll", outFile + "3", Sha(stored), null, default).GetAwaiter().GetResult(); }
+            catch (IOException e) { missing = e.Message; }
+            Check(bad != null && !File.Exists(outFile + "2") && missing != null, "remote zip: wrong checksum and missing entry are refused");
+            if (File.Exists(nupkg))
+            {
+                long last = 0;
+                var sw = System.Diagnostics.Stopwatch.StartNew();
+                RemoteZip.ExtractAsync($"http://127.0.0.1:{port}/real.nupkg", "bin/x64-win/DirectML.dll", Path.Combine(dir, "DirectML.dll"),
+                    "9c9e6d822561c6c41b90e6994b3e8857cf1d66dbfb1e0c4c799c7c89b4e92da1", (d, tot) => last = d, default).GetAwaiter().GetResult();
+                Check(new FileInfo(Path.Combine(dir, "DirectML.dll")).Length == 18527776 && last == 9332741,
+                    $"remote zip: DirectML.dll from the real 193 MB nupkg, {last / 1048576.0:F1} MB transferred, {sw.ElapsedMilliseconds} ms");
+            }
+        }
+        catch (Exception e)
+        {
+            Check(false, "remote zip: " + e.Message);
+        }
+        finally
+        {
+            server.Kill();
+            Directory.Delete(dir, true);
+        }
+    }
+
+    /// <summary>Opt-in (SEMSEARCH_ONLINE=1): the same fetch the app does on first GPU use, from nuget.org.</summary>
+    private static void ZipOnline()
+    {
+        string dest = Path.Combine(Path.GetTempPath(), "semsearch-online", "DirectML.dll");
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        try
+        {
+            RemoteZip.ExtractAsync("https://api.nuget.org/v3-flatcontainer/microsoft.ai.directml/1.15.4/microsoft.ai.directml.1.15.4.nupkg",
+                "bin/x64-win/DirectML.dll", dest, "9c9e6d822561c6c41b90e6994b3e8857cf1d66dbfb1e0c4c799c7c89b4e92da1", null, default).GetAwaiter().GetResult();
+            Check(new FileInfo(dest).Length == 18527776, $"nuget.org: DirectML.dll fetched and verified in {sw.ElapsedMilliseconds} ms");
+        }
+        catch (Exception e)
+        {
+            Check(false, "nuget.org: " + e.Message);
         }
     }
 }

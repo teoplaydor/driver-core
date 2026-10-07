@@ -656,7 +656,8 @@ namespace SemSearch
 
             var a = Card(page, "Ускорение", w);
             a.Controls.Add(MakeLabel("Где считается модель. «Подобрать» замерит процессор, процессор с int8 и видеокарту (DirectML), "
-                                     + "число потоков и размер пачки — и сохранит самое быстрое. Видеокарта подойдёт любая с DirectX 12.",
+                                     + "число потоков и размер пачки — и сохранит самое быстрое. Видеокарта подойдёт любая с DirectX 12; "
+                                     + "для неё один раз скачается компонент Microsoft DirectML (~9 МБ с nuget.org).",
                 FontSmall, TextMuted, w - 40));
             var ar = Row();
             StyleCombo(accelBox, Engine.AccelNames, 260);

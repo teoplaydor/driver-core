@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Builds out/SemSearch.exe (Windows x64, single file, no installer, no .NET needed on the target PC).
 # Works on Windows (Git Bash) and on Linux with any .NET 8 SDK; uses only nuget.org and PyPI:
-#   nuget.org: Microsoft.ML.OnnxRuntime(.DirectML) 1.24.4, .NET 8 runtime packs
+#   nuget.org: Microsoft.ML.OnnxRuntime.DirectML 1.24.4, .NET 8 runtime packs (DirectML.dll itself is fetched by the app)
 #   PyPI:      msvc-runtime (Microsoft-signed Visual C++ runtime DLLs, bundled app-locally for onnxruntime.dll)
 # usage: ./build.sh            -> out/SemSearch.exe
 #        ./build.sh test       -> also runs the parity tests (needs gemma-search-android/build/test from its run_tests.sh)
