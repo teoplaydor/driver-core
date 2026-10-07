@@ -44,6 +44,165 @@ public final class OnnxPatcher {
         return count[0];
     }
 
+    // ---------------------------------------------------------------- fp16 attention
+
+    private static final int ATTR_TYPE_FLOAT = 1;
+    private static final int FLOAT = 1, FLOAT16 = 10;
+    /** Additive masks use huge negatives (−3.4e38, −inf); fp16 tops out at 65504, so they are floored first. */
+    static final float MASK_FLOOR = -60000f;
+    static final String FLOOR_NAME = "fp16attn_mask_floor";
+
+    /**
+     * Copies a graph so that every {@code com.microsoft:MultiHeadAttention} computes in fp16 while the rest
+     * (4-bit MatMulNBits projections, norms) stays as it is: its float inputs — query, key, value, bias,
+     * attention_bias, past — go through Cast(fp16) (the additive mask through Max(mask, −60000) first), its
+     * outputs through Cast(fp32) back to their original names. Mobile GPUs run fp16 arithmetic at up to twice
+     * the fp32 rate, and with many patches attention is most of the work.
+     *
+     * @return number of attention nodes rewritten (0 = none, nothing written)
+     */
+    public static int fp16Attention(File in, File out) throws IOException {
+        byte[] model = readAll(in);
+        int[] count = {0};
+        ByteArrayOutputStream res = new ByteArrayOutputStream(model.length + 4096);
+        Reader r = new Reader(model, 0, model.length);
+        while (r.more()) {
+            int start = r.pos;
+            long key = r.varint();
+            int field = (int) (key >>> 3), wire = (int) (key & 7);
+            if (field == 7 && wire == 2) {
+                int len = (int) r.varint();
+                byte[] g = fp16AttentionGraph(model, r.pos, r.pos + len, count);
+                r.pos += len;
+                writeLenField(res, 7, g);
+            } else {
+                r.skip(wire);
+                res.write(model, start, r.pos - start);
+            }
+        }
+        if (count[0] == 0) return 0;
+        File tmp = new File(out.getPath() + ".tmp");
+        OutputStream os = new FileOutputStream(tmp);
+        try {
+            os.write(res.toByteArray());
+        } finally {
+            os.close();
+        }
+        if (out.exists() && !out.delete()) throw new IOException("cannot replace " + out);
+        if (!tmp.renameTo(out)) throw new IOException("cannot write " + out);
+        return count[0];
+    }
+
+    private static byte[] fp16AttentionGraph(byte[] b, int from, int to, int[] count) throws IOException {
+        ByteArrayOutputStream out = new ByteArrayOutputStream(to - from + 4096);
+        Reader r = new Reader(b, from, to);
+        boolean floorWritten = false;
+        while (r.more()) {
+            int start = r.pos;
+            long key = r.varint();
+            int field = (int) (key >>> 3), wire = (int) (key & 7);
+            if (field != 1 || wire != 2) {
+                r.skip(wire);
+                out.write(b, start, r.pos - start);
+                continue;
+            }
+            int len = (int) r.varint();
+            int nodeFrom = r.pos, nodeTo = r.pos + len;
+            r.pos = nodeTo;
+            byte[] raw = new byte[len];
+            System.arraycopy(b, nodeFrom, raw, 0, len);
+            Node n = parseNode(raw);
+            if (!"MultiHeadAttention".equals(n.opType) || !"com.microsoft".equals(n.domain)) {
+                writeLenField(out, 1, raw);
+                continue;
+            }
+            int id = count[0]++;
+            String tag = "_fp16attn" + id;
+            // inputs: 0 query, 1 key, 2 value, 3 bias, 4 key_padding_mask (int), 5 attention_bias, 6/7 past
+            java.util.List<String> ins = new java.util.ArrayList<String>(n.inputs);
+            for (int i = 0; i < ins.size(); i++) {
+                String x = ins.get(i);
+                if (x.isEmpty() || i == 4 || i > 7) continue;
+                String src = x;
+                if (i == 5) {
+                    if (!floorWritten) {
+                        writeLenField(out, 1, constantFloat(FLOOR_NAME, MASK_FLOOR));
+                        floorWritten = true;
+                    }
+                    src = x + tag + "_floored";
+                    writeLenField(out, 1, node("Max", "", new String[]{x, FLOOR_NAME}, new String[]{src}, src, null, 0));
+                }
+                String half = x + tag + "_in" + i;
+                writeLenField(out, 1, node("Cast", "", new String[]{src}, new String[]{half}, half, "to", FLOAT16));
+                ins.set(i, half);
+            }
+            java.util.List<String> outs = new java.util.ArrayList<String>(n.outputs);
+            java.util.List<String[]> back = new java.util.ArrayList<String[]>();
+            for (int i = 0; i < outs.size(); i++) {
+                String y = outs.get(i);
+                if (y.isEmpty()) continue;
+                String half = y + tag + "_out" + i;
+                back.add(new String[]{half, y});
+                outs.set(i, half);
+            }
+            // the attention node itself: new input/output names, every other field (attributes, name) as it was
+            ByteArrayOutputStream nb = new ByteArrayOutputStream(len + 256);
+            for (String x : ins) writeLenField(nb, 1, x.getBytes(UTF8));
+            for (String y : outs) writeLenField(nb, 2, y.getBytes(UTF8));
+            Reader nr = new Reader(raw, 0, raw.length);
+            while (nr.more()) {
+                int s0 = nr.pos;
+                long k = nr.varint();
+                int f = (int) (k >>> 3), w = (int) (k & 7);
+                nr.skip(w);
+                if ((f == 1 || f == 2) && w == 2) continue;
+                nb.write(raw, s0, nr.pos - s0);
+            }
+            writeLenField(out, 1, nb.toByteArray());
+            for (String[] c : back) {
+                writeLenField(out, 1, node("Cast", "", new String[]{c[0]}, new String[]{c[1]}, c[1] + "_fp32", "to", FLOAT));
+            }
+        }
+        return out.toByteArray();
+    }
+
+    /** NodeProto with an optional INT attribute. */
+    private static byte[] node(String op, String domain, String[] ins, String[] outs, String name, String attr, long value) {
+        ByteArrayOutputStream nb = new ByteArrayOutputStream();
+        for (String x : ins) writeLenField(nb, 1, x.getBytes(UTF8));
+        for (String y : outs) writeLenField(nb, 2, y.getBytes(UTF8));
+        writeLenField(nb, 3, name.getBytes(UTF8));
+        writeLenField(nb, 4, op.getBytes(UTF8));
+        if (!domain.isEmpty()) writeLenField(nb, 7, domain.getBytes(UTF8));
+        if (attr != null) {
+            ByteArrayOutputStream a = new ByteArrayOutputStream();
+            writeLenField(a, 1, attr.getBytes(UTF8));
+            writeVarint(a, 3L << 3); // i
+            writeVarint(a, value);
+            writeVarint(a, 20L << 3); // type
+            writeVarint(a, ATTR_TYPE_INT);
+            writeLenField(nb, 5, a.toByteArray());
+        }
+        return nb.toByteArray();
+    }
+
+    /** Constant node with a scalar float ({@code value_float}, opset 12+). */
+    private static byte[] constantFloat(String output, float v) {
+        ByteArrayOutputStream nb = new ByteArrayOutputStream();
+        writeLenField(nb, 2, output.getBytes(UTF8));
+        writeLenField(nb, 3, output.getBytes(UTF8));
+        writeLenField(nb, 4, "Constant".getBytes(UTF8));
+        ByteArrayOutputStream a = new ByteArrayOutputStream();
+        writeLenField(a, 1, "value_float".getBytes(UTF8));
+        writeVarint(a, (2L << 3) | 5); // f (fixed32)
+        int bits = Float.floatToIntBits(v);
+        for (int i = 0; i < 4; i++) a.write((bits >>> (8 * i)) & 0xff);
+        writeVarint(a, 20L << 3);
+        writeVarint(a, ATTR_TYPE_FLOAT);
+        writeLenField(nb, 5, a.toByteArray());
+        return nb.toByteArray();
+    }
+
     /**
      * Names of the graph inputs and, per dimension, its symbolic name (dim_param) or fixed size. Streams
      * the file (ModelProto.graph (7) → GraphProto.input (11) → ValueInfoProto name (1) / type (2) →

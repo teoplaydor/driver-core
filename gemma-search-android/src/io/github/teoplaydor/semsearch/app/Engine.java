@@ -1158,18 +1158,18 @@ public final class Engine {
     // ------------------------------------------------------------------ acceleration
 
     public static final int ACCEL_CPU = 0, ACCEL_CPU_INT8 = 1, ACCEL_GPU = 2, ACCEL_GPU_INT8 = 3, ACCEL_NPU = 4,
-            ACCEL_NPU_FP32 = 5, ACCEL_GPU_FP16 = 6, ACCEL_LITERT_GPU = 7, ACCEL_LITERT_CPU = 8;
+            ACCEL_NPU_FP32 = 5, ACCEL_GPU_FP16 = 6, ACCEL_LITERT_GPU = 7, ACCEL_LITERT_CPU = 8, ACCEL_GPU_FP16_ATTN = 9;
     /**
      * For the NPU and fp16 variants the vision encoder (most of the work per photo) runs there, the text model on
      * the CPU in int8. The LiteRT-LM variants run Google's own build of the model with its own kernels.
      */
     public static final String[] ACCEL_NAMES = {"Процессор", "Процессор, int8", "Видеокарта (WebGPU)",
             "Видеокарта (WebGPU), int8", "NPU (NNAPI)", "NPU (NNAPI, fp32)", "Видеокарта (WebGPU), fp16",
-            "LiteRT-LM, видеокарта", "LiteRT-LM, процессор"};
+            "LiteRT-LM, видеокарта", "LiteRT-LM, процессор", "Видеокарта (WebGPU), int8 + fp16-внимание"};
 
     /** ONNX Runtime's WebGPU provider (the "gpu_broken" guard covers these). */
     public static boolean isGpu(int a) {
-        return a == ACCEL_GPU || a == ACCEL_GPU_INT8 || a == ACCEL_GPU_FP16;
+        return a == ACCEL_GPU || a == ACCEL_GPU_INT8 || a == ACCEL_GPU_FP16 || a == ACCEL_GPU_FP16_ATTN;
     }
 
     public static boolean isLiteRt(int a) {
@@ -1298,7 +1298,8 @@ public final class Engine {
                                  int batch) throws Exception {
         if (isLiteRt(accel)) return openLiteRt(accel, nThreads, batch);
         boolean npu = isNpu(accel) && plan.visionModel != null;
-        boolean int8 = accel == ACCEL_CPU_INT8 || accel == ACCEL_GPU_INT8 || isNpu(accel) || accel == ACCEL_GPU_FP16;
+        boolean int8 = accel == ACCEL_CPU_INT8 || accel == ACCEL_GPU_INT8 || isNpu(accel) || accel == ACCEL_GPU_FP16
+                || accel == ACCEL_GPU_FP16_ATTN;
         boolean gpu = isGpu(accel);
         File text = graphFile(plan.textModel, int8);
         if (npu) {
@@ -1317,6 +1318,7 @@ public final class Engine {
             }
         }
         File vision = plan.visionModel == null ? null : graphFile(plan.visionModel, int8);
+        if (accel == ACCEL_GPU_FP16_ATTN && vision != null) vision = fp16AttentionGraph(vision);
         if (accel == ACCEL_GPU_FP16 && plan.visionModel != null) {
             vision = plan.fp16Vision == null ? null : new File(modelDir, plan.fp16Vision);
             if (vision == null || !vision.exists()) {
@@ -1329,6 +1331,20 @@ public final class Engine {
         } finally {
             if (gpu) prefs.edit().putBoolean("gpu_probe", false).commit();
         }
+    }
+
+    /**
+     * The int8 vision graph with its fused attention computed in fp16 (OnnxPatcher.fp16Attention), next to it so
+     * the external weights resolve; rebuilt when the int8 copy changes.
+     */
+    private File fp16AttentionGraph(File int8) throws java.io.IOException {
+        File patched = new File(int8.getPath().replace(".onnx", ".fp16attn.onnx"));
+        if (!patched.exists() || patched.lastModified() < int8.lastModified()) {
+            if (OnnxPatcher.fp16Attention(int8, patched) == 0) {
+                throw new java.io.IOException("в визуальном энкодере нет слитого внимания (MultiHeadAttention)");
+            }
+        }
+        return patched;
     }
 
     private static volatile boolean liteRtLoaded;
@@ -1411,6 +1427,11 @@ public final class Engine {
         Embedder m = null;
         try {
             m = createModel(cfg, tok, plan, accel, nThreads, batch);
+            if (m instanceof LiteRtEmbedder && ((LiteRtEmbedder) m).budgetFixed()) {
+                // its numbers would be for the bundle's own (smaller) detail, not for the one asked
+                r.error = "сборка не принимает " + maxBudget() + " токенов — работает только со своей детализацией";
+                return r;
+            }
             List<io.github.teoplaydor.semsearch.core.ImagePreprocessor.Source> imgs =
                     new ArrayList<io.github.teoplaydor.semsearch.core.ImagePreprocessor.Source>();
             for (int k = 0; k < batch; k++) imgs.add(new PatternSource(640, 480, 2 + k));
@@ -1651,7 +1672,10 @@ public final class Engine {
                             }
                         }
                     }
-                    if (best == null) throw new IllegalStateException("ни один вариант не сработал");
+                    if (best == null) {
+                        throw new IllegalStateException(space ? "LiteRT-LM не подходит для этой детализации — «Вернуться на ONNX "
+                                + "Runtime» в настройках" : "ни один вариант не сработал");
+                    }
                     // The other end of the detail scale. With auto detail screenshots get it: the winner and the
                     // fastest LiteRT-LM variant are measured there too (after a pause — the phone is warm by now)
                     // and the choice weighs both by the gallery's real share of screenshots.
