@@ -166,6 +166,31 @@ public class AppFlowTest {
         Robo.waitFor("clear", () -> s.count(IndexStore.KIND_PHOTO) == 0 && s.count(IndexStore.KIND_VIDEO) == 0);
         assertFalse(s.hasMedia(IndexStore.KIND_PHOTO, 42));
         assertEquals(3, s.count(IndexStore.KIND_NOTE));
+
+        // Regression (0.6.0): the automatic first accelerator check of the fast model runs without a
+        // callback, and posting its report crashed the app right after the model loaded. Whatever happens
+        // inside (here ONNX Runtime can't even start), it must end quietly with a report and an error state.
+        e.prefs().edit().putInt("photo_model", 1).apply();
+        File fast = new File(a.getFilesDir(), "siglip-b16");
+        assertTrue(fast.mkdirs());
+        try (FileOutputStream o = new FileOutputStream(new File(fast, "manifest.json"))) {
+            o.write(("{\"repo\":\"test\",\"text\":\"onnx/text_model_quantized.onnx\","
+                    + "\"vision\":\"onnx/vision_model_quantized.onnx\",\"files\":[]}").getBytes("UTF-8"));
+        }
+        e.checkFast(null);
+        Robo.waitFor("check and reload", () -> e.state == Engine.State.ERROR);
+        Robo.settle(500);
+        assertNotNull(e.fastReport());
+        System.out.println("auto-check report: " + e.fastReport().replace('\n', ' '));
+
+        // Two crashes in a row while loading: no automatic third attempt, an explanation instead.
+        e.prefs().edit().putInt("crash_streak", 2).putString("died_during", "загрузка SigLIP 2 B/16 (Процессор)").apply();
+        e.state = Engine.State.NO_MODEL;
+        e.ensureLoaded();
+        Robo.settle(200);
+        assertEquals(Engine.State.ERROR, e.state);
+        assertTrue(e.status, e.status.contains("закрывалось при загрузке"));
+        assertTrue(e.errorDetails, e.errorDetails.contains("Шаг в момент сбоя: загрузка SigLIP 2 B/16"));
         a.finish();
     }
 }

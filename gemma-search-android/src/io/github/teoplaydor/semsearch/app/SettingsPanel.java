@@ -225,6 +225,7 @@ final class SettingsPanel extends FrameLayout implements Engine.Listener {
             @Override
             public void run() {
                 if (e.state == Engine.State.DOWNLOADING) e.cancelDownload();
+                else if (e.state == Engine.State.ERROR && e.hasModelFiles()) e.retryLoad();
                 else a.downloadModel();
             }
         });

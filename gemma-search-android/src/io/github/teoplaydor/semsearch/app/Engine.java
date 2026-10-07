@@ -120,6 +120,18 @@ public final class Engine {
             // Existing installs keep EmbeddingGemma 2 for photos; new ones start with the fast model.
             prefs.edit().putInt("photo_model", manifest.exists() ? FastModel.GEMMA : FastModel.B16).apply();
         }
+        CrashLog.install(ctx.getApplicationContext());
+        String died = prefs.getString("last_step", "");
+        if (!died.isEmpty()) {
+            // The previous run ended inside a risky step (model load, warm-up, accelerator check).
+            prefs.edit().putString("died_during", died).putString("last_step", "")
+                    .putInt("crash_streak", prefs.getInt("crash_streak", 0) + 1).apply();
+        }
+        String checkProbe = prefs.getString("s_probe_check", null);
+        if (checkProbe != null) {
+            // It died measuring this accelerator + batch: the auto-check skips it from now on.
+            prefs.edit().putBoolean("s_broken_" + checkProbe, true).remove("s_probe_check").apply();
+        }
         String probe = prefs.getString("s_probe", null);
         if (probe != null) {
             // The previous run died while setting up an NPU/GPU session (driver crash): never use that one again.
@@ -148,6 +160,20 @@ public final class Engine {
         ensureLoaded(true);
     }
 
+    /**
+     * Records the risky native step the app is in (synchronously: a native crash gives no second
+     * chance); empty when done. The next start reads it to report and to avoid a crash loop.
+     */
+    private void mark(String step) {
+        prefs.edit().putString("last_step", step).commit();
+    }
+
+    /** "Retry" after an error, including after crashes during loading: try once more. */
+    public void retryLoad() {
+        prefs.edit().putInt("crash_streak", 0).apply();
+        loadModel(true);
+    }
+
     /** For the background job: the photo model is enough, the notes model stays on disk. */
     public void ensureLoadedForIndexing() {
         ensureLoaded(false);
@@ -155,6 +181,15 @@ public final class Engine {
 
     private void ensureLoaded(boolean full) {
         if (!hasModelFiles()) return;
+        if (state == State.NO_MODEL && prefs.getInt("crash_streak", 0) >= 2) {
+            // Closed twice in a row while loading: don't load automatically into a third crash.
+            state = State.ERROR;
+            status = "Приложение закрывалось при загрузке модели (" + prefs.getString("died_during", "") + "). "
+                    + "Нажмите «Повторить» или выберите другую модель для фото.";
+            errorDetails = CrashLog.report(ctx);
+            notifyChanged();
+            return;
+        }
         if (state == State.NO_MODEL) loadModel(full);
         else if (state == State.READY && full && !loadedFull) loadModel(true);
     }
@@ -208,6 +243,7 @@ public final class Engine {
     }
 
     private <T> void post(final Callback<T> cb, final T r, final Exception e) {
+        if (cb == null) return; // e.g. the automatic first accelerator check: nobody waits for its report
         main.post(new Runnable() {
             @Override
             public void run() {
@@ -375,12 +411,14 @@ public final class Engine {
                             return;
                         }
                         step = "инициализация " + FastModel.NAMES[pm];
+                        mark("загрузка " + FastModel.NAMES[pm] + " (" + FastModel.accel(prefs, pm).label + ")");
                         photo = openFast(pm, plan);
                         mediaSig = "s|" + HfRepo.manifestRepo(FastModel.manifest(ctx, pm));
                         HfRepo.Plan g = gemmaPlan();
                         String gSig = g != null ? gemmaSig(g) : null;
                         if (g != null && full) {
                             step = "EmbeddingGemma 2 для заметок";
+                            mark("загрузка EmbeddingGemma 2 для заметок");
                             try {
                                 model = loadGemma(g, false);
                                 notesSig = gSig;
@@ -396,7 +434,10 @@ public final class Engine {
                         }
                     }
                     step = "пробный запуск";
+                    mark("пробный запуск " + FastModel.NAMES[pm]);
                     photo.embedQuery("привет");
+                    mark("");
+                    prefs.edit().putInt("crash_streak", 0).apply();
                     if (!mediaSig.equals(prefs.getString("media_sig", ""))) {
                         // Different weights: old photo vectors are not comparable.
                         store.clearMedia();
@@ -416,6 +457,7 @@ public final class Engine {
                             + (photo.supportsImages() ? "" : " · только текст");
                     autoCheck = pm != FastModel.GEMMA && full && !FastModel.checked(prefs, pm);
                 } catch (Throwable e) {
+                    mark("");
                     closeModels();
                     state = State.ERROR;
                     String msg = e.getMessage() != null ? e.getMessage() : e.toString();
@@ -1131,16 +1173,16 @@ public final class Engine {
                         int t = (Integer) c[1], b = (Integer) c[2];
                         String name = a.label + (a == SigLip.Accel.CPU || a == SigLip.Accel.XNNPACK ? ", потоков " + t : "")
                                 + (b > 1 ? ", пачка " + b : "");
-                        if (prefs.getBoolean("s_broken_" + a.name(), false)) {
-                            rep.append("• ").append(name).append(": пропущено — в прошлый раз уронило драйвер\n");
+                        String key = a.name() + "_" + b;
+                        if (prefs.getBoolean("s_broken_" + a.name(), false) || prefs.getBoolean("s_broken_" + key, false)) {
+                            rep.append("• ").append(name).append(": пропущено — в прошлый раз приложение на нём закрылось\n");
                             continue;
                         }
                         status = "Проверяю ускорители (" + (i + 1) + " из " + cands.size() + "): " + name;
                         notifyChanged();
-                        boolean risky = a == SigLip.Accel.NPU || a == SigLip.Accel.NPU_FP32 || a == SigLip.Accel.GPU;
-                        if (risky) prefs.edit().putString("s_probe", a.name()).commit();
+                        prefs.edit().putString("s_probe_check", key).putString("last_step", "автопроверка: " + name).commit();
                         FastModel.Measure m = FastModel.measure(dir, a.needsFp32() ? fp32 : int8, a, t, b, reference);
-                        if (risky) prefs.edit().remove("s_probe").commit();
+                        prefs.edit().remove("s_probe_check").putString("last_step", "").commit();
                         if (m.error != null) {
                             rep.append("• ").append(name).append(": не работает — ").append(m.error).append('\n');
                             continue;
@@ -1275,6 +1317,7 @@ public final class Engine {
                         c.slowModel = full;
                     }
                     c.slowName = FastModel.NAMES[FastModel.GEMMA];
+                    mark("сравнение моделей");
                     for (IndexStore.Item it : store.recent(true, false, false, n)) c.photos.add(it);
                     cmpTotal = c.photos.size();
                     c.fast = new float[c.photos.size()][];
@@ -1310,7 +1353,10 @@ public final class Engine {
                         cmpDone = i + 1;
                         notifyChanged();
                     }
-                    if (c.cancelled) return;
+                    if (c.cancelled) {
+                        mark("");
+                        return;
+                    }
                     c.fastMs = fastNs / 1e6 / Math.max(1, done);
                     c.slowMs = slowNs / 1e6 / Math.max(1, done);
                     double agree = 0;
@@ -1320,8 +1366,10 @@ public final class Engine {
                         agree += r.shared / (double) COMPARE_TOP;
                     }
                     c.agreement = agree / COMPARE_QUERIES.length;
+                    mark("");
                     post(cb, c, null);
                 } catch (Exception e) {
+                    mark("");
                     endCompare(c);
                     post(cb, null, e);
                 }

@@ -119,6 +119,12 @@ public final class MainActivity extends Activity implements Engine.Listener, Vie
         engine.ensureLoaded();
         if (AutoIndex.hasMediaAccess(this)) AutoIndex.schedule(this);
         resumeIdleIndex();
+        ui.post(new Runnable() {
+            @Override
+            public void run() {
+                reportPreviousCrash();
+            }
+        });
         handleIntent(getIntent());
         onEngineChanged();
     }
@@ -641,7 +647,7 @@ public final class MainActivity extends Activity implements Engine.Listener, Vie
             card(Icon.INFO, "Модель не загрузилась", engine.status, "Повторить", new Runnable() {
                 @Override
                 public void run() {
-                    engine.loadModel();
+                    engine.retryLoad();
                 }
             }, "Скопировать подробности", new Runnable() {
                 @Override
@@ -864,6 +870,22 @@ public final class MainActivity extends Activity implements Engine.Listener, Vie
         if (code != REQ_MEDIA) return;
         if (AutoIndex.hasMediaAccess(this)) startIndexing();
         else toast("Без доступа к галерее индексировать нечего");
+    }
+
+    /** If the app closed unexpectedly last time, says so once and offers the details for the chat. */
+    private void reportPreviousCrash() {
+        final String report = CrashLog.takeUnseen(this);
+        if (report == null || isFinishing()) return;
+        String shown = report.length() > 1400 ? report.substring(0, 1400) + "…" : report;
+        sheet = Sheet.message(root, "Приложение закрылось в прошлый раз", shown
+                + "\n\nЕсли повторится — скопируйте отчёт и пришлите его в чат.", "Скопировать отчёт", new Runnable() {
+            @Override
+            public void run() {
+                ClipboardManager cm = (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
+                cm.setPrimaryClip(ClipData.newPlainText("SemSearch crash", report));
+                toast("Скопировано — вставьте в чат");
+            }
+        });
     }
 
     // ------------------------------------------------------------------ indexing while the phone rests
