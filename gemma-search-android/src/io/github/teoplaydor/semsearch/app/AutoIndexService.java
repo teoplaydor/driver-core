@@ -39,6 +39,13 @@ public final class AutoIndexService extends JobService implements Engine.Listene
                     finish();
                     return;
                 }
+                if (n >= IdleIndex.BIG_BATCH && IdleIndex.enabled(AutoIndexService.this)) {
+                    // a big batch waits for the phone to rest; the idle service takes it
+                    if (IdleIndex.start(AutoIndexService.this) || isInteractive()) {
+                        finish();
+                        return;
+                    }
+                }
                 engine.ensureLoadedForIndexing();
                 onEngineChanged();
             }
@@ -58,6 +65,11 @@ public final class AutoIndexService extends JobService implements Engine.Listene
             return;
         }
         if (!engine.indexing) finish();
+    }
+
+    private boolean isInteractive() {
+        android.os.PowerManager pm = (android.os.PowerManager) getSystemService(POWER_SERVICE);
+        return pm != null && pm.isInteractive();
     }
 
     private void finish() {

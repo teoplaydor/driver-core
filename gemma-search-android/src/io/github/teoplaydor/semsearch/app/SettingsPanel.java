@@ -33,7 +33,9 @@ final class SettingsPanel extends FrameLayout implements Engine.Listener {
             threadsValue, bridgeValue, dimsValue, photoModelValue, gemmaValue, sourceValue, sideValue;
     private TextView modelButton, indexButton, errorButton, deleteButton, fp32Button;
     private ProgressLine modelProgress, indexProgress;
-    private Toggle autoToggle;
+    private Toggle autoToggle, idleToggle, batteryToggle;
+    private View batteryRow;
+    private TextView unrestrictedValue;
 
     SettingsPanel(MainActivity activity) {
         super(activity);
@@ -136,6 +138,24 @@ final class SettingsPanel extends FrameLayout implements Engine.Listener {
         }
         card.addView(r, new LinearLayout.LayoutParams(-1, -2));
         return value;
+    }
+
+    /** Title + hint on the left, a switch on the right; returns the row. */
+    private View toggleRow(LinearLayout card, String title, String hint, Toggle toggle) {
+        Context c = getContext();
+        LinearLayout r = new LinearLayout(c);
+        r.setGravity(Gravity.CENTER_VERTICAL);
+        r.setPadding(Ui.dp(c, 18), Ui.dp(c, 12), Ui.dp(c, 16), Ui.dp(c, 12));
+        LinearLayout texts = new LinearLayout(c);
+        texts.setOrientation(LinearLayout.VERTICAL);
+        texts.addView(Ui.text(c, title, 15, Ui.TEXT, Ui.MEDIUM));
+        TextView h = Ui.text(c, hint, 12.5f, Ui.TEXT3, Ui.REGULAR);
+        h.setPadding(0, Ui.dp(c, 4), 0, 0);
+        texts.addView(h);
+        r.addView(texts, new LinearLayout.LayoutParams(0, -2, 1));
+        r.addView(toggle);
+        card.addView(r);
+        return r;
     }
 
     private TextView action(LinearLayout card, String label, boolean primary, final Runnable r) {
@@ -387,6 +407,39 @@ final class SettingsPanel extends FrameLayout implements Engine.Listener {
         r.addView(autoToggle);
         card.addView(r);
 
+        idleToggle = new Toggle(c, IdleIndex.enabled(c));
+        idleToggle.setListener(new Toggle.Listener() {
+            @Override
+            public void changed(boolean on) {
+                if (on) a.enableIdleIndex();
+                else IdleIndex.setEnabled(getContext(), false);
+                onEngineChanged();
+            }
+        });
+        toggleRow(card, "Пока телефон не используется", "экран погас — индексирую, взяли телефон — пауза", idleToggle);
+        batteryToggle = new Toggle(c, IdleIndex.onBattery(c));
+        batteryToggle.setListener(new Toggle.Listener() {
+            @Override
+            public void changed(boolean on) {
+                IdleIndex.prefs(getContext()).edit().putBoolean("idle_battery", on).apply();
+            }
+        });
+        batteryRow = toggleRow(card, "И от батареи", "при заряде выше " + IdleIndex.MIN_BATTERY + "%, иначе только на зарядке",
+                batteryToggle);
+        unrestrictedValue = row(card, "Не прерывать ночью", "снять ограничения батареи для приложения", new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    getContext().startActivity(IdleIndex.unrestricted(getContext())
+                            ? new android.content.Intent(android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                            android.net.Uri.parse("package:" + getContext().getPackageName()))
+                            : IdleIndex.exemptionRequest(getContext()));
+                } catch (Exception ignored) {
+                    a.toast("На этом телефоне такого экрана нет");
+                }
+            }
+        });
+
         photosValue = row(card, "Фото", null, new Runnable() {
             @Override
             public void run() {
@@ -631,6 +684,12 @@ final class SettingsPanel extends FrameLayout implements Engine.Listener {
         indexStatus.setVisibility(status.isEmpty() ? GONE : VISIBLE);
         indexButton.setText(e.indexing ? "Остановить" : "Индексировать сейчас");
         autoToggle.setOn(AutoIndex.enabled(getContext()), false);
+        boolean idle = IdleIndex.enabled(getContext());
+        idleToggle.setOn(idle, false);
+        batteryRow.setVisibility(idle ? VISIBLE : GONE);
+        rowOf(unrestrictedValue).setVisibility(idle ? VISIBLE : GONE);
+        unrestrictedValue.setText(IdleIndex.unrestricted(getContext()) ? "снято" : "разрешить");
+        unrestrictedValue.setTextColor(IdleIndex.unrestricted(getContext()) ? Ui.TEXT2 : Ui.ACCENT);
         int pl = e.prefs().getInt("photo_limit", 4);
         photosValue.setText(pl >= 4 ? "все" : Engine.PHOTO_LIMITS[pl] + " последних");
         int vl = e.prefs().getInt("video_limit", 1);

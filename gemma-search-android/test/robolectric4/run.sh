@@ -4,6 +4,7 @@
 #   AppFlowTest     — gallery, search, viewer, settings and notes driven through the real Activity
 #   AppIndexingTest — MediaStore → decode → embed → SQLite with a stand-in model, Russian bridge
 #   AutoIndexTest   — background jobs: content triggers on MediaStore, the periodic safety net
+#   IdleIndexTest   — indexing while the phone rests: screen off/on, battery, wake lock, self-stop
 # Needs JDK 21 and Maven. androidx.test (Google Maven) is not used: a tiny API shim in shim/
 # stands in for the few classes Robolectric touches.
 # usage: test/robolectric4/run.sh [TestClass...]
@@ -61,7 +62,7 @@ ANDROID_JAR=${ANDROID_JAR:-/usr/lib/android-sdk/platforms/android-23/android.jar
 
 rm -rf build/shots
 TESTS=("$@")
-[ ${#TESTS[@]} -gt 0 ] || TESTS=(UiShots AppFlowTest AppIndexingTest AutoIndexTest)
+[ ${#TESTS[@]} -gt 0 ] || TESTS=(UiShots AppFlowTest AppIndexingTest AutoIndexTest IdleIndexTest)
 # One JVM per class: Engine is an app-wide singleton.
 for t in "${TESTS[@]}"; do
   echo "-- $t"

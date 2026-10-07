@@ -45,7 +45,7 @@ import java.util.concurrent.Executors;
  * Settings live in a panel, the viewer opens over the grid, notes are one tab of the gallery.
  */
 public final class MainActivity extends Activity implements Engine.Listener, Viewer.Host, MasonryView.Host {
-    private static final int REQ_PICK_IMAGE = 7, REQ_MEDIA = 8;
+    private static final int REQ_PICK_IMAGE = 7, REQ_MEDIA = 8, REQ_IDLE = 9;
     private static final int RECENT_LIMIT = 3000;
 
     /** Test hook: thumbnails for items that have no MediaStore entry (screenshots on Robolectric). */
@@ -118,6 +118,7 @@ public final class MainActivity extends Activity implements Engine.Listener, Vie
         engine.addListener(this);
         engine.ensureLoaded();
         if (AutoIndex.hasMediaAccess(this)) AutoIndex.schedule(this);
+        resumeIdleIndex();
         handleIntent(getIntent());
         onEngineChanged();
     }
@@ -667,12 +668,17 @@ public final class MainActivity extends Activity implements Engine.Listener, Vie
             card(Icon.SIMILAR, "Загружаю модель…", null, null, null, null, null);
         } else if (!engine.indexing) {
             card(Icon.IMAGE, "Галерея ещё не проиндексирована", "Это нужно один раз — дальше новые фото добавляются сами",
-                    "Начать", new Runnable() {
+                    "Начать сейчас", new Runnable() {
                         @Override
                         public void run() {
                             requestMediaAndIndex();
                         }
-                    }, null, null);
+                    }, IdleIndex.enabled(this) ? null : "Пока телефон не используется", new Runnable() {
+                        @Override
+                        public void run() {
+                            enableIdleIndex();
+                        }
+                    });
         } else {
             card(Icon.IMAGE, "Индексирую галерею", "Фото появятся здесь по мере обработки", null, null, null, null);
         }
@@ -846,9 +852,69 @@ public final class MainActivity extends Activity implements Engine.Listener, Vie
 
     @Override
     public void onRequestPermissionsResult(int code, String[] perms, int[] res) {
+        if (code == REQ_IDLE) {
+            if (!AutoIndex.hasMediaAccess(this)) {
+                toast("Без доступа к галерее индексировать нечего");
+                return;
+            }
+            AutoIndex.schedule(this);
+            finishIdleSetup();
+            return;
+        }
         if (code != REQ_MEDIA) return;
         if (AutoIndex.hasMediaAccess(this)) startIndexing();
         else toast("Без доступа к галерее индексировать нечего");
+    }
+
+    // ------------------------------------------------------------------ indexing while the phone rests
+
+    /**
+     * Turns on indexing-while-idle: gallery access, the (silent) notification Android requires for
+     * foreground work, and the exemption from battery limits so the work survives the night.
+     */
+    void enableIdleIndex() {
+        List<String> need = new ArrayList<String>();
+        if (!AutoIndex.hasMediaAccess(this)) {
+            if (Build.VERSION.SDK_INT >= 33) {
+                need.add("android.permission.READ_MEDIA_IMAGES");
+                need.add("android.permission.READ_MEDIA_VIDEO");
+            } else {
+                need.add(Manifest.permission.READ_EXTERNAL_STORAGE);
+            }
+        }
+        if (Build.VERSION.SDK_INT >= 33 && checkSelfPermission("android.permission.POST_NOTIFICATIONS")
+                != PackageManager.PERMISSION_GRANTED) {
+            need.add("android.permission.POST_NOTIFICATIONS");
+        }
+        if (!need.isEmpty()) {
+            requestPermissions(need.toArray(new String[0]), REQ_IDLE);
+            return;
+        }
+        finishIdleSetup();
+    }
+
+    private void finishIdleSetup() {
+        IdleIndex.setEnabled(this, true);
+        if (!IdleIndex.unrestricted(this)) {
+            try {
+                startActivity(IdleIndex.exemptionRequest(this));
+            } catch (Exception e) {
+                // no such screen on this phone: the service still runs, maybe with pauses at night
+            }
+        }
+        toast("Начну, когда экран погаснет, и встану на паузу, как только возьмёте телефон");
+        updateEmpty();
+    }
+
+    /** With the mode on, (re)starts the service when there is a big batch to index. */
+    private void resumeIdleIndex() {
+        if (!IdleIndex.enabled(this) || !AutoIndex.hasMediaAccess(this)) return;
+        engine.countPending(new Engine.Callback<Integer>() {
+            @Override
+            public void done(Integer n, Exception e) {
+                if (n != null && n >= IdleIndex.BIG_BATCH) IdleIndex.start(MainActivity.this);
+            }
+        });
     }
 
     private void startIndexing() {
