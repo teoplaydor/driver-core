@@ -151,7 +151,7 @@ final class MasonryView extends ViewGroup {
         this.host = host;
         gap = Ui.dp(c, 4);
         padH = Ui.dp(c, 10);
-        padTop = Ui.dp(c, 2);
+        padTop = Ui.dp(c, 10);
         padBottom = Ui.dp(c, 110);
         scroller = new OverScroller(c);
         ViewConfiguration vc = ViewConfiguration.get(c);

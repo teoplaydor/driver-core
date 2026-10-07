@@ -30,8 +30,8 @@ final class SettingsPanel extends FrameLayout implements Engine.Listener {
 
     // live parts
     private TextView modelValue, modelHint, indexValue, indexStatus, accelValue, photosValue, videosValue, detailValue,
-            threadsValue, bridgeValue, dimsValue;
-    private TextView modelButton, indexButton, errorButton, deleteButton;
+            threadsValue, bridgeValue, dimsValue, photoModelValue, gemmaValue, sourceValue, sideValue;
+    private TextView modelButton, indexButton, errorButton, deleteButton, fp32Button;
     private ProgressLine modelProgress, indexProgress;
     private Toggle autoToggle;
 
@@ -76,7 +76,8 @@ final class SettingsPanel extends FrameLayout implements Engine.Listener {
         buildIndex();
         buildSpeed();
         buildSearch();
-        TextView about = Ui.text(c, "EmbeddingGemma 2 (Google DeepMind, Apache 2.0) · версия " + BuildInfo.version(c)
+        buildLook();
+        TextView about = Ui.text(c, "SigLIP 2 и EmbeddingGemma 2 (Google, Apache 2.0) · версия " + BuildInfo.version(c)
                 + "\nВсё считается на телефоне, файлы никуда не отправляются.", 12, Ui.TEXT3, Ui.REGULAR);
         about.setPadding(Ui.dp(c, 6), Ui.dp(c, 18), Ui.dp(c, 6), 0);
         list.addView(about);
@@ -84,6 +85,10 @@ final class SettingsPanel extends FrameLayout implements Engine.Listener {
     }
 
     // ------------------------------------------------------------------ building blocks
+
+    private static View rowOf(TextView value) {
+        return (View) value.getParent();
+    }
 
     private LinearLayout section(String name) {
         Context c = getContext();
@@ -187,7 +192,13 @@ final class SettingsPanel extends FrameLayout implements Engine.Listener {
 
     private void buildModel() {
         LinearLayout card = section("Модель");
-        modelValue = row(card, "EmbeddingGemma 2", null, null);
+        photoModelValue = row(card, "Модель для фото", null, new Runnable() {
+            @Override
+            public void run() {
+                choosePhotoModel();
+            }
+        });
+        modelValue = row(card, "Состояние", null, null);
         modelProgress = progress(card);
         modelHint = note(card);
         modelButton = action(card, "Скачать", true, new Runnable() {
@@ -205,7 +216,13 @@ final class SettingsPanel extends FrameLayout implements Engine.Listener {
                 a.toast("Скопировано — вставьте в чат");
             }
         });
-        row(card, "Источник", "Hugging Face, токен, фото и видео", new Runnable() {
+        gemmaValue = row(card, "EmbeddingGemma 2 для заметок", "точнее ищет по смыслу в заметках", new Runnable() {
+            @Override
+            public void run() {
+                gemmaSheet();
+            }
+        });
+        sourceValue = row(card, "Источник EmbeddingGemma 2", "Hugging Face, токен, фото и видео", new Runnable() {
             @Override
             public void run() {
                 sourceSheet();
@@ -222,6 +239,51 @@ final class SettingsPanel extends FrameLayout implements Engine.Listener {
                 });
             }
         });
+    }
+
+    private void choosePhotoModel() {
+        final int cur = e.photoModel();
+        Sheet.choose(root(), "Модель для фото", FastModel.NAMES, FastModel.HINTS, cur, new Sheet.Choice() {
+            @Override
+            public void chosen(final int i) {
+                if (i == cur) return;
+                IndexStore s = e.store();
+                boolean hasIndex = s != null && s.count(IndexStore.KIND_PHOTO) + s.count(IndexStore.KIND_VIDEO) > 0;
+                Runnable apply = new Runnable() {
+                    @Override
+                    public void run() {
+                        e.setPhotoModel(i);
+                        onEngineChanged();
+                    }
+                };
+                if (!hasIndex) {
+                    apply.run();
+                    return;
+                }
+                Sheet.confirm(root(), "Сменить модель?", "Фото и видео проиндексируются заново новой моделью"
+                        + (i == FastModel.GEMMA ? " — это долго." : " — это быстро.") + " Заметки не тронутся.", "Сменить", apply);
+            }
+        });
+    }
+
+    private void gemmaSheet() {
+        if (!e.gemmaDownloaded()) {
+            Sheet.confirm(root(), "Скачать EmbeddingGemma 2?", "Несколько сотен МБ. Заметки будут искаться точнее, "
+                    + "и появится сравнение моделей на ваших фото.", "Скачать", new Runnable() {
+                @Override
+                public void run() {
+                    e.download(e.repo(), e.prefs().getString("token", ""), true);
+                }
+            });
+        } else {
+            Sheet.confirm(root(), "Удалить EmbeddingGemma 2?", "Заметки будут искаться быстрой моделью — проще, зато меньше памяти.",
+                    "Удалить", new Runnable() {
+                        @Override
+                        public void run() {
+                            e.deleteGemma();
+                        }
+                    });
+        }
     }
 
     private void sourceSheet() {
@@ -384,6 +446,17 @@ final class SettingsPanel extends FrameLayout implements Engine.Listener {
         accelValue = row(card, "Ускорение", null, new Runnable() {
             @Override
             public void run() {
+                if (e.photoModel() != FastModel.GEMMA) {
+                    String rep = e.fastReport();
+                    Sheet.message(root(), "Ускорение", rep != null ? rep : "Автопроверка ещё не проводилась — она начнётся "
+                            + "сама после загрузки модели.", "Проверить снова", new Runnable() {
+                        @Override
+                        public void run() {
+                            a.runBenchmark();
+                        }
+                    });
+                    return;
+                }
                 Sheet.choose(root(), "Где считать", Engine.ACCEL_NAMES, null, e.accel(), new Sheet.Choice() {
                     @Override
                     public void chosen(int i) {
@@ -395,6 +468,19 @@ final class SettingsPanel extends FrameLayout implements Engine.Listener {
                         e.prefs().edit().putInt("accel", i).apply();
                         if (e.ready() && !e.indexing) e.loadModel();
                         onEngineChanged();
+                    }
+                });
+            }
+        });
+        fp32Button = action(card, "Проверить NPU и видеокарту", false, new Runnable() {
+            @Override
+            public void run() {
+                Sheet.confirm(root(), "Проверить NPU и видеокарту?", String.format(Locale.ROOT, "Им нужна полная версия модели — "
+                        + "докачаю ≈%d МБ, потом сравню скорость и точность всех вариантов и оставлю лучший.",
+                        e.fp32EstimateBytes() >> 20), "Докачать и проверить", new Runnable() {
+                    @Override
+                    public void run() {
+                        e.downloadFast(true);
                     }
                 });
             }
@@ -463,6 +549,29 @@ final class SettingsPanel extends FrameLayout implements Engine.Listener {
                 a.runDiagnostics();
             }
         });
+        action(card, "Сравнить модели на моих фото", false, new Runnable() {
+            @Override
+            public void run() {
+                a.openCompare();
+            }
+        });
+    }
+
+    private void buildLook() {
+        LinearLayout card = section("Вид");
+        sideValue = row(card, "Панель поиска", "фильтры и поиск сбоку, под большим пальцем", new Runnable() {
+            @Override
+            public void run() {
+                Sheet.choose(root(), "Панель поиска", new String[]{"Справа", "Слева"},
+                        new String[]{"под правым большим пальцем", "под левым"}, a.railSide(), new Sheet.Choice() {
+                            @Override
+                            public void chosen(int i) {
+                                a.setRailSide(i);
+                                onEngineChanged();
+                            }
+                        });
+            }
+        });
     }
 
     // ------------------------------------------------------------------ state
@@ -484,7 +593,9 @@ final class SettingsPanel extends FrameLayout implements Engine.Listener {
         modelProgress.setVisibility(busy ? VISIBLE : GONE);
         modelProgress.setIndeterminate(st == Engine.State.LOADING || e.dlTotal <= 0);
         if (e.dlTotal > 0) modelProgress.setProgress((float) e.dlDone / e.dlTotal);
-        String hint = st == Engine.State.READY ? Engine.ACCEL_NAMES[e.loadedAccel] + ", потоков " + e.threads
+        boolean fast = e.photoModel() != FastModel.GEMMA;
+        String hint = e.dlError != null && !busy ? e.dlError
+                : st == Engine.State.READY ? (fast ? e.accelLabel : Engine.ACCEL_NAMES[e.loadedAccel] + ", потоков " + e.threads)
                 : st == Engine.State.DOWNLOADING && e.dlTotal > 0
                 ? String.format(Locale.ROOT, "%.0f из %.0f МБ", e.dlDone / 1048576.0, e.dlTotal / 1048576.0)
                 : st == Engine.State.ERROR ? e.status : "";
@@ -497,6 +608,15 @@ final class SettingsPanel extends FrameLayout implements Engine.Listener {
         modelButton.setTextColor(st == Engine.State.READY ? Ui.TEXT : Ui.ON_ACCENT);
         errorButton.setVisibility(st == Engine.State.ERROR && e.errorDetails != null ? VISIBLE : GONE);
         deleteButton.setVisibility(e.hasModelFiles() && !busy ? VISIBLE : GONE);
+        photoModelValue.setText(FastModel.NAMES[e.photoModel()]);
+        rowOf(gemmaValue).setVisibility(fast ? VISIBLE : GONE);
+        gemmaValue.setText(e.gemmaDownloaded() ? "скачана" : "не скачана");
+        rowOf(sourceValue).setVisibility(!fast || e.gemmaDownloaded() ? VISIBLE : GONE);
+        fp32Button.setVisibility(fast && e.fastNeedsFp32() && !busy && FastModel.acceleratorLikely() ? VISIBLE : GONE);
+        rowOf(detailValue).setVisibility(fast ? GONE : VISIBLE);
+        rowOf(threadsValue).setVisibility(fast ? GONE : VISIBLE);
+        rowOf(dimsValue).setVisibility(fast ? GONE : VISIBLE);
+        sideValue.setText(a.railSide() == 0 ? "справа" : "слева");
 
         IndexStore s = e.store();
         if (s != null) {
@@ -516,7 +636,8 @@ final class SettingsPanel extends FrameLayout implements Engine.Listener {
         int vl = e.prefs().getInt("video_limit", 1);
         videosValue.setText(vl == 0 ? "нет" : Engine.VIDEO_LIMITS[vl] + " последних");
         detailValue.setText(new String[]{"быстрая", "средняя", "максимальная"}[Math.max(0, Math.min(2, e.prefs().getInt("photo_detail", 0)))]);
-        accelValue.setText(Engine.ACCEL_NAMES[e.accel()].replace(" (WebGPU)", ""));
+        accelValue.setText(fast ? (e.accelLabel.isEmpty() ? "проверяю…" : e.accelLabel.replace(" (WebGPU)", "").replace(" (NNAPI)", ""))
+                : Engine.ACCEL_NAMES[e.accel()].replace(" (WebGPU)", ""));
         int t = e.prefs().getInt("threads", 0);
         threadsValue.setText(t == 0 ? "авто" : String.valueOf(t));
         bridgeValue.setText(new String[]{"русский + перевод", "только перевод", "без перевода"}[e.bridgeMode()]);

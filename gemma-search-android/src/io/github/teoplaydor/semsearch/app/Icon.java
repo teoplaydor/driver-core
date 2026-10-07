@@ -12,7 +12,8 @@ import android.graphics.drawable.Drawable;
 /** Thin line icons drawn in a 24×24 box (no icon font or vector assets needed). */
 final class Icon extends Drawable {
     static final int SEARCH = 0, CLOSE = 1, BACK = 2, TUNE = 3, IMAGE = 4, SHARE = 5, OPEN = 6, SIMILAR = 7, PLAY = 8,
-            PLUS = 9, NOTE = 10, TRASH = 11, CHECK = 12, CHEVRON = 13, STOP = 14, DOWNLOAD = 15, VIDEO = 16, INFO = 17;
+            PLUS = 9, NOTE = 10, TRASH = 11, CHECK = 12, CHEVRON = 13, STOP = 14, DOWNLOAD = 15, VIDEO = 16, INFO = 17,
+            GRID = 18;
 
     private final int kind;
     private final Paint p = new Paint(Paint.ANTI_ALIAS_FLAG);
@@ -56,6 +57,16 @@ final class Icon extends Drawable {
         p.setStyle(Paint.Style.STROKE);
         path.reset();
         switch (kind) {
+            case GRID: // a staggered gallery: tall and short tiles
+                r.set(4.5f, 4.5f, 11, 13.5f);
+                c.drawRoundRect(r, 2, 2, p);
+                r.set(4.5f, 16.5f, 11, 19.5f);
+                c.drawRoundRect(r, 1.5f, 1.5f, p);
+                r.set(13, 4.5f, 19.5f, 8.5f);
+                c.drawRoundRect(r, 1.5f, 1.5f, p);
+                r.set(13, 11.5f, 19.5f, 19.5f);
+                c.drawRoundRect(r, 2, 2, p);
+                break;
             case SEARCH:
                 c.drawCircle(11, 11, 6.5f, p);
                 line(c, 16, 16, 20, 20);

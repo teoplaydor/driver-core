@@ -111,6 +111,7 @@ public class AutoIndexTest {
         // A run with two new photos: indexes them with the model, then lets the model go.
         final Engine e = Engine.get(app);
         Robo.waitFor("store", () -> e.store() != null);
+        e.prefs().edit().putInt("photo_model", 0).apply();
         File model = new File(app.getFilesDir(), "model");
         assertTrue(model.mkdirs());
         try (FileOutputStream o = new FileOutputStream(new File(model, "manifest.json"))) {

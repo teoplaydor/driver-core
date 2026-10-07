@@ -3,6 +3,7 @@
 #   1. tokenizer parity  — HfTokenizer vs Rust `tokenizers` on the real Gemma 3 vocabulary (+ variants)
 #   2. pipeline parity   — EmbeddingGemma2 (Java + ONNX Runtime) vs transformers.js EmbeddingGemma2Model
 #                          on a dummy model with the same ONNX inputs/outputs (text, images, video)
+#                          and SigLIP 2 (the fast photo model) vs transformers.js SiglipText/VisionModel
 #   3. Hub download      — file selection, chunked external data, resume after disconnect, cancel
 #   4. app tests         — the real Activity/Engine/IndexStore/background jobs on Robolectric
 #                          (Android 14 runtime), plus screenshots of the screens in build/shots/
@@ -47,6 +48,13 @@ python3 -m pip install -q snowballstemmer
 python3 tools/stemmer_reference.py "$T/gemma3/tokenizer.json" "$T/stem-cases.tsv"
 java -Dfile.encoding=UTF-8 -cp "$T/cls" StemmerParityTest "$T/stem-cases.tsv"
 java -Dfile.encoding=UTF-8 -cp "$T/cls" QueryBridgeTest assets/ru_en_lexicon.txt
+
+echo "== 2b'. SigLIP 2 (fast photo model) vs transformers.js"
+python3 test/siglip/make_dummy_siglip.py "$T/gemma3/tokenizer.json" "$T/models/siglip-dummy" >/dev/null
+cp test/siglip/reference_siglip.mjs "$T/reference_siglip.mjs"
+(cd "$T" && node reference_siglip.mjs "$PWD/models" siglip-dummy > reference_siglip.json)
+javac --release 8 -XDstringConcat=inline -nowarn -encoding UTF-8 -cp "$T/cls:$T/ort-desktop.jar" -d "$T/cls" test/siglip/SigLipParityTest.java
+java -Dfile.encoding=UTF-8 -cp "$T/cls:$T/ort-desktop.jar" SigLipParityTest "$T/models/siglip-dummy" "$T/reference_siglip.json"
 
 echo "== 2c. int8 compute (accuracy_level) and GPU fallback"
 python3 -m pip install -q onnxruntime onnx_ir

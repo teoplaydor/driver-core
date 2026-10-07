@@ -59,6 +59,7 @@ public class AppIndexingTest {
         final MainActivity a = Robolectric.buildActivity(MainActivity.class).setup().get();
         final Engine e = Engine.get(a);
         Robo.waitFor("store", () -> e.store() != null);
+        e.prefs().edit().putInt("photo_model", 0).apply(); // the stand-in plays EmbeddingGemma 2 (batches, budgets)
         Robo.FakeEmbedder fake = new Robo.FakeEmbedder(concepts);
         e.attachModelForTest(fake);
         Robo.waitFor("ready", e::ready);

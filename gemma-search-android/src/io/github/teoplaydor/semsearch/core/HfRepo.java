@@ -24,6 +24,8 @@ public final class HfRepo {
 
     /** Quantisation preference for CPU inference: smallest first, fp16 variants last. */
     public static final String[] DTYPE_SUFFIXES = {"_q4", "_quantized", "_int8", "_uint8", "", "_q4f16", "_fp16"};
+    /** For small two-tower models (SigLIP): int8 is fast on phone CPUs and keeps quality; 4-bit only as a fallback. */
+    public static final String[] TOWER_SUFFIXES = {"_quantized", "_int8", "_uint8", "_q4", "", "_fp16"};
 
     public static final class RemoteFile {
         public final String path;
@@ -38,6 +40,8 @@ public final class HfRepo {
     public static final class Plan {
         public final List<RemoteFile> files = new ArrayList<RemoteFile>();
         public String textModel, visionModel;
+        /** Full-precision vision graph for NPU/GPU runs (SigLIP), or null. */
+        public String accelVision;
         public long totalBytes;
     }
 
@@ -91,6 +95,57 @@ public final class HfRepo {
         return out;
     }
 
+    /**
+     * Two-tower repo (SigLIP export: onnx/text_model*.onnx + onnx/vision_model*.onnx): the int8 graphs for the
+     * CPU and, with {@code fp32Vision}, also the full-precision vision graph that NNAPI and WebGPU need.
+     */
+    public static Plan planTowers(List<RemoteFile> files, boolean fp32Vision) throws IOException {
+        Plan p = new Plan();
+        for (RemoteFile f : files) {
+            if (f.path.indexOf('/') < 0 && f.path.endsWith(".json")) p.files.add(f);
+        }
+        p.textModel = pickComponent(files, "text_model", p, TOWER_SUFFIXES);
+        p.visionModel = pickComponent(files, "vision_model", p, TOWER_SUFFIXES);
+        if (p.textModel == null || p.visionModel == null) {
+            throw new IOException("В репозитории нет onnx/text_model*.onnx и onnx/vision_model*.onnx");
+        }
+        if (fp32Vision) {
+            String full = "onnx/vision_model.onnx";
+            if (find(files, full) == null) throw new IOException("В репозитории нет полной версии " + full);
+            if (!full.equals(p.visionModel)) pickComponent(files, "vision_model", p, new String[]{""});
+            p.accelVision = full;
+        }
+        for (RemoteFile f : p.files) p.totalBytes += Math.max(0, f.size);
+        boolean tok = false, pre = false;
+        for (RemoteFile f : p.files) {
+            if (f.path.equals("tokenizer.json")) tok = true;
+            if (f.path.equals("preprocessor_config.json")) pre = true;
+        }
+        if (!tok || !pre) throw new IOException("В репозитории нет tokenizer.json или preprocessor_config.json");
+        return p;
+    }
+
+    /** Model ids on the Hub matching {@code query}, most downloaded first. */
+    public List<String> search(String query) throws IOException {
+        HttpURLConnection c = open(host + "/api/models?search=" + java.net.URLEncoder.encode(query, "UTF-8")
+                + "&sort=downloads&direction=-1&limit=30", -1);
+        if (c.getResponseCode() != 200) throw new IOException("Hugging Face API: HTTP " + c.getResponseCode());
+        InputStream in = c.getInputStream();
+        List<String> out = new ArrayList<String>();
+        try {
+            List<Object> arr = MiniJson.arr(new MiniJson(new InputStreamReader(new BufferedInputStream(in), "UTF-8")).readValue());
+            if (arr != null) {
+                for (Object o : arr) {
+                    String id = MiniJson.str(MiniJson.obj(o), "id", MiniJson.str(MiniJson.obj(o), "modelId", null));
+                    if (id != null) out.add(id);
+                }
+            }
+        } finally {
+            in.close();
+        }
+        return out;
+    }
+
     /** Chooses config/tokenizer files and the best available quantisation of each ONNX component. */
     public static Plan plan(List<RemoteFile> files, boolean withVision) throws IOException {
         Plan p = new Plan();
@@ -98,9 +153,9 @@ public final class HfRepo {
             String n = f.path;
             if (n.indexOf('/') < 0 && n.endsWith(".json")) p.files.add(f);
         }
-        p.textModel = pickComponent(files, "model", p);
+        p.textModel = pickComponent(files, "model", p, DTYPE_SUFFIXES);
         if (p.textModel == null) throw new IOException("В репозитории нет onnx/model*.onnx");
-        if (withVision) p.visionModel = pickComponent(files, "vision_encoder", p);
+        if (withVision) p.visionModel = pickComponent(files, "vision_encoder", p, DTYPE_SUFFIXES);
         for (RemoteFile f : p.files) p.totalBytes += Math.max(0, f.size);
         boolean hasTok = false;
         for (RemoteFile f : p.files) if (f.path.equals("tokenizer.json")) hasTok = true;
@@ -108,8 +163,8 @@ public final class HfRepo {
         return p;
     }
 
-    private static String pickComponent(List<RemoteFile> files, String component, Plan p) {
-        for (String suffix : DTYPE_SUFFIXES) {
+    private static String pickComponent(List<RemoteFile> files, String component, Plan p, String[] suffixes) {
+        for (String suffix : suffixes) {
             String main = "onnx/" + component + suffix + ".onnx";
             RemoteFile mf = find(files, main);
             if (mf == null) continue;
@@ -225,6 +280,7 @@ public final class HfRepo {
         StringBuilder sb = new StringBuilder("{\"repo\":").append(MiniJson.write(repo));
         sb.append(",\"text\":").append(MiniJson.write(plan.textModel));
         sb.append(",\"vision\":").append(MiniJson.write(plan.visionModel));
+        if (plan.accelVision != null) sb.append(",\"accel_vision\":").append(MiniJson.write(plan.accelVision));
         sb.append(",\"files\":[");
         for (int i = 0; i < plan.files.size(); i++) {
             RemoteFile f = plan.files.get(i);
@@ -246,6 +302,7 @@ public final class HfRepo {
         Plan p = new Plan();
         p.textModel = MiniJson.str(m, "text", null);
         p.visionModel = MiniJson.str(m, "vision", null);
+        p.accelVision = MiniJson.str(m, "accel_vision", null);
         for (Object o : MiniJson.arr(m.get("files"))) {
             Map<String, Object> f = MiniJson.obj(o);
             RemoteFile rf = new RemoteFile(MiniJson.str(f, "path", ""), MiniJson.num(f, "size", -1));

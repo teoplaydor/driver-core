@@ -26,6 +26,7 @@ import io.github.teoplaydor.semsearch.core.ModelConfig;
 import io.github.teoplaydor.semsearch.core.OnnxPatcher;
 import io.github.teoplaydor.semsearch.core.PatternSource;
 import io.github.teoplaydor.semsearch.core.QueryBridge;
+import io.github.teoplaydor.semsearch.core.SigLip;
 import io.github.teoplaydor.semsearch.core.VectorMath;
 
 /**
@@ -66,8 +67,18 @@ public final class Engine {
     private final File manifest;
 
     private IndexStore store;
+    /** Notes and other text: EmbeddingGemma 2, or the photo model's text tower when it is the only model. */
     private Embedder model;
+    /** Photos and videos: EmbeddingGemma 2 or SigLIP 2 (pref "photo_model"). May be the same object as {@link #model}. */
+    private Embedder photo;
     private QueryBridge bridge;
+    /** The notes model is loaded too (not only the photo model, as for a background run). */
+    private volatile boolean loadedFull;
+    /** Notes vectors match the loaded notes model (false in a background run that skipped it). */
+    private volatile boolean notesUsable;
+    public volatile String accelLabel = "";
+    /** Last failed download of the fast model's extra files, shown in the settings. */
+    public volatile String dlError;
 
     /** How Russian queries reach photos/videos (pref "bridge_mode"). */
     public static final String[] BRIDGE_MODES = {
@@ -105,6 +116,19 @@ public final class Engine {
         }
         modelDir = new File(ctx.getFilesDir(), "model");
         manifest = new File(modelDir, "manifest.json");
+        if (!prefs.contains("photo_model")) {
+            // Existing installs keep EmbeddingGemma 2 for photos; new ones start with the fast model.
+            prefs.edit().putInt("photo_model", manifest.exists() ? FastModel.GEMMA : FastModel.B16).apply();
+        }
+        String probe = prefs.getString("s_probe", null);
+        if (probe != null) {
+            // The previous run died while setting up an NPU/GPU session (driver crash): never use that one again.
+            prefs.edit().putBoolean("s_broken_" + probe, true).remove("s_probe").apply();
+        }
+        if (!prefs.contains("media_sig") && prefs.contains("model_sig")) {
+            String old = prefs.getString("model_sig", "");
+            prefs.edit().putString("media_sig", old).putString("notes_sig", old).apply();
+        }
         ml.submit(new Runnable() {
             @Override
             public void run() {
@@ -121,9 +145,18 @@ public final class Engine {
 
     /** Loads the downloaded model unless it is already loaded or loading (screens and the background job call this). */
     public void ensureLoaded() {
-        if (manifest.exists() && state == State.NO_MODEL) {
-            loadModel();
-        }
+        ensureLoaded(true);
+    }
+
+    /** For the background job: the photo model is enough, the notes model stays on disk. */
+    public void ensureLoadedForIndexing() {
+        ensureLoaded(false);
+    }
+
+    private void ensureLoaded(boolean full) {
+        if (!hasModelFiles()) return;
+        if (state == State.NO_MODEL) loadModel(full);
+        else if (state == State.READY && full && !loadedFull) loadModel(true);
     }
 
     /** True while a screen of the app is visible; the background job unloads the model only when it is not. */
@@ -142,10 +175,18 @@ public final class Engine {
 
     /** Test hook: use a stand-in model (Robolectric can't run ONNX Runtime's native code). */
     public void attachModelForTest(final Embedder m) {
+        attachModelsForTest(m, m);
+    }
+
+    /** Test hook: separate photo and notes models (SigLIP for photos, EmbeddingGemma for notes). */
+    public void attachModelsForTest(final Embedder photoModel, final Embedder notesModel) {
         ml.submit(new Runnable() {
             @Override
             public void run() {
-                model = m;
+                photo = photoModel;
+                model = notesModel;
+                loadedFull = true;
+                notesUsable = true;
                 state = State.READY;
                 status = "test model";
                 notifyChanged();
@@ -179,11 +220,49 @@ public final class Engine {
 
     public SharedPreferences prefs() { return prefs; }
 
-    public boolean ready() { return state == State.READY && model != null; }
+    public boolean ready() { return state == State.READY && model != null && photo != null; }
 
-    public boolean supportsImages() { return ready() && model.supportsImages(); }
+    public boolean supportsImages() { return ready() && photo.supportsImages(); }
 
-    public boolean supportsVideo() { return ready() && model.supportsVideo(); }
+    public boolean supportsVideo() { return ready() && photo.supportsVideo(); }
+
+    /** Which model embeds photos and videos: {@link FastModel#GEMMA}, {@link FastModel#B16} or {@link FastModel#B32}. */
+    public int photoModel() {
+        return Math.max(0, Math.min(FastModel.NAMES.length - 1, prefs.getInt("photo_model", FastModel.B16)));
+    }
+
+    public boolean gemmaDownloaded() { return manifest.exists(); }
+
+    public boolean fastDownloaded(int pm) { return FastModel.manifest(ctx, pm).exists(); }
+
+    /** The fast model of this phone can run on an NPU/GPU but its full-precision graph is not downloaded yet. */
+    public boolean fastNeedsFp32() {
+        int pm = photoModel();
+        return pm != FastModel.GEMMA && fastDownloaded(pm) && FastModel.fp32Vision(ctx, pm) == null;
+    }
+
+    /** Size of the full-precision picture graph (about 4× the int8 one) for the NPU/GPU check. */
+    public long fp32EstimateBytes() {
+        int pm = photoModel();
+        HfRepo.Plan p = pm == FastModel.GEMMA ? null : FastModel.plan(ctx, pm);
+        return p == null ? 0 : 4 * new File(FastModel.dir(ctx, pm), p.visionModel).length();
+    }
+
+    public String fastReport() {
+        return prefs.getString("s_report_" + photoModel(), null);
+    }
+
+    /** Switches the photo model; the photo index starts over in the new model's space. */
+    public void setPhotoModel(int pm) {
+        if (pm == photoModel()) return;
+        stopIndex();
+        prefs.edit().putInt("photo_model", pm).apply();
+        unloadModel();
+        state = State.NO_MODEL;
+        status = "";
+        notifyChanged();
+        if (hasModelFiles()) loadModel(true);
+    }
 
     public int searchDims() { return prefs.getInt("dims", 768); }
 
@@ -237,8 +316,14 @@ public final class Engine {
                     unloadModel();
                     loadModel();
                 } catch (Exception e) {
+                    String msg = cancelDownload ? "Загрузка остановлена — её можно продолжить" : "Ошибка: " + e.getMessage();
+                    if (photoModel() != FastModel.GEMMA && hasModelFiles()) {
+                        dlError = msg; // EmbeddingGemma for notes failed; the photo model keeps working
+                        loadModel(true);
+                        return;
+                    }
                     state = manifest.exists() ? State.ERROR : State.NO_MODEL;
-                    status = cancelDownload ? "Загрузка остановлена — её можно продолжить" : "Ошибка: " + e.getMessage();
+                    status = msg;
                     notifyChanged();
                 }
             }
@@ -247,9 +332,17 @@ public final class Engine {
 
     public void cancelDownload() { cancelDownload = true; }
 
-    public boolean hasModelFiles() { return manifest.exists(); }
+    public boolean hasModelFiles() {
+        int pm = photoModel();
+        return pm == FastModel.GEMMA ? manifest.exists() : fastDownloaded(pm);
+    }
 
     public void loadModel() {
+        loadModel(true);
+    }
+
+    /** @param full also load the notes model (the app is open); a background run needs only the photo model */
+    public void loadModel(final boolean full) {
         state = State.LOADING;
         status = "Загружаю модель в память…";
         notifyChanged();
@@ -258,52 +351,72 @@ public final class Engine {
             public void run() {
                 String step = "чтение списка файлов";
                 errorDetails = null;
-                if (model != null) { // reload (e.g. new thread count): free the old sessions first
-                    model.close();
-                    model = null;
-                }
+                boolean autoCheck = false;
+                closeModels(); // reload (e.g. new thread count): free the old sessions first
                 try {
-                    HfRepo.Plan plan = HfRepo.loadManifest(manifest);
-                    if (plan == null || !HfRepo.isComplete(plan, modelDir)) {
-                        state = State.NO_MODEL;
-                        status = "Модель не скачана полностью";
-                        notifyChanged();
-                        return;
-                    }
                     long t0 = System.currentTimeMillis();
                     threads = threadCount();
-                    step = "инициализация";
-                    ModelConfig cfg = EmbeddingGemma2.loadConfig(modelDir);
-                    HfTokenizer tok = EmbeddingGemma2.loadTokenizer(modelDir);
-                    int accel = accel();
-                    try {
-                        model = createModel(cfg, tok, plan, accel, threads);
-                    } catch (Exception gpuOrInt8Failure) {
-                        if (accel == ACCEL_CPU) throw gpuOrInt8Failure;
-                        android.util.Log.w("SemSearch", "accel " + accel + " failed, using CPU", gpuOrInt8Failure);
-                        prefs.edit().putInt("accel", ACCEL_CPU).apply();
-                        accel = ACCEL_CPU;
-                        model = createModel(cfg, tok, plan, ACCEL_CPU, threads);
+                    int pm = photoModel();
+                    String mediaSig, notesSig;
+                    if (pm == FastModel.GEMMA) {
+                        HfRepo.Plan plan = HfRepo.loadManifest(manifest);
+                        if (plan == null || !HfRepo.isComplete(plan, modelDir)) {
+                            noModel();
+                            return;
+                        }
+                        step = "инициализация";
+                        model = loadGemma(plan, true);
+                        photo = model;
+                        mediaSig = notesSig = gemmaSig(plan);
+                    } else {
+                        HfRepo.Plan plan = FastModel.plan(ctx, pm);
+                        if (plan == null || !HfRepo.isComplete(plan, FastModel.dir(ctx, pm))) {
+                            noModel();
+                            return;
+                        }
+                        step = "инициализация " + FastModel.NAMES[pm];
+                        photo = openFast(pm, plan);
+                        mediaSig = "s|" + HfRepo.manifestRepo(FastModel.manifest(ctx, pm));
+                        HfRepo.Plan g = gemmaPlan();
+                        String gSig = g != null ? gemmaSig(g) : null;
+                        if (g != null && full) {
+                            step = "EmbeddingGemma 2 для заметок";
+                            try {
+                                model = loadGemma(g, false);
+                                notesSig = gSig;
+                            } catch (Throwable e) {
+                                android.util.Log.w("SemSearch", "notes model", e);
+                                model = photo;
+                                notesSig = mediaSig;
+                            }
+                        } else {
+                            model = photo;
+                            // A background run leaves notes with their EmbeddingGemma vectors alone.
+                            notesSig = gSig != null && gSig.equals(prefs.getString("notes_sig", "")) ? null : mediaSig;
+                        }
                     }
-                    loadedAccel = accel;
-                    // Warm-up run (first inference allocates buffers) and embedding size.
                     step = "пробный запуск";
-                    model.embedQuery("привет");
-                    step = "переиндексация заметок";
-                    String sig = HfRepo.manifestRepo(manifest) + "|" + plan.textModel + "|" + plan.visionModel;
-                    if (!sig.equals(prefs.getString("model_sig", ""))) {
-                        // Different weights: old vectors are not comparable.
+                    photo.embedQuery("привет");
+                    if (!mediaSig.equals(prefs.getString("media_sig", ""))) {
+                        // Different weights: old photo vectors are not comparable.
                         store.clearMedia();
-                        for (IndexStore.Item n : store.notes()) store.updateEmbedding(n, model.embedDocument(n.body));
-                        prefs.edit().putString("model_sig", sig).apply();
+                        prefs.edit().putString("media_sig", mediaSig).apply();
                     }
+                    if (notesSig != null && !notesSig.equals(prefs.getString("notes_sig", ""))) {
+                        step = "переиндексация заметок";
+                        for (IndexStore.Item n : store.notes()) store.updateEmbedding(n, model.embedDocument(n.body));
+                        prefs.edit().putString("notes_sig", notesSig).apply();
+                    }
+                    notesUsable = notesSig != null;
+                    loadedFull = full;
                     state = State.READY;
-                    status = "Модель готова (" + (System.currentTimeMillis() - t0) / 100 / 10.0 + " с), "
-                            + model.embeddingDim() + " изм., " + ACCEL_NAMES[loadedAccel] + ", потоков: " + threads
-                            + (model.supportsImages() ? "" : " · только текст");
+                    status = "Модель готова (" + (System.currentTimeMillis() - t0) / 100 / 10.0 + " с): "
+                            + FastModel.NAMES[pm] + ", " + accelLabel
+                            + (pm == FastModel.GEMMA ? ", потоков: " + threads : "")
+                            + (photo.supportsImages() ? "" : " · только текст");
+                    autoCheck = pm != FastModel.GEMMA && full && !FastModel.checked(prefs, pm);
                 } catch (Throwable e) {
-                    if (model != null) model.close();
-                    model = null;
+                    closeModels();
                     state = State.ERROR;
                     String msg = e.getMessage() != null ? e.getMessage() : e.toString();
                     status = "Не удалось загрузить модель (" + step + "): " + msg;
@@ -314,36 +427,132 @@ public final class Engine {
                     android.util.Log.e("SemSearch", status, e);
                 }
                 notifyChanged();
+                if (autoCheck) checkFast(null); // first start of a fast model: find its best accelerator once
             }
         });
     }
 
-    private void unloadModel() {
-        final Embedder m = model;
-        model = null;
-        if (m != null) {
-            ml.submit(new Runnable() {
-                @Override
-                public void run() {
-                    m.close();
-                }
-            });
+    private void noModel() {
+        state = State.NO_MODEL;
+        status = "Модель не скачана полностью";
+        notifyChanged();
+    }
+
+    private HfRepo.Plan gemmaPlan() {
+        try {
+            HfRepo.Plan p = manifest.exists() ? HfRepo.loadManifest(manifest) : null;
+            return p != null && HfRepo.isComplete(p, modelDir) ? p : null;
+        } catch (Exception e) {
+            return null;
         }
     }
 
+    private String gemmaSig(HfRepo.Plan plan) throws java.io.IOException {
+        return HfRepo.manifestRepo(manifest) + "|" + plan.textModel + "|" + plan.visionModel;
+    }
+
+    /** EmbeddingGemma 2 with the chosen accelerator (falling back to the CPU); text only when it serves notes. */
+    private EmbeddingGemma2 loadGemma(HfRepo.Plan plan, boolean withVision) throws Exception {
+        ModelConfig cfg = EmbeddingGemma2.loadConfig(modelDir);
+        HfTokenizer tok = EmbeddingGemma2.loadTokenizer(modelDir);
+        HfRepo.Plan use = plan;
+        if (!withVision) {
+            use = new HfRepo.Plan();
+            use.textModel = plan.textModel;
+        }
+        int accel = accel();
+        EmbeddingGemma2 m;
+        try {
+            m = createModel(cfg, tok, use, accel, threads);
+        } catch (Exception gpuOrInt8Failure) {
+            if (accel == ACCEL_CPU) throw gpuOrInt8Failure;
+            android.util.Log.w("SemSearch", "accel " + accel + " failed, using CPU", gpuOrInt8Failure);
+            prefs.edit().putInt("accel", ACCEL_CPU).apply();
+            accel = ACCEL_CPU;
+            m = createModel(cfg, tok, use, ACCEL_CPU, threads);
+        }
+        if (withVision) {
+            loadedAccel = accel;
+            accelLabel = ACCEL_NAMES[accel];
+        }
+        return m;
+    }
+
+    /** SigLIP 2 with the accelerator the auto-check chose; an NPU/GPU that fails falls back to the CPU. */
+    private SigLip openFast(int pm, HfRepo.Plan plan) throws Exception {
+        File dir = FastModel.dir(ctx, pm);
+        File text = new File(dir, plan.textModel), int8 = new File(dir, plan.visionModel);
+        File fp32 = FastModel.fp32Vision(ctx, pm);
+        SigLip.Accel a = FastModel.accel(prefs, pm);
+        if (a.needsFp32() && fp32 == null) a = SigLip.Accel.CPU;
+        int t = FastModel.threads(prefs, pm), batch = FastModel.batch(prefs, pm);
+        boolean risky = a != SigLip.Accel.CPU && a != SigLip.Accel.XNNPACK && a != SigLip.Accel.CPU_FP32;
+        if (risky) prefs.edit().putString("s_probe", a.name()).commit();
+        try {
+            SigLip m = new SigLip(dir, text, a.needsFp32() ? fp32 : int8, a, t, batch);
+            accelLabel = a.label;
+            return m;
+        } catch (Exception e) {
+            if (a == SigLip.Accel.CPU) throw e;
+            android.util.Log.w("SemSearch", "fast model on " + a + " failed, using CPU", e);
+            prefs.edit().putInt("s_accel_" + pm, SigLip.Accel.CPU.ordinal()).apply();
+            accelLabel = SigLip.Accel.CPU.label;
+            return new SigLip(dir, text, int8, SigLip.Accel.CPU, t, 1);
+        } finally {
+            if (risky) prefs.edit().remove("s_probe").commit();
+        }
+    }
+
+    private void closeModels() {
+        Embedder a = model, b = photo;
+        model = null;
+        photo = null;
+        if (a != null) a.close();
+        if (b != null && b != a) b.close();
+    }
+
+    private void unloadModel() {
+        ml.submit(new Runnable() {
+            @Override
+            public void run() {
+                closeModels();
+            }
+        });
+    }
+
     public void deleteModel() {
+        final int pm = photoModel();
         stopIndex();
         cancelDownload = true;
+        state = State.NO_MODEL;
         unloadModel();
         ml.submit(new Runnable() {
             @Override
             public void run() {
-                deleteTree(modelDir);
+                deleteTree(pm == FastModel.GEMMA ? modelDir : FastModel.dir(ctx, pm));
+                if (pm != FastModel.GEMMA) {
+                    prefs.edit().remove("s_checked_" + pm).remove("s_report_" + pm).remove("s_accel_" + pm).apply();
+                }
                 state = State.NO_MODEL;
                 status = "Модель удалена";
                 notifyChanged();
             }
         });
+    }
+
+    /** Removes EmbeddingGemma 2 when it only serves notes (notes then use the fast model's text side). */
+    public void deleteGemma() {
+        if (photoModel() == FastModel.GEMMA) {
+            deleteModel();
+            return;
+        }
+        ml.submit(new Runnable() {
+            @Override
+            public void run() {
+                deleteTree(modelDir);
+            }
+        });
+        if (hasModelFiles()) loadModel(true);
     }
 
     private static void deleteTree(File f) {
@@ -368,9 +577,11 @@ public final class Engine {
                 try {
                     requireModel();
                     long t0 = System.currentTimeMillis();
-                    QueryVectors qv = queryVectors(query, photos || videos, bridgeMode());
+                    boolean withNotes = notes && notesUsable;
+                    QueryVectors qv = queryVectors(query, photos || videos, withNotes, bridgeMode());
                     SearchResult r = new SearchResult();
-                    r.hits = store.search(qv.media, qv.notes, searchDims(), photos, videos, notes, 90, -1);
+                    r.hits = store.search(qv.media, mediaDims(), qv.notes, notesDims(), photos, videos, withNotes,
+                            photo == model, 90, -1);
                     r.millis = System.currentTimeMillis() - t0;
                     r.label = "«" + query + "»" + (qv.english != null ? " → для фото «" + qv.english + "»" : "");
                     post(cb, r, null);
@@ -390,25 +601,46 @@ public final class Engine {
         String english;
     }
 
+    /** Matryoshka truncation applies to EmbeddingGemma vectors only; SigLIP needs all of them. */
+    int mediaDims() {
+        return photoModel() == FastModel.GEMMA ? searchDims() : Integer.MAX_VALUE;
+    }
+
+    int notesDims() {
+        return model instanceof EmbeddingGemma2 || (model != null && model == photo && photoModel() == FastModel.GEMMA)
+                ? searchDims() : Integer.MAX_VALUE;
+    }
+
+    QueryVectors queryVectors(String query, boolean forMedia, int mode) throws Exception {
+        return queryVectors(query, forMedia, true, mode);
+    }
+
     /**
      * Notes are matched with the original query. For photos/videos a Russian query is also
      * rendered in English (QueryBridge) because the model's text↔image alignment is strongest
      * for English; mode 0 searches with the sum of both vectors, mode 1 with English only.
      */
-    QueryVectors queryVectors(String query, boolean forMedia, int mode) throws Exception {
+    QueryVectors queryVectors(String query, boolean forMedia, boolean forNotes, int mode) throws Exception {
+        return queryVectors(photo, query, forMedia, forNotes, mode);
+    }
+
+    /** Query vectors with a given photo model (the comparison runs the other one through the same path). */
+    QueryVectors queryVectors(Embedder photoModel, String query, boolean forMedia, boolean forNotes, int mode) throws Exception {
         QueryVectors v = new QueryVectors();
-        v.notes = model.embedQuery(query);
-        v.media = v.notes;
-        if (!forMedia || mode == 2 || bridge == null || !QueryBridge.hasCyrillic(query)) return v;
+        if (forNotes) v.notes = model.embedQuery(query);
+        if (!forMedia) return v;
+        float[] ru = photoModel == model && v.notes != null ? v.notes : photoModel.embedQuery(query);
+        v.media = ru;
+        if (mode == 2 || bridge == null || !QueryBridge.hasCyrillic(query)) return v;
         QueryBridge.Result br = bridge.translate(query);
         if (br == null) return v;
-        float[] en = model.embedQuery(br.english);
+        float[] en = photoModel.embedQuery(br.english);
         v.english = br.english;
         if (mode == 1) {
             v.media = en;
         } else {
             float[] sum = new float[en.length];
-            for (int i = 0; i < sum.length; i++) sum[i] = v.notes[i] + en[i];
+            for (int i = 0; i < sum.length; i++) sum[i] = ru[i] + en[i];
             VectorMath.normalize(sum);
             v.media = sum;
         }
@@ -430,27 +662,29 @@ public final class Engine {
                     StringBuilder sb = new StringBuilder();
                     sb.append("SemSearch ").append(BuildInfo.version(ctx)).append(" · ").append(status).append('\n');
                     int photosN = store.count(IndexStore.KIND_PHOTO) + store.count(IndexStore.KIND_VIDEO);
-                    sb.append("В индексе фото/видео: ").append(photosN).append(", детализация фото: ")
-                            .append(photoBudget()).append(" токенов, длина вектора поиска: ").append(searchDims())
+                    sb.append("Модель фото: ").append(FastModel.NAMES[photoModel()]).append(", ").append(accelLabel)
+                            .append("\nВ индексе фото/видео: ").append(photosN)
+                            .append(photoModel() == FastModel.GEMMA ? ", детализация фото: " + photoBudget()
+                                    + " токенов, длина вектора поиска: " + searchDims() : "")
                             .append("\n\nRU↔EN — косинус запросов; топ-10 — сколько фото совпало с выдачей по EN\n");
                     long tq = 0;
                     int nq = 0;
                     for (String[] p : pairs) {
                         long t0 = System.currentTimeMillis();
-                        float[] en = model.embedQuery(p[1]);
+                        float[] en = photo.embedQuery(p[1]);
                         tq += System.currentTimeMillis() - t0;
                         nq++;
-                        QueryVectors ru = queryVectors(p[0], true, 2), mix = queryVectors(p[0], true, 0),
-                                br = queryVectors(p[0], true, 1);
-                        sb.append(String.format(java.util.Locale.ROOT, "• %s ↔ %s: %.2f", p[0], p[1], dot(ru.notes, en)));
+                        QueryVectors ru = queryVectors(p[0], true, false, 2), mix = queryVectors(p[0], true, false, 0),
+                                br = queryVectors(p[0], true, false, 1);
+                        sb.append(String.format(java.util.Locale.ROOT, "• %s ↔ %s: %.2f", p[0], p[1], dot(ru.media, en)));
                         if (mix.english != null) {
                             sb.append(String.format(java.util.Locale.ROOT, " | мост «%s»: %.2f", mix.english, dot(br.media, en)));
                         }
                         if (photosN >= 10) {
-                            List<IndexStore.Hit> hEn = store.search(en, en, searchDims(), true, true, false, 10, -1);
-                            List<IndexStore.Hit> hRu = store.search(ru.media, ru.media, searchDims(), true, true, false, 10, -1);
-                            List<IndexStore.Hit> hMix = store.search(mix.media, mix.media, searchDims(), true, true, false, 10, -1);
-                            List<IndexStore.Hit> hBr = store.search(br.media, br.media, searchDims(), true, true, false, 10, -1);
+                            List<IndexStore.Hit> hEn = store.search(en, mediaDims(), true, true, false, 10, -1);
+                            List<IndexStore.Hit> hRu = store.search(ru.media, mediaDims(), true, true, false, 10, -1);
+                            List<IndexStore.Hit> hMix = store.search(mix.media, mediaDims(), true, true, false, 10, -1);
+                            List<IndexStore.Hit> hBr = store.search(br.media, mediaDims(), true, true, false, 10, -1);
                             sb.append(String.format(java.util.Locale.ROOT,
                                     "\n   топ-10 = EN: RU %d/10, RU+мост %d/10, мост %d/10; лучший балл EN %.2f RU %.2f RU+мост %.2f",
                                     overlap(hEn, hRu), overlap(hEn, hMix), overlap(hEn, hBr),
@@ -492,7 +726,7 @@ public final class Engine {
             public void run() {
                 try {
                     requireModel();
-                    if (!model.supportsImages()) throw new IllegalStateException("визуальный энкодер не загружен");
+                    if (!photo.supportsImages()) throw new IllegalStateException("визуальный энкодер не загружен");
                     long t0 = System.currentTimeMillis();
                     Bitmap b = Media.decode(ctx.getContentResolver(), uri, 0, 900_000L);
                     float[] q;
@@ -502,7 +736,8 @@ public final class Engine {
                         b.recycle();
                     }
                     SearchResult r = new SearchResult();
-                    r.hits = store.search(q, searchDims(), photos, videos, notes, 90, -1);
+                    boolean same = photo == model && notesUsable;
+                    r.hits = store.search(q, mediaDims(), q, mediaDims(), photos, videos, notes && same, true, 90, -1);
                     r.millis = System.currentTimeMillis() - t0;
                     r.label = "похожие на выбранное фото";
                     post(cb, r, null);
@@ -520,7 +755,12 @@ public final class Engine {
             public void run() {
                 long t0 = System.currentTimeMillis();
                 SearchResult r = new SearchResult();
-                r.hits = store.search(item.emb, searchDims(), photos, videos, notes, 90, item.id);
+                // Notes and pictures are only comparable when one model embedded both.
+                boolean same = photo != null && photo == model && notesUsable;
+                boolean note = item.kind == IndexStore.KIND_NOTE;
+                int dims = note ? notesDims() : mediaDims();
+                r.hits = store.search(item.emb, dims, item.emb, dims, (photos && (!note || same)), (videos && (!note || same)),
+                        notes && (note || same) && notesUsable, true, 90, item.id);
                 r.millis = System.currentTimeMillis() - t0;
                 r.label = "похожие";
                 post(cb, r, null);
@@ -529,7 +769,7 @@ public final class Engine {
     }
 
     private void requireModel() {
-        if (model == null || state != State.READY) throw new IllegalStateException("модель ещё не загружена");
+        if (model == null || photo == null || state != State.READY) throw new IllegalStateException("модель ещё не загружена");
     }
 
     // ------------------------------------------------------------------ notes
@@ -591,13 +831,14 @@ public final class Engine {
         List<io.github.teoplaydor.semsearch.core.ImagePreprocessor.Source> src =
                 new ArrayList<io.github.teoplaydor.semsearch.core.ImagePreprocessor.Source>();
         for (Bitmap b : bitmaps) src.add(new Media.BitmapSource(b));
+        if (!(photo instanceof EmbeddingGemma2)) return photo.embedImages(src, 0);
         int budget = photoBudget();
         try {
-            return model.embedImages(src, budget);
+            return photo.embedImages(src, budget);
         } catch (Exception e) {
-            if (budget == model.defaultImageTokens()) throw e;
+            if (budget == photo.defaultImageTokens()) throw e;
             prefs.edit().putInt("photo_detail", PHOTO_BUDGETS.length - 1).apply();
-            return model.embedImages(src, 0);
+            return photo.embedImages(src, 0);
         }
     }
 
@@ -695,6 +936,10 @@ public final class Engine {
      * rejected (so the existing index stays comparable); the fastest is saved.
      */
     public void benchmark(final Callback<String> cb) {
+        if (photoModel() != FastModel.GEMMA) {
+            checkFast(cb);
+            return;
+        }
         if (indexing) {
             post(cb, null, new IllegalStateException("дождитесь конца индексации"));
             return;
@@ -780,6 +1025,369 @@ public final class Engine {
         });
     }
 
+    // ------------------------------------------------------------------ fast model: download, auto-check
+
+    /** Downloads the fast model (and with {@code withFp32} the full-precision picture graph for NPU/GPU). */
+    public void downloadFast(final boolean withFp32) {
+        if (state == State.DOWNLOADING) return;
+        final int pm = photoModel();
+        if (pm == FastModel.GEMMA) return;
+        final String token = prefs.getString("token", "");
+        stopIndex();
+        cancelDownload = false;
+        dlError = null;
+        state = State.DOWNLOADING;
+        status = "Получаю список файлов…";
+        dlDone = 0;
+        dlTotal = 0;
+        notifyChanged();
+        net.submit(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    boolean fp32 = withFp32 || FastModel.fp32Vision(ctx, pm) != null;
+                    Object[] rp = FastModel.resolve(FastModel.repo(prefs, pm), FastModel.SEARCH[pm], token, fp32);
+                    String repo = (String) rp[0];
+                    HfRepo.Plan plan = (HfRepo.Plan) rp[1];
+                    prefs.edit().putString("s_repo_" + pm, repo).apply();
+                    dlTotal = plan.totalBytes;
+                    File dir = FastModel.dir(ctx, pm);
+                    if (!dir.exists() && !dir.mkdirs()) throw new Exception("нет доступа к памяти");
+                    new HfRepo(repo, token).download(plan, dir, new HfRepo.Progress() {
+                        @Override
+                        public boolean onProgress(String file, long fd, long ft, long all, long allTotal) {
+                            dlDone = all;
+                            dlTotal = allTotal;
+                            status = "Скачиваю " + file;
+                            notifyChanged();
+                            return !cancelDownload;
+                        }
+                    });
+                    HfRepo.saveManifest(plan, repo, FastModel.manifest(ctx, pm));
+                    dlDone = dlTotal;
+                    if (withFp32) prefs.edit().putBoolean("s_checked_" + pm, false).apply(); // check NPU/GPU next
+                    loadModel(true);
+                } catch (Exception e) {
+                    dlError = cancelDownload ? "Загрузка остановлена — её можно продолжить" : "Ошибка: " + e.getMessage();
+                    if (hasModelFiles()) {
+                        loadModel(true);
+                    } else {
+                        state = State.NO_MODEL;
+                        status = dlError;
+                        notifyChanged();
+                    }
+                }
+            }
+        });
+    }
+
+    /**
+     * Auto-check of the fast model on this phone: every way to run its picture tower (CPU int8 and fp32,
+     * XNNPACK, NPU through NNAPI in fp16 and fp32, GPU through WebGPU) with a few batch sizes. Each run is
+     * compared with the reference one (fp32 on the CPU when available): a variant whose vectors drift is
+     * rejected, so an accelerator can never quietly spoil the index. The fastest correct one is kept.
+     */
+    public void checkFast(final Callback<String> cb) {
+        final int pm = photoModel();
+        if (pm == FastModel.GEMMA || !fastDownloaded(pm)) {
+            post(cb, null, new IllegalStateException("быстрая модель не скачана"));
+            return;
+        }
+        final boolean resume = indexing;
+        stopIndex();
+        state = State.LOADING;
+        status = "Проверяю ускорители…";
+        notifyChanged();
+        ml.submit(new Runnable() {
+            @Override
+            public void run() {
+                StringBuilder rep = new StringBuilder();
+                closeModels();
+                try {
+                    HfRepo.Plan plan = FastModel.plan(ctx, pm);
+                    File dir = FastModel.dir(ctx, pm);
+                    File int8 = new File(dir, plan.visionModel), fp32 = FastModel.fp32Vision(ctx, pm);
+                    int auto = autoThreads(), cores = Runtime.getRuntime().availableProcessors();
+                    rep.append(FastModel.NAMES[pm]).append(", ядер ").append(cores).append(", быстрых ").append(auto)
+                            .append("\nвремя на одно фото (без чтения файла), совпадение с эталоном\n\n");
+                    List<Object[]> cands = new ArrayList<Object[]>(); // {accel, threads, batch}
+                    if (fp32 != null) cands.add(new Object[]{SigLip.Accel.CPU_FP32, auto, 1}); // the reference
+                    cands.add(new Object[]{SigLip.Accel.CPU, auto, 1});
+                    cands.add(new Object[]{SigLip.Accel.CPU, auto, 4});
+                    if (cores > auto) cands.add(new Object[]{SigLip.Accel.CPU, cores, 4});
+                    if (fp32 != null) {
+                        cands.add(new Object[]{SigLip.Accel.XNNPACK, auto, 4});
+                        cands.add(new Object[]{SigLip.Accel.NPU, auto, 1});
+                        cands.add(new Object[]{SigLip.Accel.NPU, auto, 4});
+                        cands.add(new Object[]{SigLip.Accel.NPU_FP32, auto, 1});
+                        cands.add(new Object[]{SigLip.Accel.GPU, auto, 4});
+                    }
+                    float[][] reference = null;
+                    Object[] best = null;
+                    double bestMs = Double.MAX_VALUE;
+                    for (int i = 0; i < cands.size(); i++) {
+                        Object[] c = cands.get(i);
+                        SigLip.Accel a = (SigLip.Accel) c[0];
+                        int t = (Integer) c[1], b = (Integer) c[2];
+                        String name = a.label + (a == SigLip.Accel.CPU || a == SigLip.Accel.XNNPACK ? ", потоков " + t : "")
+                                + (b > 1 ? ", пачка " + b : "");
+                        if (prefs.getBoolean("s_broken_" + a.name(), false)) {
+                            rep.append("• ").append(name).append(": пропущено — в прошлый раз уронило драйвер\n");
+                            continue;
+                        }
+                        status = "Проверяю ускорители (" + (i + 1) + " из " + cands.size() + "): " + name;
+                        notifyChanged();
+                        boolean risky = a == SigLip.Accel.NPU || a == SigLip.Accel.NPU_FP32 || a == SigLip.Accel.GPU;
+                        if (risky) prefs.edit().putString("s_probe", a.name()).commit();
+                        FastModel.Measure m = FastModel.measure(dir, a.needsFp32() ? fp32 : int8, a, t, b, reference);
+                        if (risky) prefs.edit().remove("s_probe").commit();
+                        if (m.error != null) {
+                            rep.append("• ").append(name).append(": не работает — ").append(m.error).append('\n');
+                            continue;
+                        }
+                        if (reference == null) reference = m.embs;
+                        boolean ok = m.minCos >= 0.97f;
+                        rep.append(String.format(java.util.Locale.ROOT, "• %s: %.3f с, совпадение %.3f%s%s\n", name,
+                                m.perPhotoMs / 1000.0, m.minCos, m.loadMs > 3000 ? String.format(java.util.Locale.ROOT,
+                                        " (подготовка %.0f с)", m.loadMs / 1000.0) : "",
+                                ok ? "" : " — отклонено, результат расходится"));
+                        if (ok && m.perPhotoMs < bestMs) {
+                            bestMs = m.perPhotoMs;
+                            best = c;
+                        }
+                    }
+                    if (best == null) throw new IllegalStateException("ни один вариант не сработал");
+                    SigLip.Accel ba = (SigLip.Accel) best[0];
+                    rep.append(String.format(java.util.Locale.ROOT, "\nВыбрано: %s%s — %.3f с на фото",
+                            ba.label, (Integer) best[2] > 1 ? ", пачка " + best[2] : "", bestMs / 1000.0));
+                    if (fp32 == null && FastModel.acceleratorLikely()) {
+                        long extra = 4 * new File(dir, plan.visionModel).length();
+                        rep.append(String.format(java.util.Locale.ROOT, "\n\nNPU и видеокарта не проверены: им нужна полная "
+                                + "версия модели (≈%d МБ). «Проверить NPU и видеокарту» в настройках докачает её.", extra >> 20));
+                    }
+                    prefs.edit().putInt("s_accel_" + pm, ba.ordinal()).putInt("s_batch_" + pm, (Integer) best[2])
+                            .putInt("s_threads_" + pm, (Integer) best[1] == auto ? 0 : (Integer) best[1])
+                            .putBoolean("s_checked_" + pm, true).putString("s_report_" + pm, rep.toString()).apply();
+                    post(cb, rep.toString(), null);
+                } catch (Throwable e) {
+                    rep.append("\nОшибка: ").append(e.getMessage() != null ? e.getMessage() : e.toString());
+                    prefs.edit().putBoolean("s_checked_" + pm, true).putString("s_report_" + pm, rep.toString()).apply();
+                    post(cb, rep.toString(), null);
+                }
+                loadModel(true);
+                if (resume) {
+                    main.post(new Runnable() {
+                        @Override
+                        public void run() {
+                            addListener(new Listener() {
+                                @Override
+                                public void onEngineChanged() {
+                                    if (state == State.LOADING) return;
+                                    removeListener(this);
+                                    if (ready()) startIndexFromPrefs(false);
+                                }
+                            });
+                        }
+                    });
+                }
+            }
+        });
+    }
+
+    // ------------------------------------------------------------------ quality comparison
+
+    /** Side-by-side run of the fast model and EmbeddingGemma 2 on the same recent photos. */
+    public static final class Comparison {
+        public final List<IndexStore.Item> photos = new ArrayList<IndexStore.Item>();
+        public float[][] fast, slow;
+        public double fastMs, slowMs;
+        public String fastName, slowName;
+        public final List<CompareQuery> queries = new ArrayList<CompareQuery>();
+        /** Average share of the top results both models agree on. */
+        public double agreement;
+        public volatile boolean cancelled;
+        Embedder fastModel, slowModel;
+        boolean ownFast, ownSlow;
+    }
+
+    public static final class CompareQuery {
+        public String text;
+        /** Indexes into {@link Comparison#photos}, best first. */
+        public int[] fast, slow;
+        public int shared;
+    }
+
+    /** Test hook: {fast, slow} stand-ins for the comparison (no ONNX Runtime on Robolectric). */
+    public static volatile Embedder[] testCompare;
+
+    public static final String[] COMPARE_QUERIES = {"кот", "собака", "еда", "закат", "море", "снег", "машина",
+            "документ", "скриншот", "люди", "цветы", "дом"};
+    public static final int COMPARE_TOP = 6;
+    public volatile int cmpDone, cmpTotal;
+
+    /** Both models are on the phone and there are photos to compare on. */
+    public boolean canCompare() {
+        return ready() && gemmaDownloaded() && (fastDownloaded(FastModel.B16) || fastDownloaded(FastModel.B32))
+                && store != null && store.count(IndexStore.KIND_PHOTO) >= COMPARE_TOP * 2;
+    }
+
+    public void compare(final int n, final Callback<Comparison> cb) {
+        final Comparison c = new Comparison();
+        cmpDone = 0;
+        cmpTotal = n;
+        ml.submit(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    requireModel();
+                    int pm = photoModel();
+                    // fast side: the loaded SigLIP, or one opened on the CPU for the comparison
+                    if (testCompare != null) {
+                        c.fastModel = testCompare[0];
+                        c.fastName = FastModel.NAMES[FastModel.B16];
+                    } else if (photo instanceof SigLip) {
+                        c.fastModel = photo;
+                        c.fastName = FastModel.NAMES[pm];
+                    } else {
+                        int fpm = fastDownloaded(FastModel.B16) ? FastModel.B16 : FastModel.B32;
+                        HfRepo.Plan fp = FastModel.plan(ctx, fpm);
+                        File dir = FastModel.dir(ctx, fpm);
+                        c.fastModel = new SigLip(dir, new File(dir, fp.textModel), new File(dir, fp.visionModel),
+                                SigLip.Accel.CPU, threadCount(), 1);
+                        c.ownFast = true;
+                        c.fastName = FastModel.NAMES[fpm];
+                    }
+                    // slow side: EmbeddingGemma 2 with its vision encoder; it also takes over notes meanwhile
+                    if (testCompare != null) {
+                        c.slowModel = testCompare[1];
+                    } else if (photo instanceof EmbeddingGemma2) {
+                        c.slowModel = photo;
+                    } else {
+                        HfRepo.Plan g = gemmaPlan();
+                        if (g == null) throw new IllegalStateException("EmbeddingGemma 2 не скачана");
+                        EmbeddingGemma2 full = loadGemma(g, true);
+                        if (model instanceof EmbeddingGemma2 && model != photo) {
+                            model.close();
+                            model = full; // same text model, now with pictures: serves notes too
+                        } else {
+                            c.ownSlow = true;
+                        }
+                        c.slowModel = full;
+                    }
+                    c.slowName = FastModel.NAMES[FastModel.GEMMA];
+                    for (IndexStore.Item it : store.recent(true, false, false, n)) c.photos.add(it);
+                    cmpTotal = c.photos.size();
+                    c.fast = new float[c.photos.size()][];
+                    c.slow = new float[c.photos.size()][];
+                    int budget = photoBudget();
+                    long target = Math.max((long) budget * 9 * 256, 4L * 256 * 256);
+                    long fastNs = 0, slowNs = 0;
+                    int done = 0;
+                    ContentResolver cr = ctx.getContentResolver();
+                    for (int i = 0; i < c.photos.size() && !c.cancelled; i++) {
+                        IndexStore.Item it = c.photos.get(i);
+                        Bitmap b;
+                        try {
+                            b = Media.decodeForIndex(cr, Uri.parse(it.uri), Media.orientation(cr, it.mediaId), target);
+                        } catch (Exception unreadable) {
+                            b = null;
+                        }
+                        if (b != null) {
+                            Media.BitmapSource src = new Media.BitmapSource(b);
+                            List<io.github.teoplaydor.semsearch.core.ImagePreprocessor.Source> one =
+                                    new ArrayList<io.github.teoplaydor.semsearch.core.ImagePreprocessor.Source>();
+                            one.add(src);
+                            long t0 = System.nanoTime();
+                            c.fast[i] = c.fastModel.embedImages(one, 0)[0];
+                            long t1 = System.nanoTime();
+                            c.slow[i] = c.slowModel.embedImages(one, budget)[0];
+                            long t2 = System.nanoTime();
+                            b.recycle();
+                            fastNs += t1 - t0;
+                            slowNs += t2 - t1;
+                            done++;
+                        }
+                        cmpDone = i + 1;
+                        notifyChanged();
+                    }
+                    if (c.cancelled) return;
+                    c.fastMs = fastNs / 1e6 / Math.max(1, done);
+                    c.slowMs = slowNs / 1e6 / Math.max(1, done);
+                    double agree = 0;
+                    for (String q : COMPARE_QUERIES) {
+                        CompareQuery r = rankBoth(c, q);
+                        c.queries.add(r);
+                        agree += r.shared / (double) COMPARE_TOP;
+                    }
+                    c.agreement = agree / COMPARE_QUERIES.length;
+                    post(cb, c, null);
+                } catch (Exception e) {
+                    endCompare(c);
+                    post(cb, null, e);
+                }
+            }
+        });
+    }
+
+    /** One more query against a finished comparison (its models stay loaded until {@link #endCompare}). */
+    public void compareQuery(final Comparison c, final String q, final Callback<CompareQuery> cb) {
+        ml.submit(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    post(cb, rankBoth(c, q), null);
+                } catch (Exception e) {
+                    post(cb, null, e);
+                }
+            }
+        });
+    }
+
+    private CompareQuery rankBoth(Comparison c, String q) throws Exception {
+        CompareQuery r = new CompareQuery();
+        r.text = q;
+        r.fast = top(c.fast, queryVectors(c.fastModel, q, true, false, bridgeMode()).media);
+        r.slow = top(c.slow, queryVectors(c.slowModel, q, true, false, bridgeMode()).media);
+        java.util.HashSet<Integer> f = new java.util.HashSet<Integer>();
+        for (int i : r.fast) f.add(i);
+        for (int i : r.slow) if (f.contains(i)) r.shared++;
+        return r;
+    }
+
+    private static int[] top(final float[][] embs, float[] q) {
+        List<Integer> idx = new ArrayList<Integer>();
+        final float[] score = new float[embs.length];
+        for (int i = 0; i < embs.length; i++) {
+            if (embs[i] == null) continue;
+            score[i] = dot(embs[i], q);
+            idx.add(i);
+        }
+        java.util.Collections.sort(idx, new java.util.Comparator<Integer>() {
+            @Override
+            public int compare(Integer a, Integer b) {
+                return Float.compare(score[b], score[a]);
+            }
+        });
+        int k = Math.min(COMPARE_TOP, idx.size());
+        int[] out = new int[k];
+        for (int i = 0; i < k; i++) out[i] = idx.get(i);
+        return out;
+    }
+
+    /** Frees the models a comparison opened just for itself. */
+    public void endCompare(final Comparison c) {
+        c.cancelled = true;
+        ml.submit(new Runnable() {
+            @Override
+            public void run() {
+                if (c.ownFast && c.fastModel != null) c.fastModel.close();
+                if (c.ownSlow && c.slowModel != null) c.slowModel.close();
+                c.fastModel = null;
+                c.slowModel = null;
+            }
+        });
+    }
+
     /** Number of "big" CPU cores (max frequency ≥ 80% of the fastest one), clamped to 2..6. */
     public static int autoThreads() {
         int n = Runtime.getRuntime().availableProcessors();
@@ -811,7 +1419,10 @@ public final class Engine {
     }
 
     private Future<Bitmap> decodeAsync(final Media.Entry e) {
-        final long target = (long) photoBudget() * 9 * 256;
+        // EmbeddingGemma looks at up to 9 × budget patches of 16×16; SigLIP at one small square (decoded at ~2× its side).
+        Embedder p = photo;
+        final long target = p instanceof SigLip ? 4L * ((SigLip) p).imageSize() * ((SigLip) p).imageSize()
+                : (long) photoBudget() * 9 * 256;
         return decoder.submit(new Callable<Bitmap>() {
             @Override
             public Bitmap call() throws Exception {
@@ -897,12 +1508,12 @@ public final class Engine {
                     if (!background) clearFailed(); // a run the user started retries what failed before
                     synchronized (queue) {
                         queue.clear();
-                        if (photoLimit > 0 && model.supportsImages()) {
+                        if (photoLimit > 0 && photo.supportsImages()) {
                             for (Media.Entry e : Media.recentImages(cr, photoLimit)) {
                                 if (isNew(e, background)) queue.add(e);
                             }
                         }
-                        if (videoLimit > 0 && model.supportsVideo()) {
+                        if (videoLimit > 0 && photo.supportsVideo()) {
                             for (Media.Entry e : Media.recentVideos(cr, videoLimit)) {
                                 if (isNew(e, background)) queue.add(e);
                             }
@@ -927,6 +1538,8 @@ public final class Engine {
 
     /** Photos per vision-encoder run while indexing (pref "batch", chosen by the benchmark). */
     public int batchSize() {
+        int pm = photoModel();
+        if (pm != FastModel.GEMMA) return Math.max(FastModel.batch(prefs, pm), 4); // small model: batches are cheap
         return Math.max(1, Math.min(8, prefs.getInt("batch", 1)));
     }
 
@@ -1015,7 +1628,7 @@ public final class Engine {
                     }
                 }
             }
-            long[] tm = model.lastTimingsMs();
+            long[] tm = photo.lastTimingsMs();
             sumWaitMs += waited;
             sumVisionMs += tm[0];
             sumTextMs += tm[1];
@@ -1040,7 +1653,7 @@ public final class Engine {
                 List<io.github.teoplaydor.semsearch.core.ImagePreprocessor.Source> src =
                         new ArrayList<io.github.teoplaydor.semsearch.core.ImagePreprocessor.Source>();
                 for (Bitmap f : frames) src.add(new Media.BitmapSource(f));
-                float[] emb = model.embedVideo(src, 0);
+                float[] emb = photo.embedVideo(src, 0);
                 store.add(e.kind, e.id, e.uri.toString(), e.name, null, e.date, emb);
                 idxDone++;
             } finally {

@@ -62,7 +62,8 @@ public class AppFlowTest {
         assertEquals("Сначала скачайте модель", ShadowToast.getTextOfLatestToast());
         q.setText("");
 
-        // model in place
+        // model in place (EmbeddingGemma 2 for everything, as on an existing install)
+        e.prefs().edit().putInt("photo_model", 0).apply();
         File model = new File(a.getFilesDir(), "model");
         assertTrue(model.mkdirs());
         try (FileOutputStream o = new FileOutputStream(new File(model, "manifest.json"))) {

@@ -59,6 +59,7 @@ ANDROID_JAR=${ANDROID_JAR:-/usr/lib/android-sdk/platforms/android-23/android.jar
 "$J21/javac" -nowarn -encoding UTF-8 -cp "$R/cls:$AA:${CP}build/classes:build/deps/ort-classes" -d "$R/cls" \
   $(find "$T/src" -name '*.java' ! -name FakeMediaStore.java)
 
+rm -rf build/shots
 TESTS=("$@")
 [ ${#TESTS[@]} -gt 0 ] || TESTS=(UiShots AppFlowTest AppIndexingTest AutoIndexTest)
 # One JVM per class: Engine is an app-wide singleton.

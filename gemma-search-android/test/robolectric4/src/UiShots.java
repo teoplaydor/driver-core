@@ -147,7 +147,7 @@ public class UiShots {
         return v;
     }
 
-    static final class FakeEmbedder implements Embedder {
+    static class FakeEmbedder implements Embedder {
         public float[] embedQuery(String q) { return bag(q); }
         public float[] embedDocument(String t) { return bag(t); }
         public float[] embedImage(ImagePreprocessor.Source img, int budget) { return bag("photo"); }
@@ -163,6 +163,30 @@ public class UiShots {
         public int defaultImageTokens() { return 280; }
         public long[] lastTimingsMs() { return new long[]{0, 0}; }
         public void close() {}
+    }
+
+    /** Pictures embed by their colours (warm, cool, green, grey…), so similar scenes land together. */
+    static final class ColourEmbedder extends FakeEmbedder {
+        final int variant;
+        ColourEmbedder(int variant) { this.variant = variant; }
+        @Override public float[] embedImage(ImagePreprocessor.Source img, int budget) {
+            int[] px = img.argb(16, 16);
+            long r = 0, g = 0, b = 0;
+            for (int p : px) { r += (p >> 16) & 255; g += (p >> 8) & 255; b += p & 255; }
+            r /= px.length; g /= px.length; b /= px.length;
+            String words = (r > b + 30 ? "sunset warm " : "") + (b > r + 20 ? "sea sky cool " : "") + (g > r + 10 && g > b ? "forest flowers " : "")
+                    + (Math.abs(r - b) < 20 && Math.abs(g - b) < 20 ? "snow document grey " : "") + (r + g + b < 200 ? "night city " : "");
+            float[] v = bag(words.isEmpty() ? "photo" : words);
+            java.util.Random n = new java.util.Random(r * 31 + g * 7 + b + variant);
+            for (int i = 0; i < v.length; i++) v[i] += (float) n.nextGaussian() * (variant == 0 ? 0.02f : 0.03f);
+            VectorMath.normalize(v);
+            return v;
+        }
+        @Override public float[][] embedImages(List<ImagePreprocessor.Source> imgs, int budget) {
+            float[][] r = new float[imgs.size()][];
+            for (int i = 0; i < r.length; i++) r[i] = embedImage(imgs.get(i), budget);
+            return r;
+        }
     }
 
     // ------------------------------------------------------------------ drawn "photos"
@@ -350,10 +374,21 @@ public class UiShots {
                 return scene(it, size);
             }
         };
+        File media = new File(org.robolectric.RuntimeEnvironment.getApplication().getCacheDir(), "media");
+        media.mkdirs();
         for (long id = 1000; id < 1100; id++) {
             float ar = aspectOf(id);
             int w = ar >= 1 ? 4000 : Math.round(4000 * ar), h = ar >= 1 ? Math.round(4000 / ar) : 4000;
-            FakeMediaStore.ROWS.add(new FakeMediaStore.Row(id, isVideo(id), 0, "IMG_" + id, w, h, null));
+            File f = null;
+            if (id < 1060 && !isVideo(id)) { // real files for the comparison, which decodes photos itself
+                IndexStore.Item it = new IndexStore.Item();
+                it.mediaId = id;
+                f = new File(media, id + ".png");
+                try (FileOutputStream o = new FileOutputStream(f)) {
+                    scene(it, 512).compress(Bitmap.CompressFormat.PNG, 90, o);
+                }
+            }
+            FakeMediaStore.ROWS.add(new FakeMediaStore.Row(id, isVideo(id), 0, "IMG_" + id, w, h, f));
         }
         FakeMediaStore.install();
         MainActivity a = Robolectric.buildActivity(MainActivity.class).setup().get();
@@ -364,20 +399,24 @@ public class UiShots {
 
         // downloading the model
         e.state = Engine.State.DOWNLOADING;
-        e.dlTotal = 1_180L << 20;
-        e.dlDone = 437L << 20;
+        e.dlTotal = 383L << 20;
+        e.dlDone = 141L << 20;
         a.onEngineChanged();
         settle(600);
         shot(a, "02-download");
 
         // model in place, gallery not indexed yet
-        File model = new File(a.getFilesDir(), "model");
-        model.mkdirs();
-        try (FileOutputStream o = new FileOutputStream(new File(model, "manifest.json"))) {
-            o.write("{}".getBytes("UTF-8"));
+        // SigLIP 2 B/16 for photos (the default) and EmbeddingGemma 2 for notes, both "downloaded"
+        for (String d : new String[]{"siglip-b16", "model"}) {
+            File model = new File(a.getFilesDir(), d);
+            model.mkdirs();
+            try (FileOutputStream o = new FileOutputStream(new File(model, "manifest.json"))) {
+                o.write("{\"repo\":\"test\",\"files\":[]}".getBytes("UTF-8"));
+            }
         }
         e.state = Engine.State.NO_MODEL;
-        e.attachModelForTest(new FakeEmbedder());
+        e.accelLabel = "Процессор";
+        e.attachModelsForTest(new FakeEmbedder(), new FakeEmbedder());
         waitFor("ready", e::ready);
         settle(600);
         shot(a, "03-not-indexed");
@@ -406,6 +445,9 @@ public class UiShots {
         shot(a, "05-gallery");
 
         // a search
+        call(a, "openSearch");
+        settle(400);
+        shot(a, "05b-search-field");
         EditText q = (EditText) field(a, "query");
         q.setText("закат на море");
         call(a, "runSearch", true);
@@ -420,6 +462,7 @@ public class UiShots {
         a.onBackPressed();
         settle(700);
         q.setText("");
+        call(a, "hideSearch");
         settle(900);
 
         // settings
@@ -428,11 +471,23 @@ public class UiShots {
         shot(a, "08-settings");
         ScrollView sv = find(a.getWindow().getDecorView(), ScrollView.class);
         assertNotNull(sv);
+        sv.scrollTo(0, sv.getChildAt(0).getHeight() / 2);
+        settle(200);
+        shot(a, "09-settings-middle");
         sv.scrollTo(0, sv.getChildAt(0).getHeight());
         settle(200);
-        shot(a, "09-settings-end");
+        shot(a, "09b-settings-end");
         a.onBackPressed();
         settle(700);
+
+        // the two models side by side on the same photos (stand-ins: colour-sensitive fakes)
+        Engine.testCompare = new io.github.teoplaydor.semsearch.core.Embedder[]{new ColourEmbedder(0), new ColourEmbedder(1)};
+        call(a, "openCompare");
+        waitFor("comparison", () -> byName(a.getWindow().getDecorView(), "Sheet") != null && e.cmpDone >= e.cmpTotal && e.cmpTotal > 0);
+        settle(1500);
+        shot(a, "14-compare");
+        a.onBackPressed();
+        settle(600);
 
         // notes
         String[] notes = {"Пароль от домашнего Wi-Fi: Lisa2024! — сеть Keenetic-5G",
@@ -458,6 +513,15 @@ public class UiShots {
         shot(a, "12-note-viewer");
         a.onBackPressed();
         settle(600);
+
+        // the rail on the left, for the left thumb
+        call(a, "selectFilter", 0);
+        settle(600);
+        call(a, "setRailSide", 1);
+        settle(800);
+        shot(a, "13-left-rail");
+        call(a, "setRailSide", 0);
+        settle(400);
         a.finish();
     }
 

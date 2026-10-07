@@ -232,6 +232,11 @@ public final class MiniJson {
         return v instanceof Number ? ((Number) v).longValue() : def;
     }
 
+    public static double dbl(Map<String, Object> m, String k, double def) {
+        Object v = m == null ? null : m.get(k);
+        return v instanceof Number ? ((Number) v).doubleValue() : def;
+    }
+
     public static boolean bool(Map<String, Object> m, String k, boolean def) {
         Object v = m == null ? null : m.get(k);
         return v instanceof Boolean ? (Boolean) v : def;

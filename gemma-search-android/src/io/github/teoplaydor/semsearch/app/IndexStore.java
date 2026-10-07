@@ -187,6 +187,62 @@ public final class IndexStore {
         return search(q, q, dims, photos, videos, notes, limit, excludeId);
     }
 
+    /**
+     * Photos/videos and notes searched with their own query vectors and lengths. When both come from one
+     * model ({@code sameSpace}) the cosines are merged directly; otherwise (SigLIP pictures, EmbeddingGemma
+     * notes) the scores are not comparable and the two rankings are interleaved by reciprocal rank.
+     */
+    public synchronized List<Hit> search(float[] qMedia, int mediaDims, float[] qNotes, int notesDims, boolean photos,
+                                         boolean videos, boolean notes, boolean sameSpace, int limit, long excludeId) {
+        List<Hit> media = (photos || videos) && qMedia != null
+                ? rank(qMedia, mediaDims, photos, videos, false, excludeId) : new ArrayList<Hit>();
+        List<Hit> nt = notes && qNotes != null ? rank(qNotes, notesDims, false, false, true, excludeId) : new ArrayList<Hit>();
+        List<Hit> all = new ArrayList<Hit>(media.size() + nt.size());
+        if (sameSpace || media.isEmpty() || nt.isEmpty()) {
+            all.addAll(media);
+            all.addAll(nt);
+            Collections.sort(all, BY_SCORE);
+        } else {
+            final java.util.IdentityHashMap<Hit, Double> rrf = new java.util.IdentityHashMap<Hit, Double>();
+            for (int i = 0; i < media.size(); i++) rrf.put(media.get(i), 1.0 / (10 + i));
+            for (int i = 0; i < nt.size(); i++) rrf.put(nt.get(i), 1.0 / (10 + i));
+            all.addAll(media);
+            all.addAll(nt);
+            Collections.sort(all, new Comparator<Hit>() {
+                @Override
+                public int compare(Hit a, Hit b) {
+                    return Double.compare(rrf.get(b), rrf.get(a));
+                }
+            });
+        }
+        return all.size() > limit ? new ArrayList<Hit>(all.subList(0, limit)) : all;
+    }
+
+    private static final Comparator<Hit> BY_SCORE = new Comparator<Hit>() {
+        @Override
+        public int compare(Hit a, Hit b) {
+            return Float.compare(b.score, a.score);
+        }
+    };
+
+    private List<Hit> rank(float[] q, int dims, boolean photos, boolean videos, boolean notes, long excludeId) {
+        int d = Math.min(dims, q.length);
+        int di = -1;
+        for (int i = 0; i < DIMS.length; i++) if (DIMS[i] == d) di = i;
+        float qn = VectorMath.prefixNorm(q, 0, d);
+        List<Hit> hits = new ArrayList<Hit>();
+        for (Item it : items) {
+            if (it.id == excludeId || it.emb.length < d) continue;
+            if ((it.kind == KIND_PHOTO && !photos) || (it.kind == KIND_VIDEO && !videos) || (it.kind == KIND_NOTE && !notes)) {
+                continue;
+            }
+            float bn = di >= 0 ? it.norms[di] : VectorMath.prefixNorm(it.emb, 0, d);
+            hits.add(new Hit(it, VectorMath.cosinePrefix(q, qn, it.emb, 0, bn, d)));
+        }
+        Collections.sort(hits, BY_SCORE);
+        return hits;
+    }
+
     /** Like {@link #search} but with separate query vectors for media (photos/videos) and notes. */
     public synchronized List<Hit> search(float[] qMedia, float[] qNotes, int dims, boolean photos, boolean videos,
                                          boolean notes, int limit, long excludeId) {

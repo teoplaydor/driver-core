@@ -47,7 +47,6 @@ import java.util.concurrent.Executors;
 public final class MainActivity extends Activity implements Engine.Listener, Viewer.Host, MasonryView.Host {
     private static final int REQ_PICK_IMAGE = 7, REQ_MEDIA = 8;
     private static final int RECENT_LIMIT = 3000;
-    private static final String[] FILTERS = {"Все", "Фото", "Видео", "Заметки"};
 
     /** Test hook: thumbnails for items that have no MediaStore entry (screenshots on Robolectric). */
     public interface BitmapLoader {
@@ -61,13 +60,14 @@ public final class MainActivity extends Activity implements Engine.Listener, Vie
     private FrameLayout root;
     private EditText query;
     private ImageView clear;
-    private Segments segments;
+    private Rail rail;
+    private LinearLayout searchBar, info;
+    private TextView chip;
     private int filter;
     private ProgressLine progress;
     private TextView status, section;
     private MasonryView gallery;
     private FrameLayout empty;
-    private View fab;
     private Viewer viewer;
     private SettingsPanel settings;
     private Sheet sheet;
@@ -172,6 +172,11 @@ public final class MainActivity extends Activity implements Engine.Listener, Vie
         if (query.getText().length() > 0 || resultsLabel != null) {
             query.setText("");
             showRecent(true);
+            hideSearch();
+            return;
+        }
+        if (searchBar.getVisibility() == View.VISIBLE) {
+            hideSearch();
             return;
         }
         super.onBackPressed();
@@ -212,19 +217,57 @@ public final class MainActivity extends Activity implements Engine.Listener, Vie
         root = new FrameLayout(this);
         root.setBackgroundColor(Ui.BG);
         root.setFocusableInTouchMode(true); // keeps the search field from grabbing focus on start
-        LinearLayout screen = new LinearLayout(this);
-        screen.setOrientation(LinearLayout.VERTICAL);
-        root.addView(screen, new FrameLayout.LayoutParams(-1, -1));
 
-        // search pill + settings
-        LinearLayout head = new LinearLayout(this);
-        head.setGravity(Gravity.CENTER_VERTICAL);
-        head.setPadding(dp(14), dp(12), dp(14), dp(8));
-        LinearLayout pill = new LinearLayout(this);
-        pill.setGravity(Gravity.CENTER_VERTICAL);
-        pill.setBackground(Ui.round(this, Ui.SURFACE2, 26));
-        pill.setPadding(dp(14), 0, dp(6), 0);
-        pill.addView(Ui.icon(this, Icon.SEARCH, Ui.TEXT3, 22), new LinearLayout.LayoutParams(dp(22), dp(22)));
+        // the gallery takes the whole screen; everything else floats over it, translucent
+        FrameLayout area = new FrameLayout(this);
+        gallery = new MasonryView(this, this);
+        area.addView(gallery, new FrameLayout.LayoutParams(-1, -1));
+        empty = new FrameLayout(this);
+        area.addView(empty, new FrameLayout.LayoutParams(-1, -1));
+        root.addView(area, new FrameLayout.LayoutParams(-1, -1));
+
+        // top: what is running (indexing, download) and what the grid shows (search results)
+        info = new LinearLayout(this) {
+            @Override
+            protected void onMeasure(int w, int h) {
+                for (int i = 0; i < getChildCount(); i++) {
+                    if (getChildAt(i).getVisibility() != GONE) {
+                        super.onMeasure(w, h);
+                        return;
+                    }
+                }
+                setMeasuredDimension(0, 0); // nothing to say: no empty bubble
+            }
+        };
+        info.setOrientation(LinearLayout.VERTICAL);
+        info.setBackground(Ui.round(this, Rail.BACKGROUND, 18));
+        info.setPadding(dp(14), dp(9), dp(14), dp(10));
+        info.setElevation(dp(3));
+        section = Ui.text(this, "", 13.5f, Ui.TEXT, Ui.MEDIUM);
+        section.setSingleLine(true);
+        section.setEllipsize(TextUtils.TruncateAt.END);
+        section.setVisibility(View.GONE);
+        info.addView(section, new LinearLayout.LayoutParams(-2, -2)); // wrap: the bubble follows the text
+        status = Ui.text(this, "", 12.5f, Ui.TEXT2, Ui.REGULAR);
+        status.setVisibility(View.GONE);
+        info.addView(status, new LinearLayout.LayoutParams(-2, -2));
+        progress = new ProgressLine(this);
+        progress.setVisibility(View.GONE);
+        LinearLayout.LayoutParams pl = new LinearLayout.LayoutParams(dp(180), dp(2));
+        pl.topMargin = dp(7);
+        info.addView(progress, pl);
+        FrameLayout.LayoutParams il = new FrameLayout.LayoutParams(-2, -2, Gravity.TOP | Gravity.CENTER_HORIZONTAL);
+        il.setMargins(dp(16), dp(10), dp(16), 0);
+        root.addView(info, il);
+
+        // bottom: the search field, opened from the rail's search button
+        searchBar = new LinearLayout(this);
+        searchBar.setGravity(Gravity.CENTER_VERTICAL);
+        searchBar.setBackground(Ui.round(this, Rail.BACKGROUND, 26));
+        searchBar.setElevation(dp(4));
+        searchBar.setPadding(dp(14), 0, dp(4), 0);
+        searchBar.setVisibility(View.GONE);
+        searchBar.addView(Ui.icon(this, Icon.SEARCH, Ui.TEXT3, 20), new LinearLayout.LayoutParams(dp(20), dp(20)));
         query = new EditText(this);
         query.setHint("Найти по смыслу");
         query.setSingleLine(true);
@@ -258,23 +301,26 @@ public final class MainActivity extends Activity implements Engine.Listener, Vie
                 boolean has = s.length() > 0;
                 if (has && clear.getVisibility() != View.VISIBLE) Ui.fadeIn(clear, 150);
                 if (!has && clear.getVisibility() == View.VISIBLE) Ui.fadeOut(clear, 150);
+                rail.setSearchActive(has);
                 ui.removeCallbacks(debounced);
                 if (has) ui.postDelayed(debounced, 550);
                 else if (resultsLabel != null) showRecent(true);
             }
         });
-        pill.addView(query, new LinearLayout.LayoutParams(0, dp(52), 1));
+        searchBar.addView(query, new LinearLayout.LayoutParams(0, dp(52), 1));
         clear = Ui.icon(this, Icon.CLOSE, Ui.TEXT2, 40);
         clear.setVisibility(View.GONE);
+        clear.setContentDescription("Очистить");
         clear.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {
                 query.setText("");
                 hideKeyboard();
                 showRecent(true);
+                hideSearch();
             }
         });
-        pill.addView(clear, new LinearLayout.LayoutParams(dp(40), dp(40)));
+        searchBar.addView(clear, new LinearLayout.LayoutParams(dp(40), dp(40)));
         ImageView byPhoto = Ui.icon(this, Icon.IMAGE, Ui.TEXT2, 40);
         byPhoto.setContentDescription("Найти по фото");
         byPhoto.setOnClickListener(new View.OnClickListener() {
@@ -289,67 +335,127 @@ public final class MainActivity extends Activity implements Engine.Listener, Vie
                 }
             }
         });
-        pill.addView(byPhoto, new LinearLayout.LayoutParams(dp(40), dp(40)));
-        head.addView(pill, new LinearLayout.LayoutParams(0, dp(52), 1));
-        ImageView gear = Ui.icon(this, Icon.TUNE, Ui.TEXT, 52);
-        gear.setContentDescription("Настройки");
-        gear.setBackground(Ui.round(this, Ui.SURFACE2, 26));
-        gear.setOnClickListener(new View.OnClickListener() {
+        searchBar.addView(byPhoto, new LinearLayout.LayoutParams(dp(40), dp(40)));
+        root.addView(searchBar, new FrameLayout.LayoutParams(-1, dp(52), Gravity.BOTTOM));
+
+        // the rail under the thumb
+        rail = new Rail(this, new Rail.Listener() {
             @Override
-            public void onClick(View v) {
+            public void filterChosen(int index) {
+                selectFilter(index);
+            }
+
+            @Override
+            public void searchTapped() {
+                if (searchBar.getVisibility() == View.VISIBLE && query.getText().length() == 0) hideSearch();
+                else openSearch();
+            }
+
+            @Override
+            public void settingsTapped() {
                 openSettings();
             }
-        });
-        Ui.pressable(gear);
-        LinearLayout.LayoutParams gl = new LinearLayout.LayoutParams(dp(52), dp(52));
-        gl.leftMargin = dp(10);
-        head.addView(gear, gl);
-        screen.addView(head);
 
-        segments = new Segments(this, FILTERS);
-        LinearLayout.LayoutParams sl = new LinearLayout.LayoutParams(-1, dp(40));
-        sl.setMargins(dp(14), dp(2), dp(14), dp(6));
-        screen.addView(segments, sl);
-
-        // status: thin progress + one quiet line, only while something runs
-        progress = new ProgressLine(this);
-        progress.setVisibility(View.GONE);
-        LinearLayout.LayoutParams pl = new LinearLayout.LayoutParams(-1, dp(2));
-        pl.setMargins(dp(18), dp(6), dp(18), 0);
-        screen.addView(progress, pl);
-        status = Ui.text(this, "", 12.5f, Ui.TEXT3, Ui.REGULAR);
-        status.setPadding(dp(18), dp(6), dp(18), dp(8));
-        status.setVisibility(View.GONE);
-        screen.addView(status);
-
-        section = Ui.text(this, "", 13, Ui.TEXT2, Ui.MEDIUM);
-        section.setPadding(dp(18), dp(10), dp(18), dp(10));
-        section.setSingleLine(true);
-        section.setEllipsize(TextUtils.TruncateAt.END);
-        screen.addView(section);
-
-        FrameLayout area = new FrameLayout(this);
-        gallery = new MasonryView(this, this);
-        area.addView(gallery, new FrameLayout.LayoutParams(-1, -1));
-        empty = new FrameLayout(this);
-        area.addView(empty, new FrameLayout.LayoutParams(-1, -1));
-        fab = Ui.icon(this, Icon.PLUS, Ui.ON_ACCENT, 58);
-        fab.setBackground(Ui.round(this, Ui.ACCENT, 29));
-        fab.setElevation(dp(6));
-        fab.setContentDescription("Новая заметка");
-        fab.setVisibility(View.GONE);
-        fab.setOnClickListener(new View.OnClickListener() {
             @Override
-            public void onClick(View v) {
+            public void newNoteTapped() {
                 noteEditor();
             }
         });
-        Ui.pressable(fab);
-        FrameLayout.LayoutParams fl = new FrameLayout.LayoutParams(dp(58), dp(58), Gravity.BOTTOM | Gravity.END);
-        fl.setMargins(0, 0, dp(22), dp(26));
-        area.addView(fab, fl);
-        screen.addView(area, new LinearLayout.LayoutParams(-1, 0, 1));
+        root.addView(rail, new FrameLayout.LayoutParams(-2, -2, Gravity.BOTTOM | Gravity.END));
+
+        chip = Ui.text(this, "", 13, Ui.TEXT, Ui.MEDIUM);
+        chip.setBackground(Ui.round(this, Rail.BACKGROUND, 14));
+        chip.setPadding(dp(12), dp(6), dp(12), dp(6));
+        chip.setElevation(dp(4));
+        chip.setVisibility(View.GONE);
+        root.addView(chip, new FrameLayout.LayoutParams(-2, -2, Gravity.TOP | Gravity.START));
+        placeRail(false);
         return root;
+    }
+
+    // ------------------------------------------------------------------ rail and search field
+
+    /** 0: the rail sits on the right (right thumb), 1: on the left. */
+    int railSide() {
+        return engine.prefs().getInt("rail_side", 0) == 1 ? 1 : 0;
+    }
+
+    void setRailSide(int side) {
+        if (side == railSide()) return;
+        engine.prefs().edit().putInt("rail_side", side).apply();
+        rail.animate().alpha(0f).setDuration(120).withEndAction(new Runnable() {
+            @Override
+            public void run() {
+                placeRail(true);
+                rail.animate().alpha(1f).setDuration(200).start();
+            }
+        }).start();
+    }
+
+    private void placeRail(boolean animate) {
+        boolean right = railSide() == 0;
+        FrameLayout.LayoutParams rl = (FrameLayout.LayoutParams) rail.getLayoutParams();
+        rl.gravity = Gravity.BOTTOM | (right ? Gravity.END : Gravity.START);
+        rl.setMargins(dp(12), 0, dp(12), dp(20));
+        rail.setLayoutParams(rl);
+        // the field runs along the bottom up to the rail, centred on its search button
+        FrameLayout.LayoutParams bl = (FrameLayout.LayoutParams) searchBar.getLayoutParams();
+        int side = dp(12 + 60 + 8);
+        bl.setMargins(right ? dp(12) : side, 0, right ? side : dp(12), dp(24));
+        searchBar.setLayoutParams(bl);
+        searchBar.setPivotX(right ? 99999 : 0);
+    }
+
+    private void openSearch() {
+        if (searchBar.getVisibility() != View.VISIBLE) {
+            boolean right = railSide() == 0;
+            searchBar.setVisibility(View.VISIBLE);
+            searchBar.setAlpha(0f);
+            searchBar.setTranslationX(dp(right ? 40 : -40));
+            searchBar.animate().alpha(1f).translationX(0).setDuration(240).setInterpolator(Ui.EASE).start();
+        }
+        query.requestFocus();
+        InputMethodManager imm = (InputMethodManager) getSystemService(Context.INPUT_METHOD_SERVICE);
+        imm.showSoftInput(query, InputMethodManager.SHOW_IMPLICIT);
+    }
+
+    private void hideSearch() {
+        if (searchBar.getVisibility() != View.VISIBLE) return;
+        hideKeyboard();
+        boolean right = railSide() == 0;
+        searchBar.animate().alpha(0f).translationX(dp(right ? 40 : -40)).setDuration(180).setInterpolator(Ui.EASE)
+                .withEndAction(new Runnable() {
+                    @Override
+                    public void run() {
+                        searchBar.setVisibility(View.GONE);
+                    }
+                }).start();
+    }
+
+    /** The filter's name, briefly, beside the rail. */
+    private void flashChip(String text, int filterIndex) {
+        chip.setText(text);
+        chip.measure(View.MeasureSpec.UNSPECIFIED, View.MeasureSpec.UNSPECIFIED);
+        boolean right = railSide() == 0;
+        float x = right ? rail.getLeft() - chip.getMeasuredWidth() - dp(8) : rail.getRight() + dp(8);
+        float y = rail.getTop() + rail.filterCenterY(filterIndex) - chip.getMeasuredHeight() / 2f;
+        chip.setTranslationX(x);
+        chip.setTranslationY(y);
+        chip.animate().cancel();
+        chip.setVisibility(View.VISIBLE);
+        chip.setAlpha(0f);
+        chip.animate().alpha(1f).setDuration(140).withEndAction(new Runnable() {
+            @Override
+            public void run() {
+                chip.animate().alpha(0f).setStartDelay(650).setDuration(260).withEndAction(new Runnable() {
+                    @Override
+                    public void run() {
+                        chip.setVisibility(View.GONE);
+                        chip.animate().setStartDelay(0);
+                    }
+                }).start();
+            }
+        }).start();
     }
 
     private void hideKeyboard() {
@@ -361,76 +467,12 @@ public final class MainActivity extends Activity implements Engine.Listener, Vie
         }
     }
 
-    /** Segmented filter with a highlight that glides to the chosen item. */
-    final class Segments extends LinearLayout {
-        final TextView[] labels;
-        private final android.graphics.Paint hl = new android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG);
-        private final android.graphics.RectF r = new android.graphics.RectF();
-        private float pos;
-        private android.animation.ValueAnimator glide;
-
-        Segments(Context c, String[] names) {
-            super(c);
-            setWillNotDraw(false);
-            setBackground(Ui.round(c, Ui.SURFACE, 20));
-            setPadding(dp(4), dp(4), dp(4), dp(4));
-            hl.setColor(Ui.ACCENT_SOFT);
-            labels = new TextView[names.length];
-            for (int i = 0; i < names.length; i++) {
-                final int idx = i;
-                TextView t = Ui.text(c, names[i], 13.5f, i == 0 ? Ui.TEXT : Ui.TEXT2, Ui.MEDIUM);
-                t.setGravity(Gravity.CENTER);
-                t.setOnClickListener(new OnClickListener() {
-                    @Override
-                    public void onClick(View v) {
-                        selectFilter(idx);
-                    }
-                });
-                labels[i] = t;
-                addView(t, new LinearLayout.LayoutParams(0, -1, 1));
-            }
-        }
-
-        @Override
-        protected void dispatchDraw(android.graphics.Canvas c) {
-            float cell = (getWidth() - getPaddingLeft() - getPaddingRight()) / (float) labels.length;
-            float left = getPaddingLeft() + cell * pos;
-            r.set(left, getPaddingTop(), left + cell, getHeight() - getPaddingBottom());
-            float rad = r.height() / 2;
-            c.drawRoundRect(r, rad, rad, hl);
-            super.dispatchDraw(c);
-        }
-
-        void select(int idx, boolean animate) {
-            if (glide != null) glide.cancel();
-            if (animate) {
-                glide = android.animation.ValueAnimator.ofFloat(pos, idx);
-                glide.setDuration(280);
-                glide.setInterpolator(Ui.EASE);
-                glide.addUpdateListener(new android.animation.ValueAnimator.AnimatorUpdateListener() {
-                    @Override
-                    public void onAnimationUpdate(android.animation.ValueAnimator a) {
-                        pos = (Float) a.getAnimatedValue();
-                        invalidate();
-                    }
-                });
-                glide.start();
-            } else {
-                pos = idx;
-                invalidate();
-            }
-            for (int i = 0; i < labels.length; i++) labels[i].setTextColor(i == idx ? Ui.TEXT : Ui.TEXT2);
-        }
-    }
-
     private void selectFilter(int idx) {
         if (idx == filter) return;
         filter = idx;
-        segments.select(idx, true);
-        if (fab != null) {
-            if (idx == 3) Ui.fadeIn(fab, 200);
-            else Ui.fadeOut(fab, 150);
-        }
+        rail.select(idx, true);
+        rail.showNewNote(idx == 3);
+        flashChip(Rail.FILTER_NAMES[idx], idx);
         if (resultsLabel != null && query.getText().toString().trim().length() > 0) runSearch(false);
         else showRecent(true);
     }
@@ -583,7 +625,16 @@ public final class MainActivity extends Activity implements Engine.Listener, Vie
         empty.removeAllViews();
         Engine.State st = engine.state;
         boolean noModel = !engine.hasModelFiles() || (st == Engine.State.NO_MODEL && !engine.hasModelFiles());
-        if (st == Engine.State.DOWNLOADING || (noModel && st != Engine.State.LOADING)) {
+        boolean welcome = st == Engine.State.DOWNLOADING || (noModel && st != Engine.State.LOADING);
+        if (welcome) {
+            if (rail.getVisibility() == View.VISIBLE) {
+                rail.setVisibility(View.GONE);
+                hideSearch();
+            }
+        } else if (rail.getVisibility() != View.VISIBLE) {
+            Ui.fadeIn(rail, 220);
+        }
+        if (welcome) {
             welcome();
         } else if (st == Engine.State.ERROR) {
             card(Icon.INFO, "Модель не загрузилась", engine.status, "Повторить", new Runnable() {
@@ -756,7 +807,11 @@ public final class MainActivity extends Activity implements Engine.Listener, Vie
     // ------------------------------------------------------------------ actions used by panels
 
     void downloadModel() {
-        engine.download(engine.repo(), engine.prefs().getString("token", ""), engine.prefs().getBoolean("vision", true));
+        if (engine.photoModel() == FastModel.GEMMA) {
+            engine.download(engine.repo(), engine.prefs().getString("token", ""), engine.prefs().getBoolean("vision", true));
+        } else {
+            engine.downloadFast(false);
+        }
     }
 
     void requestMediaAndIndex() {
@@ -1078,6 +1133,41 @@ public final class MainActivity extends Activity implements Engine.Listener, Vie
         });
     }
 
+    /** A thumbnail into any rounded picture view (the comparison sheet). */
+    void thumbInto(final MasonryView.Thumb t, final IndexStore.Item it, final int size) {
+        Bitmap cached = thumbs.get(it.id);
+        if (cached != null) {
+            t.setImageBitmap(cached);
+            return;
+        }
+        thumbPool.submit(new Runnable() {
+            @Override
+            public void run() {
+                BitmapLoader l = testLoader;
+                final Bitmap b = l != null ? l.load(it, size) : Media.thumbnail(getContentResolver(), it, size);
+                if (b == null) return;
+                thumbs.put(it.id, b);
+                ui.post(new Runnable() {
+                    @Override
+                    public void run() {
+                        t.setAlpha(0f);
+                        t.setImageBitmap(b);
+                        t.animate().alpha(1f).setDuration(160).start();
+                    }
+                });
+            }
+        });
+    }
+
+    ViewGroup rootView() {
+        return root;
+    }
+
+    void openCompare() {
+        hideKeyboard();
+        CompareSheet.open(this);
+    }
+
     @Override
     public void open(int index) {
         openViewer(index);
@@ -1092,6 +1182,7 @@ public final class MainActivity extends Activity implements Engine.Listener, Vie
     @Override
     public void dragStarted() {
         hideKeyboard();
+        if (query.getText().length() == 0) hideSearch();
     }
 
     @Override
