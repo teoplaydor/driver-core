@@ -615,7 +615,8 @@ namespace SemSearch
             f.Controls.Add(docsBox);
 
             var c = Card(page, "Индексация", w);
-            c.Controls.Add(MakeLabel("Детализация фото: больше токенов — точнее мелкие детали и текст на скриншотах, но медленнее.",
+            c.Controls.Add(MakeLabel("Детализация фото: больше токенов — точнее мелкие детали и текст на скриншотах, но медленнее: "
+                                     + "140 примерно в 2,5 раза быстрее 280, а 70 — ещё вдвое. Для обычных фото хватает 140.",
                 FontSmall, TextMuted, w - 40));
             StyleCombo(detail, new[] { "Быстро — 70 токенов", "Средне — 140 токенов", "Максимум — 280 токенов" }, 300);
             detail.SelectedIndex = Math.Max(0, Array.IndexOf(Engine.PhotoBudgets, engine.S.PhotoBudget));
@@ -655,9 +656,9 @@ namespace SemSearch
             c.Controls.Add(indexStats);
 
             var a = Card(page, "Ускорение", w);
-            a.Controls.Add(MakeLabel("Где считается модель. «Подобрать» замерит процессор, процессор с int8 и видеокарту (DirectML), "
-                                     + "число потоков и размер пачки — и сохранит самое быстрое. Видеокарта подойдёт любая с DirectX 12; "
-                                     + "для неё один раз скачается компонент Microsoft DirectML (~9 МБ с nuget.org).",
+            a.Controls.Add(MakeLabel("Где считается модель. «Подобрать» замерит процессор и видеокарту (WebGPU), обычный режим и int8, "
+                                     + "для видеокарты — и размер пачки, и сохранит самое быстрое. Видеокарта подойдёт любая с DirectX 12; "
+                                     + "для неё один раз скачается компилятор шейдеров (~8 МБ), без него тоже работает.",
                 FontSmall, TextMuted, w - 40));
             var ar = Row();
             StyleCombo(accelBox, Engine.AccelNames, 260);
@@ -670,7 +671,7 @@ namespace SemSearch
                 if (engine.Ready && !engine.Indexing) _ = engine.LoadModelAsync();
             };
             ar.Controls.Add(accelBox);
-            var bench = MakeButton("Подобрать самое быстрое (1–3 мин)", true);
+            var bench = MakeButton("Подобрать самое быстрое (~1 мин)", true);
             bench.Click += async (s, e) =>
             {
                 if (!engine.Ready || engine.Indexing)
@@ -783,7 +784,7 @@ namespace SemSearch
             about.Controls.Add(MakeLabel("Открытая модель Google DeepMind (740M, Apache 2.0). Переводит текст, код и фото в общее "
                                          + "векторное пространство на 768 чисел: текстовый запрос находит картинку, картинка — похожие "
                                          + "фото и документы. После загрузки всё работает офлайн, файлы никуда не отправляются.\n\n"
-                                         + "Формат: ONNX (onnx-community), квантование q4, ONNX Runtime на процессоре или видеокарте (DirectML).",
+                                         + "Формат: ONNX (onnx-community), квантование q4, ONNX Runtime на процессоре или видеокарте (WebGPU).",
                 FontSmall, TextMuted, w - 40));
 
             var st = Card(page, "Состояние", w);

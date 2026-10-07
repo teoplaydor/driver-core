@@ -39,6 +39,9 @@ namespace SemSearch
         [STAThread]
         private static int Main(string[] args)
         {
+            // SEMSEARCH_WEBGPU_BACKEND=Vulkan|D3D12: Dawn backend override (tests under Wine use Vulkan).
+            string backend = Environment.GetEnvironmentVariable("SEMSEARCH_WEBGPU_BACKEND");
+            if (!string.IsNullOrEmpty(backend)) EmbeddingGemma2.WebGpuOptions["dawnBackendType"] = backend;
             if (args.Length >= 2 && args[0] == "--shot") return Shots(args[1]);
             if (args.Length >= 3 && args[0] == "--selftest") return SelfTest(args[1], args[2]);
             if (args.Length >= 7 && args[0] == "--enginetest")

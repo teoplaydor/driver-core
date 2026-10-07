@@ -11,13 +11,13 @@
 - Индексация папок (по умолчанию «Изображения», «Рабочий стол», «Документы», «Загрузки»): jpg/png/bmp/gif/tif,
   txt/md/код/docx. Скрытые, системные и облачные (не скачанные OneDrive) файлы пропускаются. Повторная индексация
   обрабатывает только новые и изменённые файлы, удалённые убираются из индекса.
-- Ускорение: процессор, процессор с int8-вычислениями (патч `accuracy_level=4` для MatMulNBits) или видеокарта
-  через DirectML (любая с DirectX 12). Кнопка «Подобрать самое быстрое» сама замерит варианты, число потоков и размер
-  пачки и проверит, что результат совпадает с эталоном. `DirectML.dll` в exe не входит: при первом выборе видеокарты
-  он извлекается range-запросами (~9 МБ) из официального пакета Microsoft.AI.DirectML 1.15.4 на api.nuget.org, а если
-  тот не отвечает — из колеса onnxruntime-directml 1.24.4 на files.pythonhosted.org (тот же подписанный Microsoft
-  DirectML 1.15.4) или с globalcdn.nuget.org. Результат сверяется с зафиксированным SHA-256; молчащий источник
-  пропускается через 15 с, так что подбор не зависает. Без интернета можно положить `DirectML.dll` рядом с exe.
+- Ускорение: процессор или видеокарта через WebGPU (Dawn поверх DirectX 12 — тот же движок ONNX Runtime, что и в
+  Android-версии), в обычном режиме или с int8-вычислениями (патч `accuracy_level=4` для MatMulNBits). На видеокарте
+  считается визуальный энкодер, текстовая часть — на процессоре. Кнопка «Подобрать самое быстрое» за ~минуту
+  замерит варианты (для видеокарты — ещё и пачки) и проверит совпадение с эталоном. Компилятор шейдеров DXC
+  (`dxcompiler.dll` + `dxil.dll`, ~8 МБ) в exe не входит: при первом запуске на видеокарте он извлекается
+  range-запросами из колеса onnxruntime-webgpu 1.27.0 на PyPI и сверяется с зафиксированными SHA-256; без него Dawn
+  компилирует шейдеры встроенным в Windows FXC. Молчащий источник пропускается через 15 с, так что ничего не зависает.
 - Работает в трее: закрытие окна прячет его, `Ctrl+Alt+Space` открывает поиск из любого окна, `Esc` прячет.
 
 Данные лежат в `%LOCALAPPDATA%\SemSearch` (модель, индекс, настройки, `errors.log`).
@@ -29,24 +29,27 @@
 ./build.sh test     # плюс тесты ядра (нужен gemma-search-android/build/test от его run_tests.sh)
 ```
 
-Нужен любой .NET 8 SDK (Windows или Linux) и Python 3. Зависимости — только nuget.org (ONNX Runtime DirectML 1.24.4,
-рантайм .NET 8) и PyPI (`msvc-runtime`: подписанные Microsoft библиотеки Visual C++, которые нужны `onnxruntime.dll`
-на ПК без VC++ Redistributable; хэш колеса зафиксирован в `build.sh`).
+Нужен любой .NET 8 SDK (Windows или Linux) и Python 3. Зависимости — только nuget.org (управляемый API ONNX Runtime
+1.27.0, рантайм .NET 8) и PyPI: `onnxruntime-webgpu` 1.27.0 (нативная `onnxruntime.dll` с провайдерами CPU и WebGPU
+вместо CPU-only из NuGet) и `msvc-runtime` (подписанные Microsoft библиотеки Visual C++ для `onnxruntime.dll` на ПК
+без VC++ Redistributable). Хэши колёс зафиксированы в `build.sh`.
 
 Чтобы exe помещался в 30 МБ (лимит вложений чата), библиотеки .NET, помеченные как обрезаемые, проходят trimming в
-режиме `partial` (WinForms, ONNX Runtime и само приложение остаются целиком), а WPF, дизайнер WinForms, отладочный
-слой DirectML и сам DirectML в exe не кладутся. Итог — около 27 МБ.
+режиме `partial` (WinForms, ONNX Runtime и само приложение остаются целиком), а WPF и дизайнер WinForms в exe не
+кладутся. Итог — около 30 МБ.
 
 ## Структура
 
 - `SemSearch.Core` — токенизатор (tokenizer.json, BPE с byte fallback), препроцессор картинок Gemma 4, конвейер
   EmbeddingGemma 2 на ONNX Runtime, патч int8, стеммер и мост RU→EN, загрузка с Hugging Face (докачка, автоповтор),
-  файл из удалённого zip по range-запросам, векторный индекс, извлечение текста, EXIF-ориентация JPEG.
+  файлы из удалённого zip по range-запросам, векторный индекс, извлечение текста, EXIF-ориентация JPEG.
 - `SemSearch` — приложение WinForms: движок (`Engine.cs`), окно (`MainForm.cs`), чтение фото через GDI+.
 - `SemSearch.Tests` — сверка с эталонами Android-версии: токенизатор (6414 кодировок), эмбеддинги против
   transformers.js (до 1e-7), int8 и пачки, стеммер против Snowball, мост, индекс, docx/cp1251, EXIF, загрузка с
-  mock-хаба с обрывом соединения, извлечение из zip по range-запросам (с обрывом; `SEMSEARCH_ONLINE=1` — ещё и с
-  nuget.org).
+  mock-хаба с обрывом и «зависанием» соединения, извлечение из zip по range-запросам (обрыв, молчащие и пропавшие
+  источники; `SEMSEARCH_ONLINE=1` — ещё и с nuget.org). С `SEMSEARCH_ORT_LIB=<libonnxruntime.so из onnxruntime-webgpu>`
+  и программной видеокартой (lavapipe, `VK_ICD_FILENAMES=.../lvp_icd.json`) визуальный энкодер дополнительно
+  сверяется на WebGPU с процессором.
 
 У exe есть служебные режимы для проверки без Windows (под Wine):
 `--selftest <модель> <reference.json>` (конвейер внутри exe против эталона, декодер GDI+),

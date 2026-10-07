@@ -19,8 +19,10 @@ namespace SemSearch
     {
         public enum State { NoModel, Downloading, Loading, Ready, Error }
 
-        public const int AccelCpu = 0, AccelCpuInt8 = 1, AccelGpu = 2;
-        public static readonly string[] AccelNames = { "Процессор", "Процессор, int8", "Видеокарта (DirectML)" };
+        public const int AccelCpu = 0, AccelCpuInt8 = 1, AccelGpu = 2, AccelGpuInt8 = 3;
+        public static readonly string[] AccelNames =
+            { "Процессор", "Процессор, int8", "Видеокарта (WebGPU)", "Видеокарта (WebGPU), int8" };
+        public static bool IsGpu(int accel) => accel >= AccelGpu;
         public static readonly int[] PhotoBudgets = { 70, 140, 280 };
         public static readonly string[] BridgeModes =
             { "Русский + английский перевод (рекомендуется)", "Только английский перевод", "Без перевода" };
@@ -61,7 +63,7 @@ namespace SemSearch
                 // The previous run died while creating the GPU session (driver crash): stay on the CPU.
                 S.GpuBroken = true;
                 S.GpuProbe = false;
-                if (S.Accel == AccelGpu) S.Accel = AccelCpuInt8;
+                if (IsGpu(S.Accel)) S.Accel = AccelCpu;
                 S.Save();
             }
             if (File.Exists(ManifestPath)) _ = LoadModelAsync();
@@ -142,21 +144,23 @@ namespace SemSearch
 
         private EmbeddingGemma2 CreateModel(ModelConfig cfg, HfTokenizer tok, HfRepo.Plan plan, int accel, int threads)
         {
-            bool gpu = accel == AccelGpu && !S.GpuBroken;
-            string text = GraphFile(plan.TextModel, accel != AccelCpu);
-            string vision = plan.VisionModel == null ? null : GraphFile(plan.VisionModel, accel == AccelCpuInt8);
+            // As on Android: the vision encoder runs on the GPU, the text model on the CPU; "int8" patches both graphs.
+            bool gpu = IsGpu(accel) && !S.GpuBroken;
+            if (IsGpu(accel) && !gpu) throw new InvalidOperationException("видеокарта отключена после сбоя драйвера");
+            bool int8 = accel == AccelCpuInt8 || accel == AccelGpuInt8;
+            string text = GraphFile(plan.TextModel, int8);
+            string vision = plan.VisionModel == null ? null : GraphFile(plan.VisionModel, int8);
             if (gpu)
             {
-                if (!DirectMl.Downloaded)
-                    throw new InvalidOperationException("компонент DirectML не скачан" + (dmlError != null ? ": " + dmlError : ""));
-                DirectMl.Prepare();
+                try { ShaderCompiler.Prepare(); }
+                catch (Exception) { } // without DXC, Dawn compiles with FXC
                 S.GpuProbe = true;
                 S.Save();
             }
             try
             {
                 return new EmbeddingGemma2(cfg, tok, text, vision, threads,
-                    gpu ? EmbeddingGemma2.Device.DirectML : EmbeddingGemma2.Device.Cpu);
+                    gpu ? EmbeddingGemma2.Device.WebGpu : EmbeddingGemma2.Device.Cpu);
             }
             finally
             {
@@ -168,33 +172,36 @@ namespace SemSearch
             }
         }
 
-        /// <summary>Fetches DirectML.dll for the GPU path once; failures surface when the GPU session is created.</summary>
-        private async Task EnsureDirectMlAsync()
+        /// <summary>
+        /// Fetches the DXC shader compiler for the GPU path once. Not fatal: without it Dawn uses FXC from Windows.
+        /// </summary>
+        private async Task EnsureShaderCompilerAsync()
         {
+            if (ShaderCompiler.Ready || dxcTried) return;
+            dxcTried = true;
             try
             {
                 long lastNotify = 0;
-                await DirectMl.EnsureAsync(host =>
+                await ShaderCompiler.EnsureAsync(host =>
                 {
-                    Status = "Скачиваю DirectML для видеокарты (~9 МБ, один раз): соединяюсь с " + host + "…";
+                    Status = "Скачиваю компилятор шейдеров для видеокарты (~8 МБ, один раз): соединяюсь с " + host + "…";
                     Notify();
                 }, (host, done, total) =>
                 {
                     long now = Environment.TickCount64;
                     if (now - lastNotify < 200 && done < total) return;
                     lastNotify = now;
-                    Status = $"Скачиваю DirectML для видеокарты: {done / 1048576.0:F1} из {total / 1048576.0:F1} МБ ({host})";
+                    Status = $"Скачиваю компилятор шейдеров для видеокарты: {done / 1048576.0:F1} из {total / 1048576.0:F1} МБ ({host})";
                     Notify();
                 }, CancellationToken.None);
-                dmlError = null;
             }
-            catch (Exception e)
+            catch (Exception)
             {
-                dmlError = e.Message + ". Можно положить DirectML.dll рядом с SemSearch.exe";
+                // the GPU still works with Windows' own FXC compiler
             }
         }
 
-        private string dmlError;
+        private bool dxcTried;
 
         public Task LoadModelAsync()
         {
@@ -223,10 +230,10 @@ namespace SemSearch
                     var tok = EmbeddingGemma2.LoadTokenizer(ModelDir);
                     int accel = S.Accel;
                     string fallback = null;
-                    if (accel == AccelGpu && !S.GpuBroken && !DirectMl.Downloaded)
+                    if (IsGpu(accel) && !S.GpuBroken)
                     {
-                        step = "загрузка DirectML";
-                        await EnsureDirectMlAsync();
+                        step = "компилятор шейдеров";
+                        await EnsureShaderCompilerAsync();
                     }
                     step = "инициализация";
                     try
@@ -660,7 +667,7 @@ namespace SemSearch
                 m = CreateModel(cfg, tok, plan, accel, threads);
                 var imgs = Enumerable.Range(0, batch).Select(k => (IImageSource)new PatternSource(1280, 960, 2 + k)).ToList();
                 m.EmbedImages(imgs, S.PhotoBudget); // warm-up (allocations, GPU shader compilation)
-                for (int run = 0; run < 2; run++)
+                for (int run = 0; run < 1; run++)
                 {
                     var sw = Stopwatch.StartNew();
                     var e = m.EmbedImages(imgs, S.PhotoBudget);
@@ -708,31 +715,36 @@ namespace SemSearch
                 float[] reference = null;
                 int[] best = null;
                 double bestMs = double.MaxValue;
-                for (int phase = 0; phase < 3; phase++)
+                // One timed run per variant after a warm-up; ONNX Runtime's own thread count (all physical cores) has
+                // beaten manual counts on hybrid CPUs, and batches only pay off on the GPU.
+                bool gpuDown = false;
+                for (int phase = 0; phase < 2; phase++)
                 {
                     var cands = new List<int[]>(); // {accel, threads, batch}
                     if (phase == 0)
                     {
-                        for (int a = 0; a < AccelNames.Length; a++) if (a != AccelGpu || !S.GpuBroken) cands.Add(new[] { a, 0, 1 });
+                        for (int a = 0; a < AccelNames.Length; a++) if (!IsGpu(a) || !S.GpuBroken) cands.Add(new[] { a, 0, 1 });
                     }
-                    else if (phase == 1 && best != null && best[0] != AccelGpu)
-                    {
-                        foreach (int t in new SortedSet<int> { Math.Max(2, cores / 2), cores }) cands.Add(new[] { best[0], t, 1 });
-                    }
-                    else if (phase == 2 && best != null)
+                    else if (best != null && IsGpu(best[0]))
                     {
                         foreach (int b in new[] { 2, 4 }) cands.Add(new[] { best[0], best[1], b });
                     }
                     foreach (var c in cands)
                     {
-                        string name = AccelNames[c[0]] + (c[1] > 0 ? ", потоков " + c[1] : ", потоков авто") + (c[2] > 1 ? ", пачка " + c[2] : "");
-                        if (c[0] == AccelGpu && !DirectMl.Downloaded) await EnsureDirectMlAsync();
+                        string name = AccelNames[c[0]] + (c[1] > 0 ? ", потоков " + c[1] : "") + (c[2] > 1 ? ", пачка " + c[2] : "");
+                        if (IsGpu(c[0]) && gpuDown)
+                        {
+                            rep.Append("• ").Append(name).Append(": пропущено — видеокарта не запустилась\n");
+                            continue;
+                        }
+                        if (IsGpu(c[0])) await EnsureShaderCompilerAsync();
                         Status = "Подбираю ускорение: " + name;
                         Notify();
                         var m = Run(cfg, tok, plan, c[0], c[1], c[2], reference);
                         if (m.Error != null)
                         {
                             rep.Append("• ").Append(name).Append(": не работает — ").Append(m.Error).Append('\n');
+                            if (IsGpu(c[0])) gpuDown = true;
                             continue;
                         }
                         bool first = reference == null;

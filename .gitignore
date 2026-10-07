@@ -18,3 +18,4 @@ gemma-search-windows/redist/
 
 # Python bytecode
 __pycache__/
+gemma-search-windows/redist-ort/

@@ -23,6 +23,9 @@ internal static class Program
 
     private static int Main(string[] args)
     {
+        if (OrtLib != null)
+            System.Runtime.InteropServices.NativeLibrary.SetDllImportResolver(typeof(Microsoft.ML.OnnxRuntime.InferenceSession).Assembly,
+                (name, asm, path) => name == "onnxruntime" ? System.Runtime.InteropServices.NativeLibrary.Load(OrtLib) : IntPtr.Zero);
         string t = args[0];
         Tokenizer(Path.Combine(t, "gemma3", "tokenizer.json"), Path.Combine(t, "tok-cases.jsonl"));
         for (int i = 1; i < args.Length; i++) Tokenizer(Path.Combine(t, "gemma3", "tokenizer.json"), args[i]);
@@ -147,16 +150,31 @@ internal static class Program
             double cos = VectorMath.Dot(single[0], e, e.Length);
             Check(cos > 0.98, $"int8 compute matches plain (cos {cos:F5})");
         }
+        // With SEMSEARCH_ORT_LIB pointing at a WebGPU build of ONNX Runtime (e.g. the onnxruntime-webgpu wheel's
+        // library on lavapipe), the GPU path must reproduce the CPU vectors; with the stock CPU build it must fail cleanly.
+        bool webgpu = OrtLib != null;
         try
         {
-            using var gpu = new EmbeddingGemma2(cfg, tok, text, vision, 2, EmbeddingGemma2.Device.DirectML);
-            Check(true, "DirectML available here");
+            using (var gpu = new EmbeddingGemma2(cfg, tok, text, vision, 2, EmbeddingGemma2.Device.WebGpu))
+            {
+                double worst = Enumerable.Range(0, imgs.Length).Min(i => (double)VectorMath.Dot(single[i], gpu.EmbedImage(imgs[i], 70), single[i].Length));
+                var batch = gpu.EmbedImages(imgs, 70);
+                double worstBatch = Enumerable.Range(0, imgs.Length).Min(i => (double)VectorMath.Dot(single[i], batch[i], single[i].Length));
+                Check(webgpu && worst > 0.999 && worstBatch > 0.999, $"WebGPU vision == CPU (worst cos {worst:F6}, batch {worstBatch:F6})");
+            }
+            using (var gpu8 = new EmbeddingGemma2(cfg, tok, text8, vision8, 2, EmbeddingGemma2.Device.WebGpu))
+            {
+                double cos = VectorMath.Dot(single[0], gpu8.EmbedImage(imgs[0], 70), single[0].Length);
+                Check(cos > 0.98, $"WebGPU int8 matches plain (cos {cos:F5})");
+            }
         }
         catch (IOException e)
         {
-            Check(true, "DirectML unavailable here → clean error: " + e.Message.Substring(0, Math.Min(80, e.Message.Length)));
+            Check(!webgpu, "WebGPU unavailable here → clean error: " + e.Message.Substring(0, Math.Min(80, e.Message.Length)));
         }
     }
+
+    private static readonly string OrtLib = Environment.GetEnvironmentVariable("SEMSEARCH_ORT_LIB");
 
     private static void Stemmer(string tsv)
     {
@@ -399,18 +417,25 @@ internal static class Program
             RemoteZip.StallTimeout = TimeSpan.FromSeconds(1);
             var sw0 = System.Diagnostics.Stopwatch.StartNew();
             var hosts = new List<string>();
+            string fb = Path.Combine(dir, "fb", "a.dll"), fb2 = Path.Combine(dir, "fb", "b.bin");
+            RemoteZip.Entry[] Both() => new[]
+            {
+                new RemoteZip.Entry { Name = "bin/x64-win/DirectML.dll", Sha256 = Sha(text), Dest = fb },
+                new RemoteZip.Entry { Name = "bin/x64-win/stored.bin", Sha256 = Sha(stored), Dest = fb2 },
+            };
             var sources = new[]
             {
-                new RemoteZip.Source { Url = $"http://127.0.0.1:{port}/stall.zip", Entry = "bin/x64-win/DirectML.dll", Sha256 = Sha(text) },
-                new RemoteZip.Source { Url = $"http://127.0.0.1:{port}/missing.zip", Entry = "bin/x64-win/DirectML.dll", Sha256 = Sha(text) },
-                new RemoteZip.Source { Url = url, Entry = "bin/x64-win/DirectML.dll", Sha256 = Sha(text) },
+                new RemoteZip.Source { Url = $"http://127.0.0.1:{port}/stall.zip", Entries = Both() },
+                new RemoteZip.Source { Url = $"http://127.0.0.1:{port}/missing.zip", Entries = Both() },
+                new RemoteZip.Source { Url = url, Entries = Both() },
             };
-            string fb = Path.Combine(dir, "fallback.dll");
-            RemoteZip.ExtractFirstAsync(sources, fb, h => hosts.Add(h), null, default).GetAwaiter().GetResult();
-            Check(File.ReadAllBytes(fb).SequenceEqual(text) && hosts.Count == 3 && sw0.Elapsed.TotalSeconds < 15,
-                $"remote zip: silent and missing sources skipped in {sw0.Elapsed.TotalSeconds:F1} s, third source used");
+            long lastDone = 0, lastTotal = 0;
+            RemoteZip.ExtractFirstAsync(sources, h => hosts.Add(h), (h, d, t) => { lastDone = d; lastTotal = t; }, default).GetAwaiter().GetResult();
+            Check(File.ReadAllBytes(fb).SequenceEqual(text) && File.ReadAllBytes(fb2).SequenceEqual(stored) && hosts.Count == 3
+                  && lastDone == lastTotal && lastTotal > stored.Length && sw0.Elapsed.TotalSeconds < 15,
+                $"remote zip: silent and missing sources skipped in {sw0.Elapsed.TotalSeconds:F1} s, two files from the third source");
             string all = null;
-            try { RemoteZip.ExtractFirstAsync(sources.Take(2).ToList(), fb + "2", null, null, default).GetAwaiter().GetResult(); }
+            try { RemoteZip.ExtractFirstAsync(sources.Take(2).ToList(), null, null, default).GetAwaiter().GetResult(); }
             catch (IOException e) { all = e.Message; }
             Check(all != null && all.Contains("нет ответа") && all.Contains("HTTP 404"), "remote zip: all sources down → one message with each reason: " + all);
             RemoteZip.StallTimeout = TimeSpan.FromSeconds(15);

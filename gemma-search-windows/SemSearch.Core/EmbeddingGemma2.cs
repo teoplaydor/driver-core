@@ -18,7 +18,10 @@ namespace SemSearch.Core
     {
         public const string QueryPrefix = "task: search result | query: ";
 
-        public enum Device { Cpu, DirectML }
+        public enum Device { Cpu, WebGpu }
+
+        /// <summary>Options for ONNX Runtime's WebGPU provider (e.g. dawnBackendType), empty by default.</summary>
+        public static readonly Dictionary<string, string> WebGpuOptions = new Dictionary<string, string>();
 
         private readonly InferenceSession textSession, visionSession;
         private readonly HfTokenizer tokenizer;
@@ -51,7 +54,7 @@ namespace SemSearch.Core
             {
                 textSession.Dispose();
                 throw new IOException("визуальный энкодер " + Path.GetFileName(visionModel)
-                                      + (visionDevice == Device.DirectML ? " (видеокарта)" : "") + ": " + e.Message, e);
+                                      + (visionDevice == Device.WebGpu ? " (видеокарта)" : "") + ": " + e.Message, e);
             }
         }
 
@@ -71,13 +74,8 @@ namespace SemSearch.Core
         {
             var o = new SessionOptions { GraphOptimizationLevel = GraphOptimizationLevel.ORT_ENABLE_ALL };
             if (threads > 0) o.IntraOpNumThreads = threads;
-            if (device == Device.DirectML)
-            {
-                // DirectML requires these two settings.
-                o.EnableMemoryPattern = false;
-                o.ExecutionMode = ExecutionMode.ORT_SEQUENTIAL;
-                o.AppendExecutionProvider_DML(0);
-            }
+            // WebGPU (Dawn on D3D12/Vulkan/Metal), as on Android: unsupported nodes fall back to the CPU provider.
+            if (device == Device.WebGpu) o.AppendExecutionProvider("WebGPU", new Dictionary<string, string>(WebGpuOptions));
             return o;
         }
 

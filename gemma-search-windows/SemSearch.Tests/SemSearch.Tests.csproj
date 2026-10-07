@@ -9,7 +9,7 @@
   <ItemGroup>
     <ProjectReference Include="..\SemSearch.Core\SemSearch.Core.csproj" />
     <!-- CPU build with Linux/macOS/Windows natives so the parity tests run anywhere. -->
-    <PackageReference Include="Microsoft.ML.OnnxRuntime" Version="1.24.4" />
+    <PackageReference Include="Microsoft.ML.OnnxRuntime" Version="1.27.0" />
     <None Include="range_server.py" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 </Project>
