@@ -38,6 +38,7 @@ internal static class Program
         Exif();
         Hub(Path.Combine(t, "..", "..", "tools", "mock_hub.py"));
         Zip();
+        Sizes();
         if (Environment.GetEnvironmentVariable("SEMSEARCH_ONLINE") == "1") ZipOnline();
         Console.WriteLine(failures == 0 ? "ALL TESTS PASSED" : failures + " FAILED");
         return failures == 0 ? 0 : 1;
@@ -475,5 +476,43 @@ internal static class Program
         {
             Check(false, "nuget.org: " + e.Message);
         }
+    }
+
+    /// <summary>Pixel sizes from headers (make_sizes.py writes the images and the expected values) and their cache.</summary>
+    private static void Sizes()
+    {
+        string dir = Path.Combine(Path.GetTempPath(), "semsearch-sizes");
+        if (Directory.Exists(dir)) Directory.Delete(dir, true);
+        using (var p = System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo("python3",
+                   $"\"{Path.Combine(AppContext.BaseDirectory, "make_sizes.py")}\" \"{dir}\"")
+                   { UseShellExecute = false, RedirectStandardOutput = true, RedirectStandardError = true }))
+            p.WaitForExit();
+        int total = 0, bad = 0;
+        foreach (var line in File.ReadLines(Path.Combine(dir, "expected.tsv")))
+        {
+            var f = line.Split('\t');
+            var (w, h) = ImageSize.Read(Path.Combine(dir, f[0]));
+            total++;
+            if (w != int.Parse(f[1]) || h != int.Parse(f[2]))
+            {
+                bad++;
+                Console.WriteLine($"  {f[0]}: {w}x{h}, expected {f[1]}x{f[2]}");
+            }
+        }
+        Check(total >= 13 && bad == 0, $"image size from headers: {total} files (jpeg baseline/progressive/cmyk/120 KB of EXIF, png, gif, bmp, tiff II/MM, junk), {bad} wrong");
+
+        string cacheFile = Path.Combine(dir, "sizes.bin"), pic = Path.Combine(dir, "baseline.jpg");
+        var fi = new FileInfo(pic);
+        var cache = new ImageSizeCache(cacheFile);
+        var first = cache.Get(pic, fi.Length, fi.LastWriteTimeUtc.Ticks);
+        cache.Save();
+        File.Move(pic, pic + ".moved"); // a cache hit must not touch the file
+        var reloaded = new ImageSizeCache(cacheFile);
+        var hit = reloaded.Get(pic, fi.Length, fi.LastWriteTimeUtc.Ticks);
+        var changed = reloaded.Get(pic, fi.Length + 1, fi.LastWriteTimeUtc.Ticks); // other size: re-read (file gone → 0x0)
+        reloaded.Keep(new HashSet<string>());
+        Check(first == (640, 427) && hit == (640, 427) && changed == (0, 0) && reloaded.Count == 0,
+            "size cache: saved, reloaded, hit without reading, re-read on change, pruned");
+        Directory.Delete(dir, true);
     }
 }

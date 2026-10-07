@@ -36,6 +36,7 @@ namespace SemSearch
         public readonly string ModelDir = Path.Combine(Settings.AppDir, "model");
         private string ManifestPath => Path.Combine(ModelDir, "manifest.json");
         public readonly VectorIndex Index = new VectorIndex(Path.Combine(Settings.AppDir, "index.bin"));
+        private readonly ImageSizeCache sizes = new ImageSizeCache(Path.Combine(Settings.AppDir, "sizes.bin"));
         private readonly QueryBridge bridge = QueryBridge.LoadEmbedded();
         private readonly SemaphoreSlim modelLock = new SemaphoreSlim(1, 1);
         private EmbeddingGemma2 model;
@@ -47,7 +48,7 @@ namespace SemSearch
         private CancellationTokenSource dlCts;
 
         public volatile bool Indexing;
-        public int IdxDone, IdxTotal, IdxErrors;
+        public int IdxDone, IdxTotal, IdxErrors, IdxSkippedSmall;
         public volatile string IdxStatus = "";
         private CancellationTokenSource idxCts;
         private string idxFirstError;
@@ -355,7 +356,7 @@ namespace SemSearch
             });
             return new SearchResult
             {
-                Hits = Index.Search(qImages, qDocs, S.Dims, images, docs, 150),
+                Hits = Index.Search(qImages, qDocs, S.Dims, images, docs, 150, null, Visible),
                 Millis = sw.ElapsedMilliseconds,
                 Label = "«" + query + "»" + (english != null ? " → для фото «" + english + "»" : "")
             };
@@ -367,7 +368,7 @@ namespace SemSearch
             var sw = Stopwatch.StartNew();
             return new SearchResult
             {
-                Hits = Index.Search(it.Emb, it.Emb, S.Dims, images, docs, 150, path),
+                Hits = Index.Search(it.Emb, it.Emb, S.Dims, images, docs, 150, path, Visible),
                 Millis = sw.ElapsedMilliseconds,
                 Label = "похожие на " + Path.GetFileName(path)
             };
@@ -385,7 +386,7 @@ namespace SemSearch
                 });
             return new SearchResult
             {
-                Hits = Index.Search(q, q, S.Dims, images, docs, 150, file),
+                Hits = Index.Search(q, q, S.Dims, images, docs, 150, file, Visible),
                 Millis = sw.ElapsedMilliseconds,
                 Label = "похожие на " + Path.GetFileName(file)
             };
@@ -405,7 +406,7 @@ namespace SemSearch
             if (Indexing || !Ready) return;
             Indexing = true;
             idxCts = new CancellationTokenSource();
-            IdxDone = IdxTotal = IdxErrors = 0;
+            IdxDone = IdxTotal = IdxErrors = IdxSkippedSmall = 0;
             idxFirstError = null;
             sumWaitMs = sumVisionMs = sumTextMs = 0;
             timedPhotos = 0;
@@ -428,7 +429,8 @@ namespace SemSearch
                 finally
                 {
                     Indexing = false;
-                    string err = TimingSplit() + (idxFirstError != null ? "\nПервая ошибка: " + idxFirstError : "");
+                    string err = TimingSplit() + (idxFirstError != null ? "\nПервая ошибка: " + idxFirstError : "")
+                                 + (IdxSkippedSmall > 0 ? $"\nПропущено мелких картинок (фильтр по размеру): {IdxSkippedSmall}" : "");
                     IdxStatus = (ct.IsCancellationRequested ? $"Остановлено: {IdxDone} из {IdxTotal}"
                                     : IdxTotal == 0 ? "Новых файлов нет — всё уже в индексе"
                                     : $"Готово: {IdxDone - IdxErrors} файлов" + (IdxErrors > 0 ? $", пропущено {IdxErrors}" : "")) + err;
@@ -445,6 +447,7 @@ namespace SemSearch
             var jobs = new List<Job>();
             var stack = new Stack<string>();
             foreach (var root in S.Folders) if (Directory.Exists(root)) stack.Push(root);
+            var images = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             int scanned = 0;
             while (stack.Count > 0)
             {
@@ -470,10 +473,22 @@ namespace SemSearch
                     var f = (FileInfo)e;
                     string ext = f.Extension;
                     byte kind;
-                    if (ImageFile.Extensions.Contains(ext) && f.Length >= 10 * 1024 && f.Length < 200L << 20) kind = VectorIndex.KindImage;
+                    if (ImageFile.Extensions.Contains(ext) && f.Length > 0 && f.Length < 200L << 20) kind = VectorIndex.KindImage;
                     else if (S.IndexDocuments && TextExtract.IsSupported(f.FullName) && f.Length > 0 && f.Length < 20L << 20) kind = VectorIndex.KindDocument;
                     else continue;
-                    if (kind == VectorIndex.KindImage && !SupportsImages) continue;
+                    if (kind == VectorIndex.KindImage)
+                    {
+                        if (!SupportsImages) continue;
+                        images.Add(f.FullName);
+                        if (!PassesSizeFilter(f))
+                        {
+                            // Not indexed; if it already is (an earlier, looser filter), its vector stays and search hides
+                            // it — lowering the threshold again brings it back without re-indexing.
+                            seen.Add(f.FullName);
+                            IdxSkippedSmall++;
+                            continue;
+                        }
+                    }
                     seen.Add(f.FullName);
                     long mtime = f.LastWriteTimeUtc.Ticks;
                     if (!Index.IsCurrent(f.FullName, f.Length, mtime))
@@ -485,10 +500,44 @@ namespace SemSearch
                     }
                 }
             }
+            sizes.Keep(images);
+            sizes.Save();
             // Newest first: recent photos become searchable right away.
             jobs.Sort((x, y) => y.Mtime.CompareTo(x.Mtime));
             return jobs;
         }
+
+        /// <summary>Size filter: file weight first (free), then the pixel size from the header (cached).</summary>
+        private bool PassesSizeFilter(FileInfo f)
+        {
+            if (f.Length < (long)Math.Max(0, S.MinImageKB) * 1024) return false;
+            if (S.MinImageSide <= 0) return true;
+            var (w, h) = sizes.Get(f.FullName, f.Length, f.LastWriteTimeUtc.Ticks);
+            return w <= 0 || h <= 0 || Math.Min(w, h) >= S.MinImageSide; // unreadable header: the decoder decides
+        }
+
+        /// <summary>Search-time side of the size filter: cached header sizes only, nothing is read from disk.</summary>
+        private bool Visible(VectorIndex.Item it)
+        {
+            if (it.Kind != VectorIndex.KindImage) return true;
+            if (it.Size < (long)Math.Max(0, S.MinImageKB) * 1024) return false;
+            if (S.MinImageSide <= 0 || !sizes.TryGet(it.Path, it.Size, it.MtimeTicks, out int w, out int h) || w <= 0 || h <= 0) return true;
+            return Math.Min(w, h) >= S.MinImageSide;
+        }
+
+        /// <summary>How many indexed pictures the current size filter hides (headers of older entries are read once).</summary>
+        public Task<int> CountHiddenAsync() => Task.Run(() =>
+        {
+            int hidden = 0;
+            foreach (var it in Index.Items(VectorIndex.KindImage))
+            {
+                if (S.MinImageSide > 0 && !sizes.TryGet(it.Path, it.Size, it.MtimeTicks, out _, out _) && File.Exists(it.Path))
+                    sizes.Get(it.Path, it.Size, it.MtimeTicks);
+                if (!Visible(it)) hidden++;
+            }
+            sizes.Save();
+            return hidden;
+        });
 
         private async Task IndexLoop(CancellationToken ct)
         {

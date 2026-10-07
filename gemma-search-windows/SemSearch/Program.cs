@@ -183,6 +183,8 @@ namespace SemSearch
                 int ni = engine.Index.Count(VectorIndex.KindImage), nd = engine.Index.Count(VectorIndex.KindDocument);
                 Check(ni == images && nd == docs && engine.IdxErrors == broken,
                     $"indexed photos {ni}/{images}, docs {nd}/{docs}, errors {engine.IdxErrors}/{broken}: {engine.IdxStatus.Replace('\n', ' ')}");
+                Check(engine.IdxSkippedSmall == 3 && !engine.Index.Paths().Any(p => p.Contains("icon-") || p.Contains("logo-")),
+                    $"size filter (300 px, 20 KB): {engine.IdxSkippedSmall} small pictures skipped (two icons, one tiny jpeg)");
 
                 string rotated = Directory.EnumerateFiles(photos, "rotated.jpg", SearchOption.AllDirectories).FirstOrDefault();
                 if (rotated != null)
@@ -208,6 +210,19 @@ namespace SemSearch
                 engine.StartIndex();
                 Wait(() => !engine.Indexing, 600);
                 Check(engine.IdxTotal == broken, $"re-index: {engine.IdxTotal} files to do (only the broken ones retried)");
+
+                // Tighter filter: the 320x320 picture is hidden from search at once and kept through re-indexing;
+                // the old threshold brings it back without computing anything.
+                engine.S.MinImageSide = 400;
+                int hidden = engine.CountHiddenAsync().GetAwaiter().GetResult();
+                int shownTight = engine.SearchAsync("кот", true, false).GetAwaiter().GetResult().Hits.Count;
+                engine.StartIndex();
+                Wait(() => !engine.Indexing, 600);
+                int keptTight = engine.Index.Count(VectorIndex.KindImage), todoTight = engine.IdxTotal;
+                engine.S.MinImageSide = 300;
+                int shownAgain = engine.SearchAsync("кот", true, false).GetAwaiter().GetResult().Hits.Count;
+                Check(hidden == 1 && shownTight == images - 1 && keptTight == images && todoTight == broken && shownAgain == images,
+                    $"filter change: 400 px hides {hidden} (search shows {shownTight}), re-index keeps {keptTight}, 300 px shows {shownAgain} again");
 
                 File.Delete(anyPhoto);
                 engine.StartIndex();

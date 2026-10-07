@@ -17,6 +17,10 @@ namespace SemSearch
         public List<string> Folders { get; set; } = DefaultFolders();
         public bool IndexDocuments { get; set; } = true;
         public int PhotoBudget { get; set; } = 140;
+        /// <summary>Pictures whose smaller side is below this many pixels (icons, buttons, emoji) are not indexed.</summary>
+        public int MinImageSide { get; set; } = 300;
+        /// <summary>Pictures smaller than this many KB are not indexed.</summary>
+        public int MinImageKB { get; set; } = 20;
         public int Accel { get; set; } = 0;
         public int Threads { get; set; } = 0;
         public int Batch { get; set; } = 1;

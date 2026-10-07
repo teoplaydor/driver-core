@@ -189,7 +189,9 @@ namespace SemSearch.Core
         }
 
         /// <summary>Cosine search over the first <paramref name="dims"/> components (Matryoshka truncation).</summary>
-        public List<Hit> Search(float[] qImages, float[] qDocs, int dims, bool images, bool docs, int limit, string exclude = null)
+        /// <param name="keep">optional filter on items (e.g. the picture size filter); null keeps everything</param>
+        public List<Hit> Search(float[] qImages, float[] qDocs, int dims, bool images, bool docs, int limit, string exclude = null,
+                                Func<Item, bool> keep = null)
         {
             int di = Array.IndexOf(Dims, dims);
             int d = Math.Min(dims, Math.Min(qImages.Length, qDocs.Length));
@@ -202,6 +204,7 @@ namespace SemSearch.Core
                     if (it.Emb.Length < d || (exclude != null && string.Equals(it.Path, exclude, StringComparison.OrdinalIgnoreCase))) continue;
                     bool isDoc = it.Kind == KindDocument;
                     if ((isDoc && !docs) || (!isDoc && !images)) continue;
+                    if (keep != null && !keep(it)) continue;
                     float[] q = isDoc ? qDocs : qImages;
                     float qn = isDoc ? qdn : qin;
                     float bn = di >= 0 && Dims[di] == d ? it.Norms[di] : VectorMath.PrefixNorm(it.Emb, d);
@@ -212,6 +215,17 @@ namespace SemSearch.Core
             hits.Sort((a, b) => b.Score.CompareTo(a.Score));
             if (hits.Count > limit) hits.RemoveRange(limit, hits.Count - limit);
             return hits;
+        }
+
+        /// <summary>Snapshot of the items of one kind.</summary>
+        public List<Item> Items(byte kind)
+        {
+            lock (sync)
+            {
+                var list = new List<Item>();
+                foreach (var it in items.Values) if (it.Kind == kind) list.Add(it);
+                return list;
+            }
         }
 
         public Item Get(string path)

@@ -11,5 +11,6 @@
     <!-- CPU build with Linux/macOS/Windows natives so the parity tests run anywhere. -->
     <PackageReference Include="Microsoft.ML.OnnxRuntime" Version="1.27.0" />
     <None Include="range_server.py" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="make_sizes.py" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 </Project>

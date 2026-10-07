@@ -57,7 +57,9 @@ namespace SemSearch
         private readonly ComboBox detail = new ComboBox(), accelBox = new ComboBox(), bridgeBox = new ComboBox(), dimsBox = new ComboBox();
         private readonly Button indexButton = new Button();
         private readonly ProgressBar indexProgress = new ProgressBar();
-        private readonly Label indexStatus = new Label(), indexStats = new Label(), accelInfo = new Label();
+        private readonly Label indexStatus = new Label(), indexStats = new Label(), accelInfo = new Label(), filterInfo = new Label();
+        private readonly NumericUpDown minSide = new NumericUpDown(), minKb = new NumericUpDown();
+        private readonly Timer filterTimer = new Timer { Interval = 700 };
 
         // model
         private readonly Label modelStatus = new Label(), planText = new Label();
@@ -231,6 +233,28 @@ namespace SemSearch
                 Renderer = new ToolStripProfessionalRenderer(new MenuColors()) { RoundedEdges = false },
                 BackColor = Surface, ForeColor = TextPrimary, Font = FontBody, ShowImageMargin = false
             };
+        }
+
+        private static Label InlineLabel(string text)
+        {
+            return new Label { Text = text, Font = FontBody, ForeColor = TextPrimary, AutoSize = true, Margin = new Padding(0, 7, 6, 0) };
+        }
+
+        private static void StyleNumber(NumericUpDown n, int min, int max, int step, int value)
+        {
+            n.Minimum = min;
+            n.Maximum = max;
+            n.Increment = step;
+            n.Value = Math.Max(min, Math.Min(max, value));
+            n.Width = 84;
+            n.Font = FontBody;
+            n.TextAlign = HorizontalAlignment.Right;
+            n.BackColor = SurfaceActive;
+            n.ForeColor = TextPrimary;
+            n.BorderStyle = BorderStyle.FixedSingle;
+            n.Margin = new Padding(0, 4, 6, 4);
+            // Typing replaces the number instead of appending to it (300 + "400" must not become 300400).
+            n.Enter += (s, e) => n.BeginInvoke(new Action(() => n.Select(0, n.Text.Length)));
         }
 
         private static Button MakeButton(string text, bool accent)
@@ -626,6 +650,42 @@ namespace SemSearch
                 engine.S.Save();
             };
             c.Controls.Add(detail);
+
+            c.Controls.Add(MakeLabel("Фильтр по размеру: иконки, кнопки и смайлы обычно 16–256 пикселей — картинки меньше порога "
+                                     + "не индексируются и не показываются в поиске. Порог можно менять когда угодно: уже "
+                                     + "проиндексированное просто скрывается и возвращается без переиндексации.", FontSmall, TextMuted, w - 40));
+            var sizeRow = Row();
+            sizeRow.Controls.Add(InlineLabel("Пропускать картинки меньше"));
+            StyleNumber(minSide, 0, 5000, 50, engine.S.MinImageSide);
+            sizeRow.Controls.Add(minSide);
+            sizeRow.Controls.Add(InlineLabel("пикс по меньшей стороне или легче"));
+            StyleNumber(minKb, 0, 50000, 10, engine.S.MinImageKB);
+            sizeRow.Controls.Add(minKb);
+            sizeRow.Controls.Add(InlineLabel("КБ"));
+            c.Controls.Add(sizeRow);
+            filterInfo.AutoSize = true;
+            filterInfo.ForeColor = TextMuted;
+            filterInfo.Font = FontSmall;
+            c.Controls.Add(filterInfo);
+            EventHandler changed = (s, e) =>
+            {
+                filterTimer.Stop();
+                filterTimer.Start();
+            };
+            minSide.ValueChanged += changed;
+            minKb.ValueChanged += changed;
+            filterTimer.Tick += async (s, e) =>
+            {
+                filterTimer.Stop();
+                engine.S.MinImageSide = (int)minSide.Value;
+                engine.S.MinImageKB = (int)minKb.Value;
+                engine.S.Save();
+                filterInfo.Text = "Проверяю индекс…";
+                int hidden = await engine.CountHiddenAsync();
+                filterInfo.Text = hidden > 0 ? $"Скрыто фильтром из уже проиндексированных: {hidden}" : "";
+                Refresh2();
+            };
+
             var ir = Row();
             indexButton.Text = "Начать индексацию";
             Restyle(indexButton, true);
