@@ -165,18 +165,47 @@ final class Media {
         return r;
     }
 
+    /** ContentResolver.loadThumbnail (API 29+, via reflection: we compile against API 23). */
+    static Bitmap systemThumbnail(ContentResolver cr, Uri uri, int size) {
+        if (Build.VERSION.SDK_INT < 29) return null;
+        try {
+            Class<?> sizeCls = Class.forName("android.util.Size");
+            Object sz = sizeCls.getConstructor(int.class, int.class).newInstance(size, size);
+            Method m = ContentResolver.class.getMethod("loadThumbnail", Uri.class, sizeCls, android.os.CancellationSignal.class);
+            return (Bitmap) m.invoke(cr, uri, sz, null);
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    /**
+     * Fast path for indexing: the system thumbnail service decodes only what is needed (and often
+     * has it cached) and already applies EXIF rotation. Falls back to a full decode when the
+     * thumbnail would be too small for the requested token budget.
+     */
+    static Bitmap decodeForIndex(ContentResolver cr, Uri uri, int orientation, long targetPixels) throws Exception {
+        int side = (int) Math.ceil(Math.sqrt(targetPixels) * 1.3);
+        Bitmap t = systemThumbnail(cr, uri, side);
+        if (t != null) {
+            if ((long) t.getWidth() * t.getHeight() >= targetPixels / 2) {
+                if ("HARDWARE".equals(String.valueOf(t.getConfig()))) {
+                    Bitmap sw = t.copy(Bitmap.Config.ARGB_8888, false);
+                    t.recycle();
+                    t = sw;
+                }
+                if (t != null) return t;
+            } else {
+                t.recycle();
+            }
+        }
+        return decode(cr, uri, orientation, targetPixels);
+    }
+
     /** Square-ish thumbnail for result tiles. */
     static Bitmap thumbnail(ContentResolver cr, IndexStore.Item it, int size) {
         Uri uri = Uri.parse(it.uri);
-        if (Build.VERSION.SDK_INT >= 29) {
-            try {
-                Class<?> sizeCls = Class.forName("android.util.Size");
-                Object sz = sizeCls.getConstructor(int.class, int.class).newInstance(size, size);
-                Method m = ContentResolver.class.getMethod("loadThumbnail", Uri.class, sizeCls, android.os.CancellationSignal.class);
-                return (Bitmap) m.invoke(cr, uri, sz, null);
-            } catch (Exception ignored) {
-            }
-        }
+        Bitmap sys = systemThumbnail(cr, uri, size);
+        if (sys != null) return sys;
         try {
             BitmapFactory.Options o = new BitmapFactory.Options();
             o.inPreferredConfig = Bitmap.Config.RGB_565;

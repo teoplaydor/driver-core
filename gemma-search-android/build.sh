@@ -8,8 +8,8 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 ORT_VERSION=1.30.0
-VERSION_CODE=2
-VERSION_NAME=0.1.1
+VERSION_CODE=3
+VERSION_NAME=0.2.0
 ANDROID_JAR=${ANDROID_JAR:-/usr/lib/android-sdk/platforms/android-23/android.jar}
 AAPT2=${AAPT2:-$(ls /usr/lib/android-sdk/build-tools/*/aapt2 2>/dev/null | head -1)}
 DX=${DX:-dalvik-exchange}
@@ -57,7 +57,7 @@ PY
 "$AAPT2" link -o "$B/base.apk" -I "$ANDROID_JAR" --manifest AndroidManifest.xml \
   --min-sdk-version 26 --target-sdk-version 34 \
   --version-code $VERSION_CODE --version-name $VERSION_NAME \
-  --java "$B/gen" "$B/res.zip"
+  -A assets --java "$B/gen" "$B/res.zip"
 
 # --- Java -> dex (no lambdas / indy string concat so legacy dx can handle it).
 # java.* comes from the JDK's Java 8 API (minSdk 26 has it, e.g. java.util.Optional used by ORT);

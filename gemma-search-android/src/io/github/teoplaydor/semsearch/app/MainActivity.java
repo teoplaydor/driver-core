@@ -458,7 +458,9 @@ public final class MainActivity extends Activity implements Engine.Listener {
                 + "1. Скачайте модель на вкладке «Модель» (один раз).\n"
                 + "2. Проиндексируйте галерею на вкладке «Индекс».\n"
                 + "3. Пишите запрос словами или ищите по фото.\n\n"
-                + "Долгое нажатие на результат — найти похожие.", 15, cText2, false);
+                + "Долгое нажатие на результат — найти похожие.\n\n"
+                + "Число на плитке — косинусное сходство. Для пары «текст ↔ фото» обычные значения 0,1–0,4: "
+                + "важен порядок результатов, а не само число.", 15, cText2, false);
         hint.setPadding(dp(8), dp(24), dp(8), 0);
         emptyHint = hint;
         area.addView(hint);
@@ -1075,7 +1077,91 @@ public final class MainActivity extends Activity implements Engine.Listener {
             }
         });
         s.addView(dimSpinner);
+        gap(s, 10);
+        s.addView(text("Русские запросы к фото и видео. Модель лучше всего связывает картинки с английским текстом, "
+                + "поэтому запрос дополнительно переводится по встроенному словарю (заметки ищутся по исходному тексту).",
+                13, cText2, false));
+        Spinner bridgeSpinner = spinner(Engine.BRIDGE_MODES, engine.bridgeMode());
+        bridgeSpinner.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
+            @Override
+            public void onItemSelected(AdapterView<?> p, View v, int pos, long id) {
+                engine.prefs.edit().putInt("bridge_mode", pos).apply();
+            }
+
+            @Override
+            public void onNothingSelected(AdapterView<?> p) {
+            }
+        });
+        s.addView(bridgeSpinner);
+        gap(s, 10);
+        s.addView(text("Потоки процессора для модели. «Авто» берёт быстрые ядра; больше потоков не всегда быстрее — "
+                + "медленные ядра тормозят общий шаг.", 13, cText2, false));
+        final int[] threadOpts = {0, 2, 3, 4, 6, 8};
+        int curT = 0;
+        for (int i = 0; i < threadOpts.length; i++) if (threadOpts[i] == engine.prefs.getInt("threads", 0)) curT = i;
+        Spinner threadSpinner = spinner(new String[]{"Авто (" + Engine.autoThreads() + ")", "2", "3", "4", "6", "8"}, curT);
+        threadSpinner.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
+            @Override
+            public void onItemSelected(AdapterView<?> p, View v, int pos, long id) {
+                if (threadOpts[pos] == engine.prefs.getInt("threads", 0)) return; // initial selection
+                engine.prefs.edit().putInt("threads", threadOpts[pos]).apply();
+                if (engine.ready() && !engine.indexing) {
+                    engine.loadModel(); // sessions are created with a fixed thread count
+                    toast("Перезагружаю модель с " + engine.threadCount() + " потоками");
+                }
+            }
+
+            @Override
+            public void onNothingSelected(AdapterView<?> p) {
+            }
+        });
+        s.addView(threadSpinner);
+        gap(s, 10);
+        Button diag = button("Проверить качество поиска", false);
+        diag.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                runDiagnostics();
+            }
+        });
+        s.addView(diag, new LinearLayout.LayoutParams(-1, -2));
         return sv;
+    }
+
+    private void runDiagnostics() {
+        if (!engine.ready()) {
+            toast("Сначала скачайте модель");
+            return;
+        }
+        toast("Считаю… это займёт несколько секунд");
+        engine.diagnose(new Engine.Callback<String>() {
+            @Override
+            public void done(final String report, Exception e) {
+                if (e != null) {
+                    toast("Ошибка: " + e.getMessage());
+                    return;
+                }
+                TextView t = text(report, 13, cText, false);
+                t.setTextIsSelectable(true);
+                t.setPadding(dp(20), dp(12), dp(20), dp(12));
+                ScrollView sv = new ScrollView(MainActivity.this);
+                sv.addView(t);
+                new AlertDialog.Builder(MainActivity.this)
+                        .setTitle("Качество поиска")
+                        .setView(sv)
+                        .setPositiveButton("Скопировать", new DialogInterface.OnClickListener() {
+                            @Override
+                            public void onClick(DialogInterface d, int w) {
+                                android.content.ClipboardManager cm =
+                                        (android.content.ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
+                                cm.setPrimaryClip(android.content.ClipData.newPlainText("SemSearch diagnostics", report));
+                                toast("Скопировано — вставьте в чат");
+                            }
+                        })
+                        .setNegativeButton("Закрыть", null)
+                        .show();
+            }
+        });
     }
 
     // ------------------------------------------------------------------ state → UI

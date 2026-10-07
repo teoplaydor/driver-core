@@ -41,6 +41,12 @@ java -Xmx3g -cp "$T/cls:$T/ort-desktop.jar" PipelineParityTest "$T/models/dummy"
 # Same check with the ONNX Runtime classes rebuilt for the APK.
 java -Xmx3g -cp "$T/cls:build/deps/ort-classes:$T/ort-desktop.jar" PipelineParityTest "$T/models/dummy" "$T/reference.json"
 
+echo "== 2b. Russian stemmer vs Snowball, query bridge"
+python3 -m pip install -q snowballstemmer
+python3 tools/stemmer_reference.py "$T/gemma3/tokenizer.json" "$T/stem-cases.tsv"
+java -Dfile.encoding=UTF-8 -cp "$T/cls" StemmerParityTest "$T/stem-cases.tsv"
+java -Dfile.encoding=UTF-8 -cp "$T/cls" QueryBridgeTest assets/ru_en_lexicon.txt
+
 echo "== 3. Hub download"
 python3 tools/mock_hub.py 18765 & HUB=$!
 trap 'kill $HUB 2>/dev/null || true' EXIT
@@ -68,7 +74,10 @@ POM
 mkdir -p "$R/deps" "$R/cls"
 cp "$R"/libs/android-all-*.jar "$R/deps/"
 CP=$(ls "$R"/libs/*.jar | tr '\n' ':')
-javac --release 8 -nowarn -encoding UTF-8 -cp "${CP}build/classes:build/deps/ort-classes" -d "$R/cls" test/robolectric/AppSmokeTest.java
-"$J8" -Dfile.encoding=UTF-8 -Drobolectric.offline=true -Drobolectric.dependency.dir="$R/deps" \
-  -cp "$R/cls:${CP}build/classes:build/deps/ort-classes" org.junit.runner.JUnitCore AppSmokeTest
+javac --release 8 -nowarn -encoding UTF-8 -cp "${CP}build/classes:build/deps/ort-classes" -d "$R/cls" test/robolectric/*.java
+# One JVM per class: Engine is an app-wide singleton.
+for t in AppSmokeTest AppIndexingTest; do
+  "$J8" -Dfile.encoding=UTF-8 -Drobolectric.offline=true -Drobolectric.dependency.dir="$R/deps" \
+    -cp "$R/cls:${CP}build/classes:build/deps/ort-classes" org.junit.runner.JUnitCore $t
+done
 echo "ALL TESTS PASSED"

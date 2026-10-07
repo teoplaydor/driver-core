@@ -28,7 +28,7 @@ import ai.onnxruntime.platform.Fp16Conversions;
  * {@code attention_mask} and the per-modality feature matrices, returning the mean-pooled,
  * L2-normalised {@code sentence_embedding}.
  */
-public final class EmbeddingGemma2 implements Closeable {
+public final class EmbeddingGemma2 implements Embedder {
     /** Retrieval prompts from the model card (text inputs only; media is passed as is). */
     public static final String QUERY_PREFIX = "task: search result | query: ";
     public static final String DOCUMENT_PREFIX = "title: none | text: ";
@@ -39,6 +39,7 @@ public final class EmbeddingGemma2 implements Closeable {
     private final HfTokenizer tokenizer;
     private final ModelConfig cfg;
     private int embeddingDim = -1;
+    private volatile long lastVisionMs, lastTextMs;
 
     public EmbeddingGemma2(File dir, File textModel, File visionModel, int threads) throws IOException, OrtException {
         try {
@@ -86,8 +87,8 @@ public final class EmbeddingGemma2 implements Closeable {
         OrtSession.SessionOptions o = new OrtSession.SessionOptions();
         o.setOptimizationLevel(OrtSession.SessionOptions.OptLevel.ALL_OPT);
         if (threads > 0) o.setIntraOpNumThreads(threads);
-        // Don't busy-wait between ops: saves battery on phones.
-        o.addConfigEntry("session.intra_op.allow_spinning", "0");
+        // Thread spinning stays at ORT's default (on): indexing runs back-to-back inferences, and parking
+        // worker threads between ops made each photo noticeably slower.
         return o;
     }
 
@@ -104,6 +105,11 @@ public final class EmbeddingGemma2 implements Closeable {
     }
 
     public int embeddingDim() { return embeddingDim; }
+
+    public int defaultImageTokens() { return cfg.image.maxSoftTokens; }
+
+    /** {vision encoder ms, text model ms} of the last image/video embedding. */
+    public long[] lastTimingsMs() { return new long[]{lastVisionMs, lastTextMs}; }
 
     // ------------------------------------------------------------------ text
 
@@ -129,18 +135,24 @@ public final class EmbeddingGemma2 implements Closeable {
         if (!supportsImages()) throw new IllegalStateException("vision encoder is not loaded");
         ModelConfig.ImageParams p = budget(cfg.image, maxSoftTokens);
         ImagePreprocessor.Patches patches = ImagePreprocessor.process(image, p);
+        long t0 = System.nanoTime();
         float[] feats = encodeVision(patches);
+        lastVisionMs = (System.nanoTime() - t0) / 1000000;
         StringBuilder sb = new StringBuilder(cfg.boiToken == null ? "" : cfg.boiToken);
         for (int i = 0; i < patches.numSoftTokens; i++) sb.append(cfg.imageToken);
         if (cfg.eoiToken != null) sb.append(cfg.eoiToken);
         int[] ids = tokenizer.encode(sb.toString());
-        return runTextModel(ids, feats, patches.numSoftTokens, new float[0], 0);
+        long t1 = System.nanoTime();
+        float[] emb = runTextModel(ids, feats, patches.numSoftTokens, new float[0], 0);
+        lastTextMs = (System.nanoTime() - t1) / 1000000;
+        return emb;
     }
 
     /** A video is a sequence of frames, each an image-like block of video soft tokens. */
     public float[] embedVideo(List<ImagePreprocessor.Source> frames, int maxSoftTokens) throws OrtException {
         if (!supportsVideo()) throw new IllegalStateException("video is not supported by this model");
         ModelConfig.ImageParams p = budget(cfg.video, maxSoftTokens);
+        long t0 = System.nanoTime();
         List<float[]> all = new ArrayList<float[]>();
         StringBuilder sb = new StringBuilder();
         int total = 0;
@@ -159,7 +171,11 @@ public final class EmbeddingGemma2 implements Closeable {
             off += a.length;
         }
         int[] ids = tokenizer.encode(sb.toString());
-        return runTextModel(ids, new float[0], 0, feats, total);
+        lastVisionMs = (System.nanoTime() - t0) / 1000000;
+        long t1 = System.nanoTime();
+        float[] emb = runTextModel(ids, new float[0], 0, feats, total);
+        lastTextMs = (System.nanoTime() - t1) / 1000000;
+        return emb;
     }
 
     private static ModelConfig.ImageParams budget(ModelConfig.ImageParams base, int maxSoftTokens) {

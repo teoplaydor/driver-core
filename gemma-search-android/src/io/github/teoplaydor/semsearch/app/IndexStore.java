@@ -163,10 +163,16 @@ public final class IndexStore {
     /** Cosine search over the first {@code dims} components (Matryoshka truncation). */
     public synchronized List<Hit> search(float[] q, int dims, boolean photos, boolean videos, boolean notes,
                                          int limit, long excludeId) {
+        return search(q, q, dims, photos, videos, notes, limit, excludeId);
+    }
+
+    /** Like {@link #search} but with separate query vectors for media (photos/videos) and notes. */
+    public synchronized List<Hit> search(float[] qMedia, float[] qNotes, int dims, boolean photos, boolean videos,
+                                         boolean notes, int limit, long excludeId) {
         int di = 0;
         for (int i = 0; i < DIMS.length; i++) if (DIMS[i] == dims) di = i;
-        int d = Math.min(dims, q.length);
-        float qn = VectorMath.prefixNorm(q, 0, d);
+        int d = Math.min(dims, Math.min(qMedia.length, qNotes.length));
+        float qmn = VectorMath.prefixNorm(qMedia, 0, d), qnn = VectorMath.prefixNorm(qNotes, 0, d);
         List<Hit> hits = new ArrayList<Hit>();
         for (Item it : items) {
             if (it.id == excludeId || it.emb.length < d) continue;
@@ -174,7 +180,8 @@ public final class IndexStore {
                 continue;
             }
             float bn = DIMS[di] == d ? it.norms[di] : VectorMath.prefixNorm(it.emb, 0, d);
-            hits.add(new Hit(it, VectorMath.cosinePrefix(q, qn, it.emb, 0, bn, d)));
+            boolean note = it.kind == KIND_NOTE;
+            hits.add(new Hit(it, VectorMath.cosinePrefix(note ? qNotes : qMedia, note ? qnn : qmn, it.emb, 0, bn, d)));
         }
         Collections.sort(hits, new Comparator<Hit>() {
             @Override

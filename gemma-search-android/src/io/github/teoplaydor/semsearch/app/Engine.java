@@ -12,11 +12,17 @@ import java.io.File;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.Callable;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 
+import io.github.teoplaydor.semsearch.core.Embedder;
 import io.github.teoplaydor.semsearch.core.EmbeddingGemma2;
 import io.github.teoplaydor.semsearch.core.HfRepo;
+import io.github.teoplaydor.semsearch.core.QueryBridge;
+import io.github.teoplaydor.semsearch.core.VectorMath;
 
 /**
  * App-wide state: model download/loading, the vector index and the indexing loop.
@@ -44,13 +50,25 @@ public final class Engine {
     private final Handler main = new Handler(Looper.getMainLooper());
     private final ExecutorService ml = Executors.newSingleThreadExecutor();
     private final ExecutorService net = Executors.newSingleThreadExecutor();
+    /** Decodes the next photo while the current one is being embedded. */
+    private final ExecutorService decoder = Executors.newSingleThreadExecutor();
+    private Future<Bitmap> prefetch;
+    private Media.Entry prefetchEntry;
+    private long sumWaitMs, sumVisionMs, sumTextMs;
+    private int timedPhotos;
+    public volatile int threads;
     private final CopyOnWriteArrayList<Listener> listeners = new CopyOnWriteArrayList<Listener>();
     final SharedPreferences prefs;
     final File modelDir;
     private final File manifest;
 
     private IndexStore store;
-    private EmbeddingGemma2 model;
+    private Embedder model;
+    private QueryBridge bridge;
+
+    /** How Russian queries reach photos/videos (pref "bridge_mode"). */
+    public static final String[] BRIDGE_MODES = {
+            "Русский + английский перевод (рекомендуется)", "Только английский перевод", "Без перевода"};
 
     public volatile State state = State.NO_MODEL;
     public volatile String status = "";
@@ -61,6 +79,7 @@ public final class Engine {
 
     public volatile boolean indexing;
     public volatile int idxDone, idxTotal, idxErrors;
+    private volatile String idxFirstError;
     public volatile String idxStatus = "";
     private volatile boolean cancelIndex;
     private final List<Media.Entry> queue = new ArrayList<Media.Entry>();
@@ -81,10 +100,28 @@ public final class Engine {
             @Override
             public void run() {
                 store = new IndexStore(Engine.this.ctx);
+                try {
+                    bridge = QueryBridge.load(Engine.this.ctx.getAssets().open("ru_en_lexicon.txt"));
+                } catch (Exception e) {
+                    android.util.Log.e("SemSearch", "bridge lexicon", e);
+                }
                 notifyChanged();
             }
         });
         if (manifest.exists()) loadModel();
+    }
+
+    /** Test hook: use a stand-in model (Robolectric can't run ONNX Runtime's native code). */
+    public void attachModelForTest(final Embedder m) {
+        ml.submit(new Runnable() {
+            @Override
+            public void run() {
+                model = m;
+                state = State.READY;
+                status = "test model";
+                notifyChanged();
+            }
+        });
     }
 
     public void addListener(Listener l) { listeners.add(l); }
@@ -110,6 +147,8 @@ public final class Engine {
     }
 
     public IndexStore store() { return store; }
+
+    public SharedPreferences prefs() { return prefs; }
 
     public boolean ready() { return state == State.READY && model != null; }
 
@@ -190,6 +229,10 @@ public final class Engine {
             public void run() {
                 String step = "чтение списка файлов";
                 errorDetails = null;
+                if (model != null) { // reload (e.g. new thread count): free the old sessions first
+                    model.close();
+                    model = null;
+                }
                 try {
                     HfRepo.Plan plan = HfRepo.loadManifest(manifest);
                     if (plan == null || !HfRepo.isComplete(plan, modelDir)) {
@@ -199,7 +242,7 @@ public final class Engine {
                         return;
                     }
                     long t0 = System.currentTimeMillis();
-                    int threads = Math.max(1, Math.min(4, Runtime.getRuntime().availableProcessors() / 2));
+                    threads = threadCount();
                     File vision = plan.visionModel == null ? null : new File(modelDir, plan.visionModel);
                     step = "инициализация";
                     model = new EmbeddingGemma2(modelDir, new File(modelDir, plan.textModel), vision, threads);
@@ -236,7 +279,7 @@ public final class Engine {
     }
 
     private void unloadModel() {
-        final EmbeddingGemma2 m = model;
+        final Embedder m = model;
         model = null;
         if (m != null) {
             ml.submit(new Runnable() {
@@ -285,17 +328,121 @@ public final class Engine {
                 try {
                     requireModel();
                     long t0 = System.currentTimeMillis();
-                    float[] q = model.embedQuery(query);
+                    QueryVectors qv = queryVectors(query, photos || videos, bridgeMode());
                     SearchResult r = new SearchResult();
-                    r.hits = store.search(q, searchDims(), photos, videos, notes, 90, -1);
+                    r.hits = store.search(qv.media, qv.notes, searchDims(), photos, videos, notes, 90, -1);
                     r.millis = System.currentTimeMillis() - t0;
-                    r.label = "«" + query + "»";
+                    r.label = "«" + query + "»" + (qv.english != null ? " → для фото «" + qv.english + "»" : "");
                     post(cb, r, null);
                 } catch (Exception e) {
                     post(cb, null, e);
                 }
             }
         });
+    }
+
+    public int bridgeMode() {
+        return Math.max(0, Math.min(BRIDGE_MODES.length - 1, prefs.getInt("bridge_mode", 0)));
+    }
+
+    static final class QueryVectors {
+        float[] media, notes;
+        String english;
+    }
+
+    /**
+     * Notes are matched with the original query. For photos/videos a Russian query is also
+     * rendered in English (QueryBridge) because the model's text↔image alignment is strongest
+     * for English; mode 0 searches with the sum of both vectors, mode 1 with English only.
+     */
+    QueryVectors queryVectors(String query, boolean forMedia, int mode) throws Exception {
+        QueryVectors v = new QueryVectors();
+        v.notes = model.embedQuery(query);
+        v.media = v.notes;
+        if (!forMedia || mode == 2 || bridge == null || !QueryBridge.hasCyrillic(query)) return v;
+        QueryBridge.Result br = bridge.translate(query);
+        if (br == null) return v;
+        float[] en = model.embedQuery(br.english);
+        v.english = br.english;
+        if (mode == 1) {
+            v.media = en;
+        } else {
+            float[] sum = new float[en.length];
+            for (int i = 0; i < sum.length; i++) sum[i] = v.notes[i] + en[i];
+            VectorMath.normalize(sum);
+            v.media = sum;
+        }
+        return v;
+    }
+
+    /** Text-only quality probe: RU↔EN similarity and, with an indexed gallery, top-10 agreement. */
+    public void diagnose(final Callback<String> cb) {
+        ml.submit(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    requireModel();
+                    String[][] pairs = {
+                            {"кот на диване", "a cat on a sofa"}, {"собака на улице", "a dog on the street"},
+                            {"закат над морем", "sunset over the sea"}, {"еда на тарелке", "food on a plate"},
+                            {"скриншот с текстом", "a screenshot with text"}, {"машина на дороге", "a car on the road"},
+                            {"цветы", "flowers"}, {"люди", "people"}};
+                    StringBuilder sb = new StringBuilder();
+                    sb.append("SemSearch ").append(BuildInfo.version(ctx)).append(" · ").append(status).append('\n');
+                    int photosN = store.count(IndexStore.KIND_PHOTO) + store.count(IndexStore.KIND_VIDEO);
+                    sb.append("В индексе фото/видео: ").append(photosN).append(", детализация фото: ")
+                            .append(photoBudget()).append(" токенов, длина вектора поиска: ").append(searchDims())
+                            .append("\n\nRU↔EN — косинус запросов; топ-10 — сколько фото совпало с выдачей по EN\n");
+                    long tq = 0;
+                    int nq = 0;
+                    for (String[] p : pairs) {
+                        long t0 = System.currentTimeMillis();
+                        float[] en = model.embedQuery(p[1]);
+                        tq += System.currentTimeMillis() - t0;
+                        nq++;
+                        QueryVectors ru = queryVectors(p[0], true, 2), mix = queryVectors(p[0], true, 0),
+                                br = queryVectors(p[0], true, 1);
+                        sb.append(String.format(java.util.Locale.ROOT, "• %s ↔ %s: %.2f", p[0], p[1], dot(ru.notes, en)));
+                        if (mix.english != null) {
+                            sb.append(String.format(java.util.Locale.ROOT, " | мост «%s»: %.2f", mix.english, dot(br.media, en)));
+                        }
+                        if (photosN >= 10) {
+                            List<IndexStore.Hit> hEn = store.search(en, en, searchDims(), true, true, false, 10, -1);
+                            List<IndexStore.Hit> hRu = store.search(ru.media, ru.media, searchDims(), true, true, false, 10, -1);
+                            List<IndexStore.Hit> hMix = store.search(mix.media, mix.media, searchDims(), true, true, false, 10, -1);
+                            List<IndexStore.Hit> hBr = store.search(br.media, br.media, searchDims(), true, true, false, 10, -1);
+                            sb.append(String.format(java.util.Locale.ROOT,
+                                    "\n   топ-10 = EN: RU %d/10, RU+мост %d/10, мост %d/10; лучший балл EN %.2f RU %.2f RU+мост %.2f",
+                                    overlap(hEn, hRu), overlap(hEn, hMix), overlap(hEn, hBr),
+                                    top(hEn), top(hRu), top(hMix)));
+                        }
+                        sb.append('\n');
+                    }
+                    sb.append("\nВремя на текстовый запрос: ").append(tq / Math.max(1, nq)).append(" мс");
+                    post(cb, sb.toString(), null);
+                } catch (Exception e) {
+                    post(cb, null, e);
+                }
+            }
+        });
+    }
+
+    private static float dot(float[] a, float[] b) {
+        double s = 0;
+        for (int i = 0; i < Math.min(a.length, b.length); i++) s += a[i] * b[i];
+        return (float) s;
+    }
+
+    private static int overlap(List<IndexStore.Hit> a, List<IndexStore.Hit> b) {
+        java.util.HashSet<Long> ids = new java.util.HashSet<Long>();
+        for (IndexStore.Hit h : a) ids.add(h.item.id);
+        int n = 0;
+        for (IndexStore.Hit h : b) if (ids.contains(h.item.id)) n++;
+        return n;
+    }
+
+    private static float top(List<IndexStore.Hit> h) {
+        return h.isEmpty() ? 0f : h.get(0).score;
     }
 
     public void searchByImage(final Uri uri, final boolean photos, final boolean videos, final boolean notes,
@@ -401,10 +548,50 @@ public final class Engine {
         try {
             return model.embedImage(new Media.BitmapSource(b), budget);
         } catch (Exception e) {
-            if (budget == model.config().image.maxSoftTokens) throw e;
+            if (budget == model.defaultImageTokens()) throw e;
             prefs.edit().putInt("photo_detail", PHOTO_BUDGETS.length - 1).apply();
             return model.embedImage(new Media.BitmapSource(b), 0);
         }
+    }
+
+    /** Number of "big" CPU cores (max frequency ≥ 80% of the fastest one), clamped to 2..6. */
+    public static int autoThreads() {
+        int n = Runtime.getRuntime().availableProcessors();
+        long[] f = new long[n];
+        long max = 0;
+        for (int i = 0; i < n; i++) {
+            try {
+                java.io.BufferedReader r = new java.io.BufferedReader(new java.io.FileReader(
+                        "/sys/devices/system/cpu/cpu" + i + "/cpufreq/cpuinfo_max_freq"));
+                try {
+                    f[i] = Long.parseLong(r.readLine().trim());
+                } finally {
+                    r.close();
+                }
+            } catch (Exception ignored) {
+            }
+            max = Math.max(max, f[i]);
+        }
+        int big = 0;
+        for (long x : f) if (max > 0 && x >= max * 0.8) big++;
+        if (max <= 0) big = n / 2;
+        return Math.max(2, Math.min(6, big));
+    }
+
+    /** User-chosen thread count, or {@link #autoThreads()} for 0. */
+    public int threadCount() {
+        int t = prefs.getInt("threads", 0);
+        return t > 0 ? t : autoThreads();
+    }
+
+    private Future<Bitmap> decodeAsync(final Media.Entry e) {
+        final long target = (long) photoBudget() * 9 * 256;
+        return decoder.submit(new Callable<Bitmap>() {
+            @Override
+            public Bitmap call() throws Exception {
+                return Media.decodeForIndex(ctx.getContentResolver(), e.uri, e.orientation, target);
+            }
+        });
     }
 
     public void startIndex(final int photoLimit, final int videoLimit) {
@@ -413,6 +600,9 @@ public final class Engine {
         cancelIndex = false;
         idxDone = 0;
         idxErrors = 0;
+        idxFirstError = null;
+        sumWaitMs = sumVisionMs = sumTextMs = 0;
+        timedPhotos = 0;
         idxTotal = 0;
         idxStatus = "Ищу фото и видео…";
         notifyChanged();
@@ -458,8 +648,13 @@ public final class Engine {
             Media.Entry e;
             synchronized (queue) {
                 if (cancelIndex || queue.isEmpty() || model == null) {
-                    finishIndex(cancelIndex ? "Остановлено: " + idxDone + " из " + idxTotal
-                            : "Готово: " + idxDone + " файлов" + (idxErrors > 0 ? ", пропущено " + idxErrors : ""));
+                    if (prefetch != null) prefetch.cancel(false);
+                    prefetch = null;
+                    prefetchEntry = null;
+                    String err = timingSplit() + (idxFirstError != null ? "\nПервая ошибка: " + idxFirstError : "");
+                    finishIndex((cancelIndex ? "Остановлено: " + idxDone + " из " + idxTotal
+                            : "Готово: " + (idxDone - idxErrors) + " файлов" + (idxErrors > 0 ? ", пропущено " + idxErrors : ""))
+                            + err);
                     return;
                 }
                 e = queue.remove(0);
@@ -467,13 +662,34 @@ public final class Engine {
             try {
                 float[] emb;
                 if (e.kind == IndexStore.KIND_PHOTO) {
-                    Bitmap b = Media.decode(ctx.getContentResolver(), e.uri, e.orientation,
-                            (long) photoBudget() * 9 * 256);
+                    long w0 = System.currentTimeMillis();
+                    Future<Bitmap> mine = prefetchEntry == e && prefetch != null ? prefetch : decodeAsync(e);
+                    prefetch = null;
+                    prefetchEntry = null;
+                    synchronized (queue) {
+                        if (!queue.isEmpty() && queue.get(0).kind == IndexStore.KIND_PHOTO) {
+                            prefetchEntry = queue.get(0);
+                        }
+                    }
+                    Bitmap b;
+                    try {
+                        b = mine.get();
+                    } catch (ExecutionException ex) {
+                        if (prefetchEntry != null) prefetch = decodeAsync(prefetchEntry);
+                        throw ex.getCause();
+                    }
+                    long waited = System.currentTimeMillis() - w0;
+                    if (prefetchEntry != null) prefetch = decodeAsync(prefetchEntry);
                     try {
                         emb = embedPhoto(b);
                     } finally {
                         b.recycle();
                     }
+                    long[] tm = model.lastTimingsMs();
+                    sumWaitMs += waited;
+                    sumVisionMs += tm[0];
+                    sumTextMs += tm[1];
+                    timedPhotos++;
                 } else {
                     List<Bitmap> frames = Media.videoFrames(ctx, e.uri, VIDEO_FRAMES, 640);
                     try {
@@ -490,17 +706,30 @@ public final class Engine {
             } catch (Throwable t) {
                 idxErrors++;
                 idxDone++;
+                if (idxFirstError == null) {
+                    idxFirstError = (e.name != null ? e.name + ": " : "") + (t.getMessage() != null ? t.getMessage() : t.toString());
+                    android.util.Log.e("SemSearch", "index " + e.uri, t);
+                }
             }
             idxProcessed++;
             long spent = System.currentTimeMillis() - idxStarted;
             double per = spent / 1000.0 / Math.max(1, idxProcessed);
             int left = idxTotal - idxDone;
+            String split = timingSplit();
             idxStatus = String.format(java.util.Locale.ROOT, "%d из %d · %.1f с на файл · осталось ~%s",
-                    idxDone, idxTotal, per, eta((long) (per * left)));
+                    idxDone, idxTotal, per, eta((long) (per * left))) + split;
             notifyChanged();
             ml.submit(this);
         }
     };
+
+    /** Where the time per photo goes: waiting for decode, vision encoder, text model. */
+    private String timingSplit() {
+        if (timedPhotos == 0) return "";
+        return String.format(java.util.Locale.ROOT, "\nна фото: чтение %.2f с · картинка %.2f с · текст %.2f с · потоков %d",
+                sumWaitMs / 1000.0 / timedPhotos, sumVisionMs / 1000.0 / timedPhotos,
+                sumTextMs / 1000.0 / timedPhotos, threads);
+    }
 
     private static String eta(long sec) {
         if (sec < 60) return sec + " с";
