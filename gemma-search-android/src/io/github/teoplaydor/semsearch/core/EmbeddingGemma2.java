@@ -41,12 +41,45 @@ public final class EmbeddingGemma2 implements Closeable {
     private int embeddingDim = -1;
 
     public EmbeddingGemma2(File dir, File textModel, File visionModel, int threads) throws IOException, OrtException {
-        cfg = ModelConfig.load(dir);
-        tokenizer = HfTokenizer.load(new File(dir, "tokenizer.json"), new File(dir, "tokenizer.bin"));
+        try {
+            cfg = ModelConfig.load(dir);
+        } catch (Exception e) {
+            throw new IOException("конфиги модели: " + e, e);
+        }
+        try {
+            tokenizer = HfTokenizer.load(new File(dir, "tokenizer.json"), new File(dir, "tokenizer.bin"));
+        } catch (Exception e) {
+            throw new IOException("токенизатор: " + e, e);
+        }
+        resolveSpecialTokens();
         env = OrtEnvironment.getEnvironment();
-        textSession = env.createSession(textModel.getPath(), options(threads));
-        visionSession = visionModel != null && visionModel.exists()
-                ? env.createSession(visionModel.getPath(), options(threads)) : null;
+        try {
+            textSession = env.createSession(textModel.getPath(), options(threads));
+        } catch (OrtException e) {
+            throw new IOException("текстовая модель " + textModel.getName() + ": " + e.getMessage(), e);
+        }
+        try {
+            visionSession = visionModel != null && visionModel.exists()
+                    ? env.createSession(visionModel.getPath(), options(threads)) : null;
+        } catch (OrtException e) {
+            textSession.close();
+            throw new IOException("визуальный энкодер " + visionModel.getName() + ": " + e.getMessage(), e);
+        }
+    }
+
+    /** Fills token strings / ids that only one of config.json and tokenizer_config.json provides. */
+    private void resolveSpecialTokens() {
+        if (cfg.imageToken == null && cfg.imageTokenId >= 0) cfg.imageToken = tokenizer.token(cfg.imageTokenId);
+        if (cfg.videoToken == null && cfg.videoTokenId >= 0) cfg.videoToken = tokenizer.token(cfg.videoTokenId);
+        if (cfg.boiToken == null && cfg.boiTokenId >= 0) cfg.boiToken = tokenizer.token(cfg.boiTokenId);
+        if (cfg.eoiToken == null && cfg.eoiTokenId >= 0) cfg.eoiToken = tokenizer.token(cfg.eoiTokenId);
+        if (cfg.imageTokenId < 0 && cfg.imageToken != null && tokenizer.tokenId(cfg.imageToken) != null) {
+            cfg.imageTokenId = tokenizer.tokenId(cfg.imageToken);
+        }
+        if (cfg.videoTokenId < 0 && cfg.videoToken != null && tokenizer.tokenId(cfg.videoToken) != null) {
+            cfg.videoTokenId = tokenizer.tokenId(cfg.videoToken);
+        }
+        cfg.hasVideo = cfg.hasVideo || (cfg.videoToken != null && cfg.videoTokenId >= 0 && cfg.hasVideoProcessor);
     }
 
     private static OrtSession.SessionOptions options(int threads) throws OrtException {

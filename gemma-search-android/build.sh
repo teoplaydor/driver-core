@@ -8,8 +8,8 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 ORT_VERSION=1.30.0
-VERSION_CODE=1
-VERSION_NAME=0.1.0
+VERSION_CODE=2
+VERSION_NAME=0.1.1
 ANDROID_JAR=${ANDROID_JAR:-/usr/lib/android-sdk/platforms/android-23/android.jar}
 AAPT2=${AAPT2:-$(ls /usr/lib/android-sdk/build-tools/*/aapt2 2>/dev/null | head -1)}
 DX=${DX:-dalvik-exchange}

@@ -41,11 +41,14 @@ V = nid
 json.dump(tok, open(os.path.join(out, "tokenizer.json"), "w"), ensure_ascii=False)
 json.dump({"tokenizer_class": "GemmaTokenizer", "image_token": "<|image|>", "boi_token": "<|image>",
            "eoi_token": "<image|>", "audio_token": "<|audio|>", "boa_token": "<|audio>", "eoa_token": "<audio|>",
-           "video_token": "<|video|>", "padding_side": "right", "pad_token": "<pad>"},
+           "video_token": "<|video|>", "padding_side": "right", "pad_token": "<pad>",
+           # Real HF configs carry this out-of-long-range integer (regression: NumberFormatException).
+           "model_max_length": 1000000000000000019884624838656},
           open(os.path.join(out, "tokenizer_config.json"), "w"))
 json.dump({"model_type": "embedding_gemma2", "architectures": ["EmbeddingGemma2Model"],
            "image_token_id": ids["<|image|>"], "video_token_id": ids["<|video|>"], "audio_token_id": ids["<|audio|>"],
-           "text_config": {"model_type": "gemma4_text", "hidden_size": H, "vocab_size": V},
+           "text_config": {"model_type": "gemma4_text", "hidden_size": H, "vocab_size": V, "rms_norm_eps": 1e-06,
+                           "rope_theta": 1000000.0, "final_logit_softcapping": None},
            "vision_config": {"model_type": "gemma4_vision", "hidden_size": H}, "audio_config": None},
           open(os.path.join(out, "config.json"), "w"))
 json.dump({"processor_class": "EmbeddingGemma2Processor",

@@ -90,7 +90,7 @@ public final class MainActivity extends Activity implements Engine.Listener {
     private ProgressBar dlProgress;
     private EditText repoField, tokenField;
     private CheckBox visionBox;
-    private Button dlButton, cancelButton, deleteButton;
+    private Button dlButton, cancelButton, deleteButton, copyErrorButton;
 
     private Intent pendingShare;
     private final ExecutorService thumbPool = Executors.newFixedThreadPool(2);
@@ -958,6 +958,17 @@ public final class MainActivity extends Activity implements Engine.Listener {
         dlProgress = new ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal);
         dlProgress.setMax(1000);
         st.addView(dlProgress, new LinearLayout.LayoutParams(-1, -2));
+        copyErrorButton = button("Скопировать подробности ошибки", false);
+        copyErrorButton.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                android.content.ClipboardManager cm =
+                        (android.content.ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
+                cm.setPrimaryClip(android.content.ClipData.newPlainText("SemSearch error", engine.errorDetails));
+                toast("Скопировано — вставьте в чат");
+            }
+        });
+        st.addView(copyErrorButton, new LinearLayout.LayoutParams(-1, -2));
 
         LinearLayout src = card(page, "Загрузка");
         src.addView(text("Репозиторий Hugging Face", 13, cText2, false));
@@ -1005,7 +1016,11 @@ public final class MainActivity extends Activity implements Engine.Listener {
         dlButton.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {
-                engine.download(repoField.getText().toString(), tokenField.getText().toString(), visionBox.isChecked());
+                if (engine.state == Engine.State.ERROR && engine.hasModelFiles()) {
+                    engine.loadModel(); // files are already on the phone: just retry loading
+                } else {
+                    engine.download(repoField.getText().toString(), tokenField.getText().toString(), visionBox.isChecked());
+                }
             }
         });
         LinearLayout.LayoutParams lp = weight(1);
@@ -1090,7 +1105,9 @@ public final class MainActivity extends Activity implements Engine.Listener {
         if (engine.dlTotal > 0) dlProgress.setProgress((int) (1000 * engine.dlDone / engine.dlTotal));
         boolean busy = st == Engine.State.DOWNLOADING || st == Engine.State.LOADING;
         dlButton.setEnabled(!busy);
-        dlButton.setText(st == Engine.State.READY ? "Скачать заново" : "Скачать");
+        dlButton.setText(st == Engine.State.READY ? "Скачать заново"
+                : st == Engine.State.ERROR && engine.hasModelFiles() ? "Повторить загрузку" : "Скачать");
+        copyErrorButton.setVisibility(st == Engine.State.ERROR && engine.errorDetails != null ? View.VISIBLE : View.GONE);
         cancelButton.setVisibility(st == Engine.State.DOWNLOADING ? View.VISIBLE : View.GONE);
         deleteButton.setEnabled(!busy);
 

@@ -197,8 +197,14 @@ public final class MiniJson {
             case NULL: nextNull(); return null;
             case NUMBER: {
                 String s = nextLiteral();
-                if (s.indexOf('.') >= 0 || s.indexOf('e') >= 0 || s.indexOf('E') >= 0) return Double.parseDouble(s);
-                return Long.parseLong(s);
+                if (s.indexOf('.') < 0 && s.indexOf('e') < 0 && s.indexOf('E') < 0) {
+                    try {
+                        return Long.parseLong(s);
+                    } catch (NumberFormatException ignored) {
+                        // Out of long range, e.g. tokenizer_config.json "model_max_length": 1000000000000000019884624838656
+                    }
+                }
+                return Double.parseDouble(s); // also accepts NaN / Infinity written by Python's json
             }
             default: throw new IOException("JSON: unexpected token " + peek());
         }

@@ -54,6 +54,8 @@ public final class Engine {
 
     public volatile State state = State.NO_MODEL;
     public volatile String status = "";
+    /** Full stack trace of the last model error, for "copy details". */
+    public volatile String errorDetails;
     public volatile long dlDone, dlTotal;
     private volatile boolean cancelDownload;
 
@@ -177,6 +179,8 @@ public final class Engine {
 
     public void cancelDownload() { cancelDownload = true; }
 
+    public boolean hasModelFiles() { return manifest.exists(); }
+
     public void loadModel() {
         state = State.LOADING;
         status = "Загружаю модель в память…";
@@ -184,6 +188,8 @@ public final class Engine {
         ml.submit(new Runnable() {
             @Override
             public void run() {
+                String step = "чтение списка файлов";
+                errorDetails = null;
                 try {
                     HfRepo.Plan plan = HfRepo.loadManifest(manifest);
                     if (plan == null || !HfRepo.isComplete(plan, modelDir)) {
@@ -195,9 +201,12 @@ public final class Engine {
                     long t0 = System.currentTimeMillis();
                     int threads = Math.max(1, Math.min(4, Runtime.getRuntime().availableProcessors() / 2));
                     File vision = plan.visionModel == null ? null : new File(modelDir, plan.visionModel);
+                    step = "инициализация";
                     model = new EmbeddingGemma2(modelDir, new File(modelDir, plan.textModel), vision, threads);
                     // Warm-up run (first inference allocates buffers) and embedding size.
+                    step = "пробный запуск";
                     model.embedQuery("привет");
+                    step = "переиндексация заметок";
                     String sig = HfRepo.manifestRepo(manifest) + "|" + plan.textModel + "|" + plan.visionModel;
                     if (!sig.equals(prefs.getString("model_sig", ""))) {
                         // Different weights: old vectors are not comparable.
@@ -210,9 +219,16 @@ public final class Engine {
                             + model.embeddingDim() + " изм., потоков: " + threads
                             + (model.supportsImages() ? "" : " · только текст");
                 } catch (Throwable e) {
+                    if (model != null) model.close();
                     model = null;
                     state = State.ERROR;
-                    status = "Не удалось загрузить модель: " + e;
+                    String msg = e.getMessage() != null ? e.getMessage() : e.toString();
+                    status = "Не удалось загрузить модель (" + step + "): " + msg;
+                    java.io.StringWriter sw = new java.io.StringWriter();
+                    e.printStackTrace(new java.io.PrintWriter(sw));
+                    errorDetails = "SemSearch " + BuildInfo.version(ctx) + ", Android " + android.os.Build.VERSION.SDK_INT
+                            + ", " + android.os.Build.MANUFACTURER + " " + android.os.Build.MODEL + "\n" + status + "\n\n" + sw;
+                    android.util.Log.e("SemSearch", status, e);
                 }
                 notifyChanged();
             }

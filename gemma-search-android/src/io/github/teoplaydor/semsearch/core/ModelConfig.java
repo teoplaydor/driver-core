@@ -13,12 +13,12 @@ import java.util.Map;
  */
 public final class ModelConfig {
     public int hiddenSize;
-    public int imageTokenId = -1, videoTokenId = -1, audioTokenId = -1;
+    public int imageTokenId = -1, videoTokenId = -1, audioTokenId = -1, boiTokenId = -1, eoiTokenId = -1;
     public String imageToken, boiToken, eoiToken, videoToken;
     public ImageParams image = new ImageParams(280);
     public ImageParams video = new ImageParams(280);
     public int maxFrames = 32;
-    public boolean hasVision, hasVideo;
+    public boolean hasVision, hasVideo, hasVideoProcessor;
 
     /** Gemma 4 image processor settings (defaults match transformers.js). */
     public static final class ImageParams {
@@ -55,9 +55,11 @@ public final class ModelConfig {
         if (cfg == null) throw new IOException("config.json not found");
         Map<String, Object> text = MiniJson.obj(cfg.get("text_config"));
         c.hiddenSize = (int) MiniJson.num(text, "hidden_size", MiniJson.num(cfg, "hidden_size", -1));
-        c.imageTokenId = (int) MiniJson.num(cfg, "image_token_id", -1);
-        c.videoTokenId = (int) MiniJson.num(cfg, "video_token_id", -1);
-        c.audioTokenId = (int) MiniJson.num(cfg, "audio_token_id", -1);
+        c.imageTokenId = (int) MiniJson.num(cfg, "image_token_id", MiniJson.num(cfg, "image_token_index", -1));
+        c.videoTokenId = (int) MiniJson.num(cfg, "video_token_id", MiniJson.num(cfg, "video_token_index", -1));
+        c.audioTokenId = (int) MiniJson.num(cfg, "audio_token_id", MiniJson.num(cfg, "audio_token_index", -1));
+        c.boiTokenId = (int) MiniJson.num(cfg, "boi_token_id", MiniJson.num(cfg, "boi_token_index", -1));
+        c.eoiTokenId = (int) MiniJson.num(cfg, "eoi_token_id", MiniJson.num(cfg, "eoi_token_index", -1));
         c.hasVision = cfg.get("vision_config") != null;
 
         Map<String, Object> tc = MiniJson.obj(readJson(new File(dir, "tokenizer_config.json")));
@@ -74,6 +76,7 @@ public final class ModelConfig {
         if (vp == null) vp = MiniJson.obj(readJson(new File(dir, "video_preprocessor_config.json")));
         c.image.read(ip);
         c.video.read(vp);
+        c.hasVideoProcessor = vp != null;
         c.hasVideo = vp != null && c.videoToken != null && c.videoTokenId >= 0;
         c.maxFrames = (int) MiniJson.num(vp, "max_frames", c.maxFrames);
         return c;
@@ -83,6 +86,9 @@ public final class ModelConfig {
     private static String tokenString(Map<String, Object> tc, String key) {
         if (tc == null) return null;
         Object v = tc.get(key);
+        // Newer tokenizer configs keep multimodal tokens under "extra_special_tokens".
+        Map<String, Object> extra = MiniJson.obj(tc.get("extra_special_tokens"));
+        if (v == null && extra != null) v = extra.get(key);
         if (v instanceof String) return (String) v;
         Map<String, Object> m = MiniJson.obj(v);
         return m == null ? null : MiniJson.str(m, "content", null);
