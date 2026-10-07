@@ -1,0 +1,192 @@
+import static org.junit.Assert.*;
+
+import android.content.Context;
+import android.view.View;
+import android.widget.TextView;
+
+import org.junit.Test;
+import org.junit.runner.RunWith;
+import org.robolectric.Robolectric;
+import org.robolectric.RobolectricTestRunner;
+import org.robolectric.RuntimeEnvironment;
+import org.robolectric.annotation.Config;
+import org.robolectric.annotation.GraphicsMode;
+
+import java.io.File;
+import java.io.FileOutputStream;
+
+import io.github.teoplaydor.semsearch.app.Engine;
+import io.github.teoplaydor.semsearch.app.MainActivity;
+
+/**
+ * The fp16 and LiteRT-LM variants in the app: a crash inside LiteRT-LM disables it on the next start,
+ * variants that are not on the phone fall back to the CPU, the settings offer the download, the deletion
+ * of unused variants and — when the speed check found LiteRT-LM faster but with other vectors — the move
+ * to it with a re-index, and the way back. (The native runtime itself is covered by LiteRtJniTest.)
+ */
+@RunWith(RobolectricTestRunner.class)
+@Config(sdk = 34, qualifiers = "ru-w411dp-h891dp-night-xxhdpi")
+@GraphicsMode(GraphicsMode.Mode.NATIVE)
+public class SpeedupsTest {
+    static void write(File f, int bytes) throws Exception {
+        f.getParentFile().mkdirs();
+        try (FileOutputStream o = new FileOutputStream(f)) {
+            o.write(new byte[bytes]);
+        }
+    }
+
+    static void writeText(File f, String s) throws Exception {
+        f.getParentFile().mkdirs();
+        try (FileOutputStream o = new FileOutputStream(f)) {
+            o.write(s.getBytes("UTF-8"));
+        }
+    }
+
+    /** EmbeddingGemma 2 on disk as the manifest describes it (4-bit graphs, optionally the fp16 vision graph). */
+    static void gemma(File model, boolean fp16) throws Exception {
+        String[] files = fp16 ? new String[]{"config.json", "onnx/model_q4.onnx", "onnx/vision_encoder_q4.onnx",
+                "onnx/vision_encoder_fp16.onnx", "onnx/vision_encoder_fp16.onnx_data"}
+                : new String[]{"config.json", "onnx/model_q4.onnx", "onnx/vision_encoder_q4.onnx"};
+        StringBuilder m = new StringBuilder("{\"repo\":\"test/gemma\",\"text\":\"onnx/model_q4.onnx\",\"vision\":"
+                + "\"onnx/vision_encoder_q4.onnx\"" + (fp16 ? ",\"fp16_vision\":\"onnx/vision_encoder_fp16.onnx\"" : "") + ",\"files\":[");
+        for (int i = 0; i < files.length; i++) {
+            File f = new File(model, files[i]);
+            write(f, files[i].contains("fp16") ? 2 << 20 : 1000);
+            m.append(i > 0 ? "," : "").append("{\"path\":\"").append(files[i]).append("\",\"size\":").append(f.length()).append('}');
+        }
+        writeText(new File(model, "manifest.json"), m.append("]}").toString());
+    }
+
+    /** LiteRT-LM as LiteRtRuntime.install leaves it (the library is junk: it cannot load in this JVM). */
+    static File liteRt(Context c) throws Exception {
+        File dir = new File(c.getFilesDir(), "litertlm");
+        write(new File(dir, "lib/liblitertlm_jni.so"), 3 << 20);
+        write(new File(dir, "embeddinggemma-2-440m.litertlm"), 1 << 20);
+        writeText(new File(dir, "manifest.json"), "{\"version\":\"0.18.0\",\"repo\":\"litert-community/embeddinggemma-2-440m-litert-lm\","
+                + "\"model\":\"embeddinggemma-2-440m.litertlm\",\"model_size\":" + (1 << 20) + ",\"libs\":[\"liblitertlm_jni.so\"]}");
+        return dir;
+    }
+
+    /** The settings panel follows the engine; nudge it after changing prefs behind its back. */
+    static void refresh(View root) throws Exception {
+        Robo.call(Robo.byName(root, "SettingsPanel"), "onEngineChanged");
+        Robo.settle(300);
+    }
+
+    static String text(MainActivity a) {
+        return Robo.allText(a.getWindow().getDecorView());
+    }
+
+    static void click(View root, String label) {
+        TextView hit = null;
+        for (View v : Robo.views(root, new java.util.ArrayList<View>())) {
+            if (v instanceof TextView && v.isShown() && String.valueOf(((TextView) v).getText()).equals(label)) hit = (TextView) v;
+        }
+        assertNotNull("no visible \"" + label + "\"", hit);
+        hit.performClick();
+    }
+
+    @Test
+    public void fp16AndLiteRt() throws Exception {
+        Context app = RuntimeEnvironment.getApplication();
+        // The previous run died inside LiteRT-LM's GPU backend: it must not be tried again.
+        app.getSharedPreferences("settings", Context.MODE_PRIVATE).edit().putString("litert_probe", "7")
+                .putInt("accel", Engine.ACCEL_LITERT_GPU).putInt("photo_model", 0).apply();
+        FakeMediaStore.install();
+        final MainActivity a = Robolectric.buildActivity(MainActivity.class).setup().get();
+        final Engine e = Engine.get(a);
+        Robo.waitFor("store", () -> e.store() != null);
+        assertTrue(e.liteRtBroken(Engine.ACCEL_LITERT_GPU));
+        assertEquals(Engine.ACCEL_CPU, e.prefs().getInt("accel", -1));
+        e.prefs().edit().remove("litert_broken_7").apply();
+
+        // Nothing extra on the phone: fp16 / LiteRT-LM choices fall back to the CPU, the settings offer the download.
+        File model = new File(a.getFilesDir(), "model");
+        gemma(model, false);
+        e.attachModelForTest(new Robo.FakeEmbedder());
+        Robo.waitFor("ready", e::ready);
+        for (int acc : new int[]{Engine.ACCEL_GPU_FP16, Engine.ACCEL_LITERT_GPU, Engine.ACCEL_LITERT_CPU}) {
+            e.prefs().edit().putInt("accel", acc).apply();
+            assertEquals("accel " + acc, Engine.ACCEL_CPU, e.accel());
+        }
+        e.prefs().edit().putInt("accel", Engine.ACCEL_CPU).apply();
+        assertTrue(e.speedupsMissing());
+        Robo.call(a, "openSettings");
+        Robo.settle(500);
+        View root = a.getWindow().getDecorView();
+        assertTrue(text(a), text(a).contains("Проверить LiteRT-LM и fp16"));
+        click(root, "Проверить LiteRT-LM и fp16");
+        Robo.settle(400);
+        assertTrue(text(a), text(a).contains("fp16-версия визуальной части для видеокарты"));
+        assertTrue(text(a), text(a).contains("LiteRT-LM — движок Google"));
+        a.onBackPressed(); // closes the sheet without downloading
+        Robo.settle(400);
+        a.onBackPressed();
+        Robo.settle(500);
+
+        // Both downloaded: usable, the download button goes, unused ones can be deleted.
+        gemma(model, true);
+        File lrt = liteRt(a);
+        assertFalse(e.speedupsMissing());
+        assertTrue(e.liteRtInstalled());
+        e.prefs().edit().putInt("accel", Engine.ACCEL_GPU_FP16).apply();
+        assertEquals(Engine.ACCEL_GPU_FP16, e.accel());
+        e.prefs().edit().putInt("accel", Engine.ACCEL_LITERT_CPU).apply();
+        assertEquals(Engine.ACCEL_LITERT_CPU, e.accel());
+        e.prefs().edit().putInt("accel", Engine.ACCEL_GPU_INT8).apply();
+        Robo.call(a, "openSettings");
+        Robo.settle(500);
+        root = a.getWindow().getDecorView();
+        assertFalse(text(a), text(a).contains("Проверить LiteRT-LM и fp16"));
+        assertTrue(text(a), text(a).contains("Удалить fp16-версию (4 МБ)"));
+        assertTrue(text(a), text(a).contains("Удалить LiteRT-LM (4 МБ)"));
+        assertFalse(text(a), text(a).contains("Перейти на LiteRT-LM"));
+
+        // The speed check found LiteRT-LM faster but with other vectors: the move is offered, with a re-index.
+        e.prefs().edit().putInt("litert_offer", Engine.ACCEL_LITERT_GPU).putInt("litert_offer_ms", 300).apply();
+        refresh(root);
+        assertEquals(Engine.ACCEL_LITERT_GPU, e.liteRtOffer());
+        click(root, "Перейти на LiteRT-LM");
+        Robo.settle(400);
+        assertTrue(text(a), text(a).contains("индекс будет построен заново"));
+        click(root, "Перейти");
+        Robo.settle(300);
+        assertTrue(e.liteRtSpace());
+        assertEquals(Engine.ACCEL_LITERT_GPU, e.prefs().getInt("accel", -1));
+        assertTrue(e.prefs().getBoolean("reindex_pending", false));
+        assertEquals(-1, e.liteRtOffer());
+        // its library cannot load here: the load fails and points the way back (no silent fallback to ONNX)
+        Robo.waitFor("load attempt", () -> e.state == Engine.State.ERROR);
+        System.out.println("LiteRT-LM load here: " + e.status);
+        assertTrue(e.status, e.status.contains("LiteRT-LM не запустился") && e.status.contains("Вернуться на ONNX Runtime"));
+        assertEquals("no fallback to the ONNX model in LiteRT-LM's space", Engine.ACCEL_LITERT_GPU, e.prefs().getInt("accel", -1));
+        assertNull("a load error is not a crash", e.prefs().getString("litert_probe", null));
+        // in LiteRT-LM's space a broken GPU backend falls back to its CPU backend, never to the ONNX model
+        e.prefs().edit().putBoolean("litert_broken_7", true).apply();
+        assertEquals(Engine.ACCEL_LITERT_CPU, e.accel());
+        e.prefs().edit().remove("litert_broken_7").apply();
+        e.deleteLiteRt(); // refused while the index holds its vectors
+        Robo.settle(300);
+        assertTrue(lrt.exists());
+        refresh(root);
+        assertTrue(text(a), text(a).contains("Вернуться на ONNX Runtime"));
+        click(root, "Вернуться на ONNX Runtime");
+        Robo.settle(400);
+        click(root, "Вернуться");
+        Robo.settle(300);
+        assertFalse(e.liteRtSpace());
+        assertEquals(Engine.ACCEL_CPU, e.prefs().getInt("accel", -1));
+        assertTrue(e.prefs().getBoolean("reindex_pending", false));
+        assertTrue(e.prefs().getBoolean("speed_check_pending", false));
+        Robo.settle(500);
+
+        // Unused variants go on request; the manifest forgets the fp16 graph, the 4-bit model stays.
+        e.deleteGemmaFp16();
+        e.deleteLiteRt();
+        Robo.waitFor("deleted", () -> !new File(model, "onnx/vision_encoder_fp16.onnx").exists() && !lrt.exists());
+        assertTrue(new File(model, "onnx/vision_encoder_q4.onnx").exists());
+        assertTrue(e.speedupsMissing());
+        assertTrue(e.hasModelFiles());
+        a.finish();
+    }
+}

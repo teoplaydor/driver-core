@@ -42,6 +42,8 @@ public final class HfRepo {
         public String textModel, visionModel;
         /** Full-precision vision graph for NPU/GPU runs (SigLIP), or null. */
         public String accelVision;
+        /** Half-precision vision graph for the GPU (EmbeddingGemma: onnx/vision_encoder_fp16.onnx), or null. */
+        public String fp16Vision;
         public long totalBytes;
     }
 
@@ -127,7 +129,13 @@ public final class HfRepo {
 
     /** Model ids on the Hub matching {@code query}, most downloaded first. */
     public List<String> search(String query) throws IOException {
+        return search(query, null);
+    }
+
+    /** @param author only this user's / organisation's models, or null */
+    public List<String> search(String query, String author) throws IOException {
         HttpURLConnection c = open(host + "/api/models?search=" + java.net.URLEncoder.encode(query, "UTF-8")
+                + (author != null ? "&author=" + java.net.URLEncoder.encode(author, "UTF-8") : "")
                 + "&sort=downloads&direction=-1&limit=30", -1);
         if (c.getResponseCode() != 200) throw new IOException("Hugging Face API: HTTP " + c.getResponseCode());
         InputStream in = c.getInputStream();
@@ -156,7 +164,26 @@ public final class HfRepo {
      *                   NNAPI (the NPU) runs fp32 graphs only, not the 4-bit one
      */
     public static Plan plan(List<RemoteFile> files, boolean withVision, boolean fp32Vision) throws IOException {
+        return plan(files, withVision, fp32Vision, false);
+    }
+
+    /**
+     * @param fp16Vision also the half-precision vision encoder (onnx/vision_encoder_fp16.onnx + its data): mobile
+     *                   GPUs compute fp16 at up to twice the fp32 rate and move half the bytes
+     */
+    public static Plan plan(List<RemoteFile> files, boolean withVision, boolean fp32Vision, boolean fp16Vision)
+            throws IOException {
         Plan p = planDefault(files, withVision);
+        if (withVision && fp16Vision) {
+            String half = "onnx/vision_encoder_fp16.onnx";
+            if (find(files, half) == null) throw new IOException("В репозитории нет версии " + half);
+            if (!half.equals(p.visionModel)) {
+                pickComponent(files, "vision_encoder", p, new String[]{"_fp16"});
+                p.totalBytes = 0;
+                for (RemoteFile f : p.files) p.totalBytes += Math.max(0, f.size);
+            }
+            p.fp16Vision = half;
+        }
         if (withVision && fp32Vision) {
             String full = "onnx/vision_encoder.onnx";
             if (find(files, full) == null) throw new IOException("В репозитории нет полной версии " + full);
@@ -219,28 +246,43 @@ public final class HfRepo {
     }
 
     private long downloadOne(RemoteFile f, File dst, long allDone, long allTotal, Progress progress) throws IOException {
+        return fetch(host + "/" + repo + "/resolve/main/" + f.path, token, f.path, f.size, dst, allDone, allTotal, progress);
+    }
+
+    /** A Hub file of this repo (any host and path layout of the repo's {@code resolve/main}). */
+    public long downloadFile(RemoteFile f, File dst, Progress progress) throws IOException {
+        return downloadOne(f, dst, 0, Math.max(0, f.size), progress);
+    }
+
+    /**
+     * Resumable download of {@code url} into {@code dst} (through {@code dst.part}), checked against
+     * {@code size} when it is known (≥ 0). Returns {@code allDone} plus the file's length.
+     */
+    public static long fetch(String url, String token, String label, long size, File dst, long allDone, long allTotal,
+                             Progress progress) throws IOException {
         File part = new File(dst.getPath() + ".part");
+        long[] expected = {-1}; // length announced by the server when the caller does not know the size
         File parent = dst.getParentFile();
         if (parent != null && !parent.exists() && !parent.mkdirs()) throw new IOException("mkdir " + parent);
         long have = part.exists() ? part.length() : 0;
-        if (f.size >= 0 && have > f.size) {
+        if (size >= 0 && have > size) {
             part.delete();
             have = 0;
         }
-        String url = host + "/" + repo + "/resolve/main/" + f.path;
-        HttpURLConnection c = open(url, have);
+        HttpURLConnection c = open(url, token, have);
         int code = c.getResponseCode();
-        if (code == 416 && f.size >= 0 && have == f.size) {
+        if (code == 416 && size >= 0 && have == size) {
             c.disconnect();
         } else {
             if (code == 401 || code == 403) {
-                throw new IOException("Нет доступа к " + f.path + " (HTTP " + code + "): репозиторий закрыт — "
+                throw new IOException("Нет доступа к " + label + " (HTTP " + code + "): репозиторий закрыт — "
                         + "примите условия на huggingface.co и укажите токен");
             }
-            if (code != 200 && code != 206) throw new IOException("HTTP " + code + " для " + f.path);
+            if (code != 200 && code != 206) throw new IOException("HTTP " + code + " для " + label);
             boolean append = code == 206;
             if (!append) have = 0;
-            long total = f.size >= 0 ? f.size : (c.getContentLength() >= 0 ? have + c.getContentLength() : -1);
+            long total = size >= 0 ? size : (c.getContentLength() >= 0 ? have + c.getContentLength() : -1);
+            expected[0] = total;
             InputStream in = c.getInputStream();
             OutputStream out = new FileOutputStream(part, append);
             byte[] buf = new byte[1 << 16];
@@ -253,7 +295,7 @@ public final class HfRepo {
                     long now = System.currentTimeMillis();
                     if (now - lastReport > 250) {
                         lastReport = now;
-                        if (progress != null && !progress.onProgress(f.path, have, total, allDone + have, allTotal)) {
+                        if (progress != null && !progress.onProgress(label, have, total, allDone + have, allTotal)) {
                             throw new InterruptedIOException("Загрузка отменена");
                         }
                     }
@@ -263,8 +305,11 @@ public final class HfRepo {
                 in.close();
             }
         }
-        if (f.size >= 0 && part.length() != f.size) {
-            throw new IOException("Файл " + f.path + " скачан не полностью: " + part.length() + " из " + f.size);
+        if (size >= 0 && part.length() != size) {
+            throw new IOException("Файл " + label + " скачан не полностью: " + part.length() + " из " + size);
+        }
+        if (size < 0 && expected[0] >= 0 && part.length() != expected[0]) {
+            throw new IOException("Файл " + label + " скачан не полностью: " + part.length() + " из " + expected[0]);
         }
         if (dst.exists()) dst.delete();
         if (!part.renameTo(dst)) throw new IOException("rename " + part);
@@ -272,6 +317,10 @@ public final class HfRepo {
     }
 
     private HttpURLConnection open(String url, long rangeFrom) throws IOException {
+        return open(url, token, rangeFrom);
+    }
+
+    static HttpURLConnection open(String url, String token, long rangeFrom) throws IOException {
         HttpURLConnection c = (HttpURLConnection) new URL(url).openConnection();
         c.setConnectTimeout(30000);
         c.setReadTimeout(60000);
@@ -304,6 +353,7 @@ public final class HfRepo {
         sb.append(",\"text\":").append(MiniJson.write(plan.textModel));
         sb.append(",\"vision\":").append(MiniJson.write(plan.visionModel));
         if (plan.accelVision != null) sb.append(",\"accel_vision\":").append(MiniJson.write(plan.accelVision));
+        if (plan.fp16Vision != null) sb.append(",\"fp16_vision\":").append(MiniJson.write(plan.fp16Vision));
         sb.append(",\"files\":[");
         for (int i = 0; i < plan.files.size(); i++) {
             RemoteFile f = plan.files.get(i);
@@ -326,6 +376,7 @@ public final class HfRepo {
         p.textModel = MiniJson.str(m, "text", null);
         p.visionModel = MiniJson.str(m, "vision", null);
         p.accelVision = MiniJson.str(m, "accel_vision", null);
+        p.fp16Vision = MiniJson.str(m, "fp16_vision", null);
         for (Object o : MiniJson.arr(m.get("files"))) {
             Map<String, Object> f = MiniJson.obj(o);
             RemoteFile rf = new RemoteFile(MiniJson.str(f, "path", ""), MiniJson.num(f, "size", -1));

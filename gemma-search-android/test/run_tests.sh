@@ -4,10 +4,13 @@
 #   2. pipeline parity   — EmbeddingGemma2 (Java + ONNX Runtime) vs transformers.js EmbeddingGemma2Model
 #                          on a dummy model with the same ONNX inputs/outputs (text, images, video)
 #                          and SigLIP 2 (the fast photo model) vs transformers.js SiglipText/VisionModel
+#   2d. LiteRT-LM        — our Java side against a stand-in library with LiteRT-LM 0.18's own JNI glue
+#                          (engine settings, prompts, budgets, batches, errors), install from mock
+#                          Google Maven + Hub (version, arm64 libraries, bundle choice, resume)
 #   3. Hub download      — file selection, chunked external data, resume after disconnect, cancel
 #   4. app tests         — the real Activity/Engine/IndexStore/background jobs on Robolectric
 #                          (Android 14 runtime), plus screenshots of the screens in build/shots/
-# Needs: python3 (+pip), node/npm, JDK 21, Maven.
+# Needs: python3 (+pip), node/npm, JDK 21, Maven, g++.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 T=build/test
@@ -27,7 +30,7 @@ fi
 echo "== 1. tokenizer parity"
 mkdir -p "$T/cls"
 javac --release 8 -XDstringConcat=inline -nowarn -encoding UTF-8 -cp "$T/ort-desktop.jar" -d "$T/cls" \
-  src/io/github/teoplaydor/semsearch/core/*.java test/*.java
+  src/io/github/teoplaydor/semsearch/core/*.java src/com/google/ai/edge/litertlm/*.java test/*.java
 python3 tools/tokenizer_reference.py "$T/gemma3/tokenizer.json" "$T/tok-cases.jsonl"
 java -Xmx2g -cp "$T/cls" TokenizerParityTest "$T/gemma3/tokenizer.json" "$T/tok-cases.jsonl"
 
@@ -67,8 +70,24 @@ java -cp "$T/cls:build/deps/ort-classes:$T/ort-desktop.jar" AccelPipelineTest "$
 java -cp "$T/cls:build/deps/ort-classes:$T/ort-desktop.jar" BatchParityTest "$T/models/dummy"
 javac --release 8 -XDstringConcat=inline -nowarn -encoding UTF-8 -cp "$T/cls:$T/ort-desktop.jar" -d "$T/cls" test/accel/NpuShapesTest.java
 java -cp "$T/cls:build/deps/ort-classes:$T/ort-desktop.jar" NpuShapesTest "$T/models/dummy"
+python3 -m pip install -q onnxconverter-common
+python3 test/accel/make_fp16_vision.py "$T/models/dummy/onnx/vision_encoder.onnx" "$T/models/dummy/onnx/vision_encoder_fp16.onnx" >/dev/null
+javac --release 8 -XDstringConcat=inline -nowarn -encoding UTF-8 -cp "$T/cls:$T/ort-desktop.jar" -d "$T/cls" test/accel/Fp16Test.java
+java -Dfile.encoding=UTF-8 -Dstdout.encoding=UTF-8 -cp "$T/cls:build/deps/ort-classes:$T/ort-desktop.jar" Fp16Test "$T/models/dummy"
 javac --release 8 -XDstringConcat=inline -nowarn -encoding UTF-8 -cp "$T/cls:$T/ort-desktop.jar" -d "$T/cls" test/accel/ProfileTest.java
 java -Dfile.encoding=UTF-8 -Dstdout.encoding=UTF-8 -cp "$T/cls:build/deps/ort-classes:$T/ort-desktop.jar" ProfileTest "$T/models/dummy"
+
+echo "== 2d. LiteRT-LM: JNI contract, install"
+L="$T/litert"
+rm -rf "$L/lib" && mkdir -p "$L/lib" "$L/cls"
+JH=$(dirname "$(dirname "$(readlink -f "$(command -v javac)")")")
+g++ -std=c++17 -O1 -shared -fPIC -I"$JH/include" -I"$JH/include/linux" test/litert/fake_litertlm_jni.cc -o "$L/lib/liblitertlm_jni.so"
+echo 'int litert_gpu_accelerator_stub = 1;' > "$L/gpu.c" && gcc -shared -fPIC "$L/gpu.c" -o "$L/lib/libLiteRtGpuAccelerator.so"
+printf 'not an elf' > "$L/lib/libLiteRtOpenClAccelerator.so"
+javac --release 8 -XDstringConcat=inline -nowarn -encoding UTF-8 -cp "$T/cls" -d "$T/cls" \
+  test/litert/LiteRtJniTest.java test/litert/LiteRtInstallTest.java
+java -Dfile.encoding=UTF-8 -Dstdout.encoding=UTF-8 -cp "$T/cls" LiteRtJniTest "$L/lib" 2>&1 | grep -v "stack guard\|execstack"
+java -Dfile.encoding=UTF-8 -Dstdout.encoding=UTF-8 -Dhttp.nonProxyHosts=127.0.0.1 -cp "$T/cls" LiteRtInstallTest
 
 echo "== 3. Hub download"
 python3 tools/mock_hub.py 18765 & HUB=$!

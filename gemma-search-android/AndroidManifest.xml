@@ -24,6 +24,9 @@
         android:largeHeap="true"
         android:supportsRtl="true"
         android:theme="@style/AppTheme">
+        <!-- LiteRT-LM's GPU backend opens the vendor's OpenCL driver (Android 12+ asks apps to declare it) -->
+        <uses-native-library android:name="libOpenCL.so" android:required="false" />
+        <uses-native-library android:name="libvndksupport.so" android:required="false" />
         <activity
             android:name=".app.MainActivity"
             android:exported="true"

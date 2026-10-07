@@ -347,6 +347,10 @@ final class Media {
             this.bmp = bmp;
         }
 
+        Bitmap bitmap() {
+            return bmp;
+        }
+
         @Override
         public int width() {
             return bmp.getWidth();

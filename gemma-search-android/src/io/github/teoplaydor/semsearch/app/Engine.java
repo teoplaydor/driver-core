@@ -22,6 +22,9 @@ import io.github.teoplaydor.semsearch.core.Embedder;
 import io.github.teoplaydor.semsearch.core.EmbeddingGemma2;
 import io.github.teoplaydor.semsearch.core.HfRepo;
 import io.github.teoplaydor.semsearch.core.HfTokenizer;
+import io.github.teoplaydor.semsearch.core.ImagePreprocessor;
+import io.github.teoplaydor.semsearch.core.LiteRtEmbedder;
+import io.github.teoplaydor.semsearch.core.LiteRtRuntime;
 import io.github.teoplaydor.semsearch.core.ModelConfig;
 import io.github.teoplaydor.semsearch.core.OnnxPatcher;
 import io.github.teoplaydor.semsearch.core.OrtProfile;
@@ -137,6 +140,13 @@ public final class Engine {
         if (npuProbe != null) {
             // It died starting EmbeddingGemma's vision encoder on the NPU (driver crash): not again.
             prefs.edit().putBoolean("npu_broken_" + npuProbe, true).remove("npu_probe").putInt("accel", 0).apply();
+        }
+        String liteRtProbe = prefs.getString("litert_probe", null);
+        if (liteRtProbe != null) {
+            // It died loading LiteRT-LM or starting it on this backend (native crash): not again.
+            SharedPreferences.Editor ed = prefs.edit().putBoolean("litert_broken_" + liteRtProbe, true).remove("litert_probe");
+            if (!prefs.getBoolean("litert_space", false)) ed.putInt("accel", ACCEL_CPU);
+            ed.apply();
         }
         if (!prefs.getBoolean("migrated_070", false)) {
             // 0.7: EmbeddingGemma 2 is the photo model again (SigLIP 2 did not hold up on real photos).
@@ -358,7 +368,8 @@ public final class Engine {
             public void run() {
                 try {
                     HfRepo r = new HfRepo(repo, token);
-                    HfRepo.Plan plan = HfRepo.plan(r.listFiles(), vision, fp32 || gemmaFp32Vision() != null);
+                    HfRepo.Plan plan = HfRepo.plan(r.listFiles(), vision, fp32 || gemmaFp32Vision() != null,
+                            vision && gemmaFp16Vision() != null);
                     dlTotal = plan.totalBytes;
                     if (!modelDir.exists() && !modelDir.mkdirs()) throw new Exception("нет доступа к памяти");
                     r.download(plan, modelDir, new HfRepo.Progress() {
@@ -429,12 +440,13 @@ public final class Engine {
                         model = loadGemma(plan, true);
                         photo = model;
                         mediaSig = notesSig = gemmaSig(plan);
-                        if (isNpu(loadedAccel)) {
-                            // the NPU compiles the graph on its first run: a driver crash there must not loop
-                            step = "первый запуск на NPU";
-                            prefs.edit().putString("npu_probe", String.valueOf(loadedAccel)).commit();
+                        if (isNpu(loadedAccel) || isLiteRt(loadedAccel)) {
+                            // the NPU / LiteRT-LM compile on the first run: a driver crash there must not loop
+                            String probe = isNpu(loadedAccel) ? "npu_probe" : "litert_probe";
+                            step = "первый запуск (" + ACCEL_NAMES[loadedAccel] + ")";
+                            prefs.edit().putString(probe, String.valueOf(loadedAccel)).commit();
                             photo.embedImage(new PatternSource(640, 480, 1), photoBudget());
-                            prefs.edit().remove("npu_probe").commit();
+                            prefs.edit().remove(probe).commit();
                         }
                     } else {
                         HfRepo.Plan plan = FastModel.plan(ctx, pm);
@@ -502,16 +514,23 @@ public final class Engine {
                 }
                 notifyChanged();
                 if (autoCheck) checkFast(null); // first start of a fast model: find its best accelerator once
-                if (state == State.READY && full && photoModel() == FastModel.GEMMA
-                        && prefs.getBoolean("npu_check_pending", false) && gemmaFp32Vision() != null) {
-                    prefs.edit().putBoolean("npu_check_pending", false).apply();
-                    benchmark(new Callback<String>() {
-                        @Override
-                        public void done(String report, Exception e) {
-                            prefs.edit().putBoolean("g_report_unseen", true).apply();
-                            notifyChanged();
-                        }
-                    });
+                if (state == State.READY && full && photoModel() == FastModel.GEMMA) {
+                    boolean npuCheck = prefs.getBoolean("npu_check_pending", false) && gemmaFp32Vision() != null;
+                    if (npuCheck || prefs.getBoolean("speed_check_pending", false)) {
+                        // new accelerator files: compare everything once (the check reloads the model at its end)
+                        prefs.edit().putBoolean("npu_check_pending", false).putBoolean("speed_check_pending", false).apply();
+                        benchmark(new Callback<String>() {
+                            @Override
+                            public void done(String report, Exception e) {
+                                prefs.edit().putBoolean("g_report_unseen", true).apply();
+                                notifyChanged();
+                            }
+                        });
+                    } else if (prefs.getBoolean("reindex_pending", false) && AutoIndex.hasMediaAccess(ctx)) {
+                        // the index was cleared for a model with other vectors: rebuild it right away
+                        prefs.edit().putBoolean("reindex_pending", false).apply();
+                        startIndexFromPrefs(false);
+                    }
                 }
             }
         });
@@ -533,27 +552,45 @@ public final class Engine {
     }
 
     private String gemmaSig(HfRepo.Plan plan) throws java.io.IOException {
-        return HfRepo.manifestRepo(manifest) + "|" + plan.textModel + "|" + plan.visionModel;
+        return HfRepo.manifestRepo(manifest) + "|" + plan.textModel + "|" + plan.visionModel + (liteRtSpace() ? "|litert" : "");
     }
 
     /** EmbeddingGemma 2 with the chosen accelerator (falling back to the CPU); text only when it serves notes. */
-    private EmbeddingGemma2 loadGemma(HfRepo.Plan plan, boolean withVision) throws Exception {
-        ModelConfig cfg = EmbeddingGemma2.loadConfig(modelDir);
-        HfTokenizer tok = EmbeddingGemma2.loadTokenizer(modelDir);
+    private Embedder loadGemma(HfRepo.Plan plan, boolean withVision) throws Exception {
+        ModelConfig cfg = null;
+        HfTokenizer tok = null;
         HfRepo.Plan use = plan;
         if (!withVision) {
             use = new HfRepo.Plan();
             use.textModel = plan.textModel;
         }
         int accel = accel();
-        EmbeddingGemma2 m;
+        if (!withVision && isLiteRt(accel)) accel = ACCEL_CPU; // notes beside SigLIP: the ONNX text model
+        if (withVision && liteRtSpace() && !isLiteRt(accel)) {
+            throw new java.io.IOException("LiteRT-LM на этом телефоне больше не запускается, а индекс построен им — "
+                    + "«Вернуться на ONNX Runtime» в настройках переиндексирует галерею.");
+        }
+        if (!isLiteRt(accel)) { // LiteRT-LM's bundle carries its own configs and tokenizer
+            cfg = EmbeddingGemma2.loadConfig(modelDir);
+            tok = EmbeddingGemma2.loadTokenizer(modelDir);
+        }
+        Embedder m;
         try {
             m = createModel(cfg, tok, use, accel, threads);
         } catch (Exception gpuOrInt8Failure) {
             if (accel == ACCEL_CPU) throw gpuOrInt8Failure;
+            if (isLiteRt(accel) && liteRtSpace()) {
+                // the index holds LiteRT-LM's vectors: the ONNX model cannot stand in for it
+                throw new java.io.IOException("LiteRT-LM не запустился (" + gpuOrInt8Failure.getMessage() + "). Индекс "
+                        + "построен им — «Вернуться на ONNX Runtime» в настройках переиндексирует галерею.", gpuOrInt8Failure);
+            }
             android.util.Log.w("SemSearch", "accel " + accel + " failed, using CPU", gpuOrInt8Failure);
             prefs.edit().putInt("accel", ACCEL_CPU).apply();
             accel = ACCEL_CPU;
+            if (cfg == null) {
+                cfg = EmbeddingGemma2.loadConfig(modelDir);
+                tok = EmbeddingGemma2.loadTokenizer(modelDir);
+            }
             m = createModel(cfg, tok, use, ACCEL_CPU, threads);
         }
         if (withVision) {
@@ -630,38 +667,165 @@ public final class Engine {
      * the chosen accelerator. The manifest forgets it first, so an interruption leaves at worst stray files.
      */
     public void deleteGemmaFp32() {
+        deleteVisionVariant(true);
+    }
+
+    /** Deletes the half-precision vision encoder (WebGPU fp16) when it is not the chosen accelerator. */
+    public void deleteGemmaFp16() {
+        deleteVisionVariant(false);
+    }
+
+    private void deleteVisionVariant(final boolean fp32) {
         ml.submit(new Runnable() {
             @Override
             public void run() {
                 try {
                     HfRepo.Plan p = HfRepo.loadManifest(manifest);
-                    if (p == null || p.accelVision == null) return;
-                    // a model still running on the NPU graph (accelerator changed, not reloaded yet) lets go of it
-                    boolean reload = isNpu(loadedAccel) && photo != null;
+                    String variant = p == null ? null : fp32 ? p.accelVision : p.fp16Vision;
+                    if (variant == null) return;
+                    // a model still running on that graph (accelerator changed, not reloaded yet) lets go of it
+                    boolean reload = photo != null && (fp32 ? isNpu(loadedAccel) : loadedAccel == ACCEL_GPU_FP16);
                     if (reload) closeModels();
                     String repo = HfRepo.manifestRepo(manifest);
                     List<String> gone = new ArrayList<String>();
                     for (java.util.Iterator<HfRepo.RemoteFile> it = p.files.iterator(); it.hasNext(); ) {
                         HfRepo.RemoteFile f = it.next();
-                        if (!f.path.startsWith(p.accelVision)) continue;
+                        if (!f.path.startsWith(variant)) continue;
                         gone.add(f.path);
                         p.totalBytes -= Math.max(0, f.size);
                         it.remove();
                     }
-                    p.accelVision = null;
+                    if (fp32) p.accelVision = null;
+                    else p.fp16Vision = null;
                     File tmp = new File(manifest.getPath() + ".tmp");
                     HfRepo.saveManifest(p, repo, tmp);
                     if (!tmp.renameTo(manifest)) throw new java.io.IOException("не удалось обновить манифест");
                     for (String g : gone) new File(modelDir, g).delete();
-                    prefs.edit().remove("npu_check_pending").apply();
-                    if (isNpu(prefs.getInt("accel", ACCEL_CPU))) prefs.edit().putInt("accel", ACCEL_CPU).apply();
+                    int a = prefs.getInt("accel", ACCEL_CPU);
+                    if (fp32) {
+                        prefs.edit().remove("npu_check_pending").apply();
+                        if (isNpu(a)) prefs.edit().putInt("accel", ACCEL_CPU).apply();
+                    } else if (a == ACCEL_GPU_FP16) {
+                        prefs.edit().putInt("accel", ACCEL_CPU).apply();
+                    }
                     if (reload) loadModel();
                 } catch (Exception e) {
-                    android.util.Log.w("SemSearch", "fp32 vision not deleted", e);
+                    android.util.Log.w("SemSearch", "vision variant not deleted", e);
                 }
                 notifyChanged();
             }
         });
+    }
+
+    /** Size of the fp16 vision encoder on disk (0 when absent). */
+    public long gemmaFp16Bytes() {
+        HfRepo.Plan p = gemmaFp16Vision() != null ? gemmaPlan() : null;
+        if (p == null) return 0;
+        long n = 0;
+        for (HfRepo.RemoteFile f : p.files) if (f.path.startsWith(p.fp16Vision)) n += new File(modelDir, f.path).length();
+        return n;
+    }
+
+    public long liteRtBytes() {
+        return liteRt().bytesOnDisk();
+    }
+
+    /** Deletes LiteRT-LM and its model (not while the index holds its vectors). */
+    public void deleteLiteRt() {
+        ml.submit(new Runnable() {
+            @Override
+            public void run() {
+                if (liteRtSpace()) return;
+                boolean reload = photo != null && isLiteRt(loadedAccel);
+                if (reload) closeModels();
+                LiteRtRuntime.deleteTree(liteRt().dir());
+                prefs.edit().remove("litert_offer").apply();
+                if (isLiteRt(prefs.getInt("accel", ACCEL_CPU))) prefs.edit().putInt("accel", ACCEL_CPU).apply();
+                if (reload) loadModel();
+                notifyChanged();
+            }
+        });
+    }
+
+    /**
+     * Downloads the two faster variants of EmbeddingGemma's picture side, then lets the speed check compare
+     * them with the rest: the half-precision vision encoder for ONNX Runtime's WebGPU provider (same ONNX
+     * repo) and Google's LiteRT-LM runtime with its own build of the model. A failure of one is reported, the
+     * other is still checked.
+     */
+    public void downloadSpeedups() {
+        if (state == State.DOWNLOADING || state == State.LOADING || photoModel() != FastModel.GEMMA) return;
+        final String repo = repo(), token = prefs.getString("token", "");
+        stopIndex();
+        cancelDownload = false;
+        dlError = null;
+        state = State.DOWNLOADING;
+        status = "Получаю список файлов…";
+        dlDone = 0;
+        dlTotal = 0;
+        notifyChanged();
+        net.submit(new Runnable() {
+            @Override
+            public void run() {
+                HfRepo.Progress progress = new HfRepo.Progress() {
+                    @Override
+                    public boolean onProgress(String file, long fd, long ft, long all, long allTotal) {
+                        dlDone = all;
+                        dlTotal = allTotal;
+                        status = "Скачиваю " + file;
+                        notifyChanged();
+                        return !cancelDownload;
+                    }
+                };
+                StringBuilder errors = new StringBuilder();
+                if (gemmaFp16Vision() == null) {
+                    try {
+                        HfRepo r = new HfRepo(repo, token);
+                        HfRepo.Plan plan = HfRepo.plan(r.listFiles(), true, gemmaFp32Vision() != null, true);
+                        dlTotal = plan.totalBytes;
+                        r.download(plan, modelDir, progress);
+                        HfRepo.saveManifest(plan, repo, manifest);
+                    } catch (Exception e) {
+                        if (!cancelDownload) errors.append("fp16: ").append(e.getMessage());
+                    }
+                }
+                if (!cancelDownload && !liteRtInstalled()) {
+                    try {
+                        dlDone = 0;
+                        dlTotal = 0;
+                        status = "LiteRT-LM: ищу подходящую версию…";
+                        notifyChanged();
+                        liteRt().install(progress);
+                    } catch (Exception e) {
+                        if (!cancelDownload) errors.append(errors.length() > 0 ? "\n" : "").append("LiteRT-LM: ").append(e.getMessage());
+                    }
+                }
+                dlError = cancelDownload ? "Загрузка остановлена — её можно продолжить" : errors.length() > 0 ? errors.toString() : null;
+                if (!cancelDownload && (gemmaFp16Vision() != null || liteRtInstalled())) {
+                    prefs.edit().putBoolean("speed_check_pending", true).apply();
+                }
+                unloadModel();
+                loadModel();
+            }
+        });
+    }
+
+    /** Rebuilds the index with LiteRT-LM's vectors: photos, videos and notes are embedded again by it. */
+    public void switchToLiteRt() {
+        int a = liteRtOffer();
+        if (a < 0) return;
+        stopIndex();
+        prefs.edit().putBoolean("litert_space", true).putInt("accel", a).putInt("threads", 0).putInt("batch", 1)
+                .remove("litert_offer").putBoolean("reindex_pending", true).apply();
+        loadModel();
+    }
+
+    /** Back to the ONNX model: the index is rebuilt with its vectors, the speed check picks its accelerator again. */
+    public void leaveLiteRt() {
+        stopIndex();
+        prefs.edit().putBoolean("litert_space", false).putInt("accel", ACCEL_CPU).putInt("threads", 0).putInt("batch", 1)
+                .putBoolean("reindex_pending", true).putBoolean("speed_check_pending", true).apply();
+        loadModel();
     }
 
     /** Removes EmbeddingGemma 2 when it only serves notes (notes then use the fast model's text side). */
@@ -731,7 +895,7 @@ public final class Engine {
     }
 
     int notesDims() {
-        return model instanceof EmbeddingGemma2 || (model != null && model == photo && photoModel() == FastModel.GEMMA)
+        return isGemma(model) || (model != null && model == photo && photoModel() == FastModel.GEMMA)
                 ? searchDims() : Integer.MAX_VALUE;
     }
 
@@ -991,13 +1155,22 @@ public final class Engine {
     // ------------------------------------------------------------------ acceleration
 
     public static final int ACCEL_CPU = 0, ACCEL_CPU_INT8 = 1, ACCEL_GPU = 2, ACCEL_GPU_INT8 = 3, ACCEL_NPU = 4,
-            ACCEL_NPU_FP32 = 5;
-    /** For the NPU variants the vision encoder (most of the work per photo) runs there, the text model on the CPU in int8. */
+            ACCEL_NPU_FP32 = 5, ACCEL_GPU_FP16 = 6, ACCEL_LITERT_GPU = 7, ACCEL_LITERT_CPU = 8;
+    /**
+     * For the NPU and fp16 variants the vision encoder (most of the work per photo) runs there, the text model on
+     * the CPU in int8. The LiteRT-LM variants run Google's own build of the model with its own kernels.
+     */
     public static final String[] ACCEL_NAMES = {"Процессор", "Процессор, int8", "Видеокарта (WebGPU)",
-            "Видеокарта (WebGPU), int8", "NPU (NNAPI)", "NPU (NNAPI, fp32)"};
+            "Видеокарта (WebGPU), int8", "NPU (NNAPI)", "NPU (NNAPI, fp32)", "Видеокарта (WebGPU), fp16",
+            "LiteRT-LM, видеокарта", "LiteRT-LM, процессор"};
 
+    /** ONNX Runtime's WebGPU provider (the "gpu_broken" guard covers these). */
     public static boolean isGpu(int a) {
-        return a == ACCEL_GPU || a == ACCEL_GPU_INT8;
+        return a == ACCEL_GPU || a == ACCEL_GPU_INT8 || a == ACCEL_GPU_FP16;
+    }
+
+    public static boolean isLiteRt(int a) {
+        return a == ACCEL_LITERT_GPU || a == ACCEL_LITERT_CPU;
     }
 
     public static boolean isNpu(int a) {
@@ -1008,7 +1181,53 @@ public final class Engine {
         int a = Math.max(0, Math.min(ACCEL_NAMES.length - 1, prefs.getInt("accel", ACCEL_CPU)));
         if (isGpu(a) && prefs.getBoolean("gpu_broken", false)) a = ACCEL_CPU;
         if (isNpu(a) && (npuBroken(a) || gemmaFp32Vision() == null)) a = ACCEL_CPU;
+        if (a == ACCEL_GPU_FP16 && gemmaFp16Vision() == null) a = ACCEL_CPU;
+        if (isLiteRt(a) && (liteRtBroken(a) || !liteRtInstalled())) {
+            // in LiteRT-LM's vector space only its other backend keeps the index usable
+            int other = a == ACCEL_LITERT_GPU ? ACCEL_LITERT_CPU : ACCEL_LITERT_GPU;
+            a = liteRtSpace() && liteRtInstalled() && !liteRtBroken(other) ? other : ACCEL_CPU;
+        }
         return a;
+    }
+
+    public boolean liteRtBroken(int a) {
+        return prefs.getBoolean("litert_broken_" + a, false);
+    }
+
+    LiteRtRuntime liteRt() {
+        return new LiteRtRuntime(new File(ctx.getFilesDir(), "litertlm"), prefs.getString("token", ""));
+    }
+
+    /** LiteRT-LM's libraries and EmbeddingGemma 2 in its format are on the phone. */
+    public boolean liteRtInstalled() {
+        return liteRt().installed() != null;
+    }
+
+    /**
+     * The index holds LiteRT-LM's vectors (it was rebuilt with it because they differ from the ONNX model's):
+     * only LiteRT-LM may embed photos and queries until the person goes back.
+     */
+    public boolean liteRtSpace() {
+        return prefs.getBoolean("litert_space", false) && photoModel() == FastModel.GEMMA;
+    }
+
+    /** A LiteRT-LM variant the speed check found clearly faster, but with vectors that need a new index (or -1). */
+    public int liteRtOffer() {
+        return liteRtSpace() || !liteRtInstalled() ? -1 : prefs.getInt("litert_offer", -1);
+    }
+
+    /** EmbeddingGemma's half-precision vision encoder (for the GPU), when downloaded. */
+    File gemmaFp16Vision() {
+        HfRepo.Plan p = gemmaPlan();
+        if (p == null || p.fp16Vision == null) return null;
+        File f = new File(modelDir, p.fp16Vision);
+        return f.exists() ? f : null;
+    }
+
+    /** Neither the fp16 graph nor LiteRT-LM is on the phone yet (EmbeddingGemma serves photos). */
+    public boolean speedupsMissing() {
+        if (photoModel() != FastModel.GEMMA || gemmaPlan() == null) return false;
+        return gemmaFp16Vision() == null || !liteRtInstalled();
     }
 
     public boolean npuBroken(int a) {
@@ -1067,15 +1286,16 @@ public final class Engine {
         return patched;
     }
 
-    private EmbeddingGemma2 createModel(ModelConfig cfg, HfTokenizer tok, HfRepo.Plan plan, int accel, int nThreads)
+    private Embedder createModel(ModelConfig cfg, HfTokenizer tok, HfRepo.Plan plan, int accel, int nThreads)
             throws Exception {
         return createModel(cfg, tok, plan, accel, nThreads, batchSize());
     }
 
-    private EmbeddingGemma2 createModel(ModelConfig cfg, HfTokenizer tok, HfRepo.Plan plan, int accel, int nThreads,
-                                        int batch) throws Exception {
+    private Embedder createModel(ModelConfig cfg, HfTokenizer tok, HfRepo.Plan plan, int accel, int nThreads,
+                                 int batch) throws Exception {
+        if (isLiteRt(accel)) return openLiteRt(accel, nThreads, batch);
         boolean npu = isNpu(accel) && plan.visionModel != null;
-        boolean int8 = accel == ACCEL_CPU_INT8 || accel == ACCEL_GPU_INT8 || isNpu(accel);
+        boolean int8 = accel == ACCEL_CPU_INT8 || accel == ACCEL_GPU_INT8 || isNpu(accel) || accel == ACCEL_GPU_FP16;
         boolean gpu = isGpu(accel);
         File text = graphFile(plan.textModel, int8);
         if (npu) {
@@ -1094,12 +1314,79 @@ public final class Engine {
             }
         }
         File vision = plan.visionModel == null ? null : graphFile(plan.visionModel, int8);
+        if (accel == ACCEL_GPU_FP16 && plan.visionModel != null) {
+            vision = plan.fp16Vision == null ? null : new File(modelDir, plan.fp16Vision);
+            if (vision == null || !vision.exists()) {
+                throw new java.io.IOException("нет fp16-версии визуального энкодера — «Проверить LiteRT-LM и fp16» в настройках");
+            }
+        }
         if (gpu) prefs.edit().putBoolean("gpu_probe", true).commit();
         try {
             return new EmbeddingGemma2(cfg, tok, text, vision, nThreads, gpu);
         } finally {
             if (gpu) prefs.edit().putBoolean("gpu_probe", false).commit();
         }
+    }
+
+    private static volatile boolean liteRtLoaded;
+    /** Libraries of the runtime that did not load (e.g. an OpenCL accelerator on a phone without OpenCL). */
+    static volatile String liteRtLoadIssues;
+
+    /** EmbeddingGemma 2 on LiteRT-LM: loads its native libraries once per process, under the crash probe. */
+    private Embedder openLiteRt(int accel, int nThreads, int batch) throws Exception {
+        LiteRtRuntime rt = liteRt();
+        LiteRtRuntime.Installed i = rt.installed();
+        if (i == null) throw new java.io.IOException("LiteRT-LM не скачан — «Проверить LiteRT-LM и fp16» в настройках");
+        boolean outer = prefs.contains("litert_probe");
+        if (!outer) prefs.edit().putString("litert_probe", String.valueOf(accel)).commit();
+        try {
+            synchronized (Engine.class) {
+                if (!liteRtLoaded) {
+                    List<String> issues = LiteRtRuntime.load(rt.libDir(), i.libs);
+                    liteRtLoadIssues = issues.isEmpty() ? null : issues.toString();
+                    liteRtLoaded = true;
+                }
+            }
+            File cache = new File(ctx.getCacheDir(), "litertlm");
+            if (!cache.exists()) cache.mkdirs();
+            String backend = accel == ACCEL_LITERT_GPU ? LiteRtEmbedder.GPU : LiteRtEmbedder.CPU;
+            try {
+                return new LiteRtEmbedder(rt.modelFile(i), backend, nThreads, maxBudget(), cache, batch, JPEG);
+            } catch (RuntimeException noSuchBudget) {
+                // a bundle without a signature for this many picture tokens: its own default for every picture
+                android.util.Log.w("SemSearch", "LiteRT-LM with " + maxBudget() + " tokens", noSuchBudget);
+                return new LiteRtEmbedder(rt.modelFile(i), backend, nThreads, 0, cache, batch, JPEG);
+            }
+        } catch (UnsatisfiedLinkError e) {
+            throw new java.io.IOException(e.getMessage(), e);
+        } finally {
+            if (!outer) prefs.edit().remove("litert_probe").commit();
+        }
+    }
+
+    /** LiteRT-LM takes pictures as PNG/JPEG bytes and resizes them itself. */
+    static final LiteRtEmbedder.ImageEncoder JPEG = new LiteRtEmbedder.ImageEncoder() {
+        @Override
+        public byte[] encode(ImagePreprocessor.Source s) {
+            Bitmap b;
+            boolean own = false;
+            if (s instanceof Media.BitmapSource) {
+                b = ((Media.BitmapSource) s).bitmap();
+            } else {
+                float k = Math.min(1f, 1024f / Math.max(s.width(), s.height()));
+                int w = Math.max(1, Math.round(s.width() * k)), h = Math.max(1, Math.round(s.height() * k));
+                b = Bitmap.createBitmap(s.argb(w, h), w, h, Bitmap.Config.ARGB_8888);
+                own = true;
+            }
+            java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream(256 * 1024);
+            b.compress(Bitmap.CompressFormat.JPEG, 95, out);
+            if (own) b.recycle();
+            return out.toByteArray();
+        }
+    };
+
+    static boolean isGemma(Embedder e) {
+        return e instanceof EmbeddingGemma2 || e instanceof LiteRtEmbedder;
     }
 
     private static final class Measure {
@@ -1113,7 +1400,7 @@ public final class Engine {
     private Measure measure(ModelConfig cfg, HfTokenizer tok, HfRepo.Plan plan, int accel, int nThreads, int batch,
                             int budget, float[] reference) {
         Measure r = new Measure();
-        EmbeddingGemma2 m = null;
+        Embedder m = null;
         try {
             m = createModel(cfg, tok, plan, accel, nThreads, batch);
             List<io.github.teoplaydor.semsearch.core.ImagePreprocessor.Source> imgs =
@@ -1145,6 +1432,29 @@ public final class Engine {
         return r;
     }
 
+    /** Marks a risky accelerator run (NPU driver, LiteRT-LM native code): a crash inside disables that variant. */
+    private void probe(int accel, boolean on) {
+        String key = isNpu(accel) ? "npu_probe" : isLiteRt(accel) ? "litert_probe" : null;
+        if (key == null) return;
+        if (on) prefs.edit().putString(key, String.valueOf(accel)).commit();
+        else prefs.edit().remove(key).commit();
+    }
+
+    /** Phone and chip, for the speed report (Build.SOC_MODEL is API 31+). */
+    static String device() {
+        String soc = null;
+        if (android.os.Build.VERSION.SDK_INT >= 31) {
+            try {
+                soc = (String) android.os.Build.class.getField("SOC_MODEL").get(null);
+            } catch (Exception ignored) {
+                // not available
+            }
+        }
+        return android.os.Build.MANUFACTURER + " " + android.os.Build.MODEL
+                + (soc != null && !soc.isEmpty() && !"unknown".equalsIgnoreCase(soc) ? ", чип " + soc : "")
+                + ", Android " + android.os.Build.VERSION.SDK_INT;
+    }
+
     /** One profiled run of the vision encoder with variant {@code c}: which ops its accelerator left to the CPU. */
     private String profileVision(ModelConfig cfg, HfTokenizer tok, HfRepo.Plan plan, int[] c, int budget) {
         File dir = ctx.getCacheDir();
@@ -1152,7 +1462,7 @@ public final class Engine {
         try {
             EmbeddingGemma2.profileVision = new File(dir, "vision-profile").getPath();
             try {
-                m = createModel(cfg, tok, plan, c[0], c[1], c[2]);
+                m = (EmbeddingGemma2) createModel(cfg, tok, plan, c[0], c[1], c[2]);
             } finally {
                 EmbeddingGemma2.profileVision = null;
             }
@@ -1200,29 +1510,42 @@ public final class Engine {
                     HfTokenizer tok = EmbeddingGemma2.loadTokenizer(modelDir);
                     int budget = photoBudget();
                     int auto = autoThreads(), cores = Runtime.getRuntime().availableProcessors();
+                    rep.append(device()).append('\n');
                     rep.append(autoDetail() ? "Детализация авто: подбор на " + budget + " токенах (обычные фото)"
                             : "Детализация " + budget + " токенов").append(", ядер ").append(cores)
                             .append(", быстрых ").append(auto).append("\n(картинка + текст на одно фото)\n\n");
 
                     List<int[]> plan1 = new ArrayList<int[]>(); // {accel, threads, batch}
                     boolean fp32 = plan.accelVision != null && new File(modelDir, plan.accelVision).exists();
-                    for (int a = 0; a < ACCEL_NAMES.length; a++) {
+                    boolean fp16 = plan.fp16Vision != null && new File(modelDir, plan.fp16Vision).exists();
+                    boolean lrt = liteRtInstalled();
+                    // With an index of LiteRT-LM vectors only its variants are comparable; its CPU run is the reference.
+                    final boolean space = liteRtSpace();
+                    int[] order = space ? new int[]{ACCEL_LITERT_CPU, ACCEL_LITERT_GPU} : new int[ACCEL_NAMES.length];
+                    if (!space) for (int a = 0; a < order.length; a++) order[a] = a;
+                    for (int a : order) {
                         if (isGpu(a) && gpuBroken()) continue;
+                        if (a == ACCEL_GPU_FP16 && !fp16) continue;
                         if (isNpu(a) && (!fp32 || npuBroken(a))) {
                             if (fp32) rep.append("• ").append(ACCEL_NAMES[a]).append(": пропущено — в прошлый раз уронило драйвер\n");
+                            continue;
+                        }
+                        if (isLiteRt(a) && (!lrt || liteRtBroken(a))) {
+                            if (lrt) rep.append("• ").append(ACCEL_NAMES[a]).append(": пропущено — в прошлый раз приложение упало\n");
                             continue;
                         }
                         plan1.add(new int[]{a, auto, 1});
                     }
                     float[] reference = null;
-                    int[] best = null;
-                    double bestMs = Double.MAX_VALUE;
+                    int[] best = null, offer = null;
+                    double bestMs = Double.MAX_VALUE, offerMs = Double.MAX_VALUE;
+                    float offerCos = 0;
                     int step = 0;
                     for (int phase = 0; phase < 3; phase++) {
                         List<int[]> cands = new ArrayList<int[]>();
                         if (phase == 0) {
                             cands.addAll(plan1);
-                        } else if (phase == 1 && best != null) {
+                        } else if (phase == 1 && best != null && best[0] != ACCEL_LITERT_GPU) { // threads: CPU work only
                             java.util.LinkedHashSet<Integer> ts = new java.util.LinkedHashSet<Integer>();
                             ts.add(Math.min(cores, auto + 2));
                             ts.add(Math.max(2, cores / 2));
@@ -1238,9 +1561,9 @@ public final class Engine {
                             status = "Подбираю ускорение (" + step + "): " + name;
                             notifyChanged();
                             mark("подбор ускорения: " + name);
-                            if (isNpu(c[0])) prefs.edit().putString("npu_probe", String.valueOf(c[0])).commit();
+                            probe(c[0], true);
                             Measure m = measure(cfg, tok, plan, c[0], c[1], c[2], budget, reference);
-                            prefs.edit().remove("npu_probe").commit();
+                            probe(c[0], false);
                             mark("");
                             if (m.error != null) {
                                 rep.append("• ").append(name).append(": не работает — ").append(m.error).append('\n');
@@ -1248,13 +1571,24 @@ public final class Engine {
                             }
                             if (reference == null) reference = m.emb;
                             boolean ok = m.cos >= 0.98f;
-                            rep.append(String.format(java.util.Locale.ROOT, "• %s: %.2f с (%.2f + %.2f)%s%s\n", name,
-                                    m.perPhotoMs / 1000.0, m.visionMs / 1000.0, m.textMs / 1000.0,
+                            // LiteRT-LM is Google's own quantisation of the model: close, but maybe not close enough
+                            // to share an index with the ONNX vectors — then it is offered with a re-index instead
+                            boolean ownSpace = !space && isLiteRt(c[0]);
+                            rep.append(String.format(java.util.Locale.ROOT, "• %s: %s%s%s\n", name, isLiteRt(c[0])
+                                            ? String.format(java.util.Locale.ROOT, "%.2f с", m.perPhotoMs / 1000.0)
+                                            : String.format(java.util.Locale.ROOT, "%.2f с (%.2f + %.2f)", m.perPhotoMs / 1000.0,
+                                            m.visionMs / 1000.0, m.textMs / 1000.0),
                                     reference == m.emb ? "" : String.format(java.util.Locale.ROOT, ", совпадение %.3f", m.cos),
-                                    ok ? "" : " — отклонено, результат расходится"));
+                                    ok ? "" : ownSpace ? " — векторы отличаются от ONNX-версии" : " — отклонено, результат расходится"));
                             if (ok && m.perPhotoMs < bestMs) {
                                 bestMs = m.perPhotoMs;
                                 best = c;
+                            }
+                            if (ownSpace) prefs.edit().putFloat("litert_cos_" + c[0], m.cos).apply();
+                            if (ownSpace && !ok && m.perPhotoMs < offerMs) {
+                                offerMs = m.perPhotoMs;
+                                offer = c;
+                                offerCos = m.cos;
                             }
                         }
                     }
@@ -1263,6 +1597,15 @@ public final class Engine {
                             .putInt("batch", best[2]).putBoolean("accel_chosen", true).apply();
                     rep.append(String.format(java.util.Locale.ROOT, "\nВыбрано: %s, потоков %d%s — %.2f с на фото (%d токенов)",
                             ACCEL_NAMES[best[0]], best[1], best[2] > 1 ? ", пачка " + best[2] : "", bestMs / 1000.0, budget));
+                    if (offer != null && offerMs < bestMs / 1.15) {
+                        prefs.edit().putInt("litert_offer", offer[0]).putInt("litert_offer_ms", (int) offerMs).apply();
+                        rep.append(String.format(java.util.Locale.ROOT, "\n\n%s быстрее в %.1f раза: %.2f с на фото, но его векторы "
+                                        + "немного отличаются от ONNX-версии (совпадение %.3f), и смешивать их в одном индексе нельзя. "
+                                        + "Перейти можно с переиндексацией всей галереи: «Перейти на LiteRT-LM» в настройках.",
+                                ACCEL_NAMES[offer[0]], bestMs / offerMs, offerMs / 1000.0, offerCos));
+                    } else {
+                        prefs.edit().remove("litert_offer").apply();
+                    }
                     // the same choice at the other end of the detail scale
                     int other = budget == PHOTO_BUDGETS[0] ? PHOTO_BUDGETS[PHOTO_BUDGETS.length - 1] : PHOTO_BUDGETS[0];
                     // the NPU graph is compiled for at most maxBudget() tokens
@@ -1271,14 +1614,15 @@ public final class Engine {
                         status = "Подбираю ускорение: детализация " + other;
                         notifyChanged();
                         mark("подбор ускорения: " + ACCEL_NAMES[best[0]] + ", детализация " + other);
-                        if (isNpu(best[0])) prefs.edit().putString("npu_probe", String.valueOf(best[0])).commit();
+                        probe(best[0], true);
                         Measure o = measure(cfg, tok, plan, best[0], best[1], best[2], other, null);
-                        prefs.edit().remove("npu_probe").commit();
+                        probe(best[0], false);
                         mark("");
                         if (o.error != null) {
                             rep.append("\nПри ").append(other).append(" токенах не работает — ").append(o.error);
                         } else {
-                            String t = String.format(java.util.Locale.ROOT, "%.2f с (%.2f + %.2f)", o.perPhotoMs / 1000.0,
+                            String t = isLiteRt(best[0]) ? String.format(java.util.Locale.ROOT, "%.2f с", o.perPhotoMs / 1000.0)
+                                    : String.format(java.util.Locale.ROOT, "%.2f с (%.2f + %.2f)", o.perPhotoMs / 1000.0,
                                     o.visionMs / 1000.0, o.textMs / 1000.0);
                             if (autoDetail()) rep.append("\nСкриншоты и документы (").append(other).append(" токенов): ").append(t);
                             else if (other < budget) rep.append("\nС детализацией «Авто» обычные фото шли бы за ").append(t)
@@ -1296,7 +1640,15 @@ public final class Engine {
                         prefs.edit().remove("npu_probe").commit();
                         mark("");
                     }
-                    if (!fp32 && FastModel.acceleratorLikely()) {
+                    if (!space && (!fp16 || !lrt)) {
+                        rep.append("\n\n").append(!fp16 && !lrt ? "fp16-версия и LiteRT-LM не проверены"
+                                : !fp16 ? "fp16-версия не проверена" : "LiteRT-LM не проверен")
+                                .append(": кнопка «Проверить LiteRT-LM и fp16» в настройках.");
+                    }
+                    if (liteRtLoadIssues != null && lrt) {
+                        rep.append("\n\nLiteRT-LM: не загрузились необязательные библиотеки — ").append(liteRtLoadIssues);
+                    }
+                    if (!fp32 && FastModel.acceleratorLikely() && !space) {
                         rep.append(String.format(java.util.Locale.ROOT, "\n\nNPU не проверен: ему нужна полная версия визуального "
                                 + "энкодера (≈%d МБ) — кнопка «Проверить NPU» в настройках.", gemmaFp32EstimateBytes() >> 20));
                     }
@@ -1548,13 +1900,13 @@ public final class Engine {
                     // slow side: EmbeddingGemma 2 with its vision encoder; it also takes over notes meanwhile
                     if (testCompare != null) {
                         c.slowModel = testCompare[1];
-                    } else if (photo instanceof EmbeddingGemma2) {
+                    } else if (isGemma(photo)) {
                         c.slowModel = photo;
                     } else {
                         HfRepo.Plan g = gemmaPlan();
                         if (g == null) throw new IllegalStateException("EmbeddingGemma 2 не скачана");
-                        EmbeddingGemma2 full = loadGemma(g, true);
-                        if (model instanceof EmbeddingGemma2 && model != photo) {
+                        Embedder full = loadGemma(g, true);
+                        if (isGemma(model) && model != photo) {
                             model.close();
                             model = full; // same text model, now with pictures: serves notes too
                         } else {

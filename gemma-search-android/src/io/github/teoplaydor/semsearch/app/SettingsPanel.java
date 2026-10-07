@@ -31,7 +31,8 @@ final class SettingsPanel extends FrameLayout implements Engine.Listener {
     // live parts
     private TextView modelValue, modelHint, indexValue, indexStatus, accelValue, photosValue, videosValue, detailValue,
             threadsValue, bridgeValue, dimsValue, photoModelValue, gemmaValue, sourceValue, sideValue;
-    private TextView modelButton, indexButton, errorButton, deleteButton, fp32Button, reportLink, compareButton, fp32Delete;
+    private TextView modelButton, indexButton, errorButton, deleteButton, fp32Button, reportLink, compareButton, fp32Delete,
+            speedButton, liteRtSwitch, liteRtLeave, fp16Delete, liteRtDelete;
     private ProgressLine modelProgress, indexProgress;
     private Toggle autoToggle, idleToggle, batteryToggle;
     private View batteryRow;
@@ -89,6 +90,33 @@ final class SettingsPanel extends FrameLayout implements Engine.Listener {
     // ------------------------------------------------------------------ building blocks
 
     /** "NPU (NNAPI, fp32)" → "NPU, fp32", "Видеокарта (WebGPU)" → "Видеокарта". */
+    private void confirmSwitchToLiteRt() {
+        IndexStore s = e.store();
+        int n = s == null ? 0 : s.count(IndexStore.KIND_PHOTO) + s.count(IndexStore.KIND_VIDEO);
+        int ms = e.prefs().getInt("litert_offer_ms", 0);
+        String eta = ms > 0 && n > 0 ? String.format(Locale.ROOT, " (≈%d мин при %.2f с на фото)", Math.max(1, Math.round(n * ms / 60000.0)),
+                ms / 1000.0) : "";
+        Sheet.confirm(root(), "Перейти на LiteRT-LM?", "Векторы LiteRT-LM немного отличаются от текущих, поэтому индекс "
+                + "будет построен заново: " + n + " фото и видео" + eta + ", заметки тоже. Пока идёт переиндексация, поиск "
+                + "находит только уже готовое. Вернуться можно в любой момент, тоже с переиндексацией.", "Перейти",
+                new Runnable() {
+                    @Override
+                    public void run() {
+                        e.switchToLiteRt();
+                    }
+                });
+    }
+
+    private void confirmLeaveLiteRt() {
+        Sheet.confirm(root(), "Вернуться на ONNX Runtime?", "Индекс построен LiteRT-LM; для ONNX-версии модели он будет "
+                + "построен заново, затем подбор снова выберет самое быстрое ускорение.", "Вернуться", new Runnable() {
+                    @Override
+                    public void run() {
+                        e.leaveLiteRt();
+                    }
+                });
+    }
+
     private static String shortAccel(String name) {
         return name.replace(" (NNAPI, fp32)", ", fp32").replace(" (NNAPI)", "").replace(" (WebGPU)", "");
     }
@@ -539,6 +567,30 @@ final class SettingsPanel extends FrameLayout implements Engine.Listener {
                             a.toast("Сначала «Проверить NPU»: нужна полная версия визуального энкодера");
                             return;
                         }
+                        if ((i == Engine.ACCEL_GPU_FP16 && e.gemmaFp16Vision() == null) || (Engine.isLiteRt(i) && !e.liteRtInstalled())) {
+                            a.toast("Сначала «Проверить LiteRT-LM и fp16»: этой версии ещё нет на телефоне");
+                            return;
+                        }
+                        if (Engine.isLiteRt(i) && e.liteRtBroken(i)) {
+                            a.toast("Этот вариант LiteRT-LM уже приводил к сбою — не включаю");
+                            return;
+                        }
+                        if (e.liteRtSpace() && !Engine.isLiteRt(i)) {
+                            confirmLeaveLiteRt();
+                            return;
+                        }
+                        if (Engine.isLiteRt(i) && !e.liteRtSpace()) {
+                            float cos = e.prefs().getFloat("litert_cos_" + i, -1);
+                            if (cos < 0) {
+                                a.toast("Сначала «Подобрать самое быстрое»: проверю, совпадают ли векторы LiteRT-LM с индексом");
+                                return;
+                            }
+                            if (cos < 0.98f) {
+                                e.prefs().edit().putInt("litert_offer", i).apply();
+                                confirmSwitchToLiteRt();
+                                return;
+                            }
+                        }
                         e.prefs().edit().putInt("accel", i).apply();
                         if (e.ready() && !e.indexing) e.loadModel();
                         onEngineChanged();
@@ -585,6 +637,64 @@ final class SettingsPanel extends FrameLayout implements Engine.Listener {
                             @Override
                             public void run() {
                                 e.deleteGemmaFp32();
+                            }
+                        });
+            }
+        });
+        speedButton = action(card, "Проверить LiteRT-LM и fp16", false, new Runnable() {
+            @Override
+            public void run() {
+                boolean fp16 = e.gemmaFp16Vision() == null;
+                long mb = e.gemmaFp32EstimateBytes() / 2 >> 20; // fp16 weights: half the fp32 estimate
+                boolean lrt = !e.liteRtInstalled();
+                Sheet.confirm(root(), "Проверить LiteRT-LM и fp16?", (fp16 ? "• fp16-версия визуальной части для видеокарты"
+                        + (mb > 0 ? String.format(Locale.ROOT, " (≈%d МБ)", mb) : "") + ": мобильные видеокарты считают fp16 "
+                        + "быстрее, а памяти она гоняет вдвое меньше.\n" : "")
+                        + (lrt ? "• LiteRT-LM — движок Google со своей сборкой EmbeddingGemma 2 и своими ядрами для "
+                        + "видеокарты (≈0,4–0,5 ГБ: модель и библиотеки движка с серверов Google).\n" : "")
+                        + "\nПотом подбор сравнит скорость и точность всех вариантов и оставит самый быстрый из точных.",
+                        "Докачать и проверить", new Runnable() {
+                            @Override
+                            public void run() {
+                                e.downloadSpeedups();
+                            }
+                        });
+            }
+        });
+        liteRtSwitch = action(card, "Перейти на LiteRT-LM", true, new Runnable() {
+            @Override
+            public void run() {
+                confirmSwitchToLiteRt();
+            }
+        });
+        liteRtLeave = quiet(card, "Вернуться на ONNX Runtime", Ui.ACCENT, new Runnable() {
+            @Override
+            public void run() {
+                confirmLeaveLiteRt();
+            }
+        });
+        fp16Delete = quiet(card, "Удалить fp16-версию", Ui.DANGER, new Runnable() {
+            @Override
+            public void run() {
+                Sheet.confirm(root(), "Удалить fp16-версию?", String.format(Locale.ROOT, "Освободится ≈%d МБ. Сейчас она не "
+                        + "используется; «Проверить LiteRT-LM и fp16» скачает её снова.", e.gemmaFp16Bytes() >> 20), "Удалить",
+                        new Runnable() {
+                            @Override
+                            public void run() {
+                                e.deleteGemmaFp16();
+                            }
+                        });
+            }
+        });
+        liteRtDelete = quiet(card, "Удалить LiteRT-LM", Ui.DANGER, new Runnable() {
+            @Override
+            public void run() {
+                Sheet.confirm(root(), "Удалить LiteRT-LM?", String.format(Locale.ROOT, "Освободится ≈%d МБ. Сейчас он не "
+                        + "используется; «Проверить LiteRT-LM и fp16» скачает его снова.", e.liteRtBytes() >> 20), "Удалить",
+                        new Runnable() {
+                            @Override
+                            public void run() {
+                                e.deleteLiteRt();
                             }
                         });
             }
@@ -718,6 +828,17 @@ final class SettingsPanel extends FrameLayout implements Engine.Listener {
         fp32Button.setVisibility((fast ? e.fastNeedsFp32() : e.gemmaNeedsFp32()) && !busy && FastModel.acceleratorLikely()
                 ? VISIBLE : GONE);
         fp32Delete.setVisibility(!fast && !busy && e.gemmaFp32Vision() != null && !Engine.isNpu(e.accel()) ? VISIBLE : GONE);
+        speedButton.setVisibility(!fast && !busy && e.speedupsMissing() ? VISIBLE : GONE);
+        liteRtSwitch.setVisibility(!fast && !busy && e.liteRtOffer() >= 0 ? VISIBLE : GONE);
+        liteRtLeave.setVisibility(!fast && !busy && e.liteRtSpace() ? VISIBLE : GONE);
+        fp16Delete.setVisibility(!fast && !busy && e.gemmaFp16Vision() != null && e.accel() != Engine.ACCEL_GPU_FP16 ? VISIBLE : GONE);
+        if (fp16Delete.getVisibility() == VISIBLE) {
+            fp16Delete.setText(String.format(Locale.ROOT, "Удалить fp16-версию (%d МБ)", e.gemmaFp16Bytes() >> 20));
+        }
+        // also a download that stopped halfway (hundreds of MB) can go
+        boolean lrtUnused = !fast && !busy && !e.liteRtSpace() && !Engine.isLiteRt(e.accel()) && e.liteRtBytes() > 0;
+        liteRtDelete.setVisibility(lrtUnused ? VISIBLE : GONE);
+        if (lrtUnused) liteRtDelete.setText(String.format(Locale.ROOT, "Удалить LiteRT-LM (%d МБ)", e.liteRtBytes() >> 20));
         if (fp32Delete.getVisibility() == VISIBLE) {
             fp32Delete.setText(String.format(Locale.ROOT, "Удалить версию для NPU (%d МБ)", e.gemmaFp32Bytes() >> 20));
         }
