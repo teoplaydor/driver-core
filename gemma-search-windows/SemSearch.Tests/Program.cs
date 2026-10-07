@@ -294,8 +294,9 @@ internal static class Program
             l.Start();
             port = ((System.Net.IPEndPoint)l.LocalEndpoint).Port;
         }
-        using var server = System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo("python3", $"\"{mockHub}\" {port}")
+        using var server = System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo("python3", $"\"{mockHub}\" {port} stall")
             { UseShellExecute = false, RedirectStandardOutput = true, RedirectStandardError = true });
+        HfRepo.StallTimeout = TimeSpan.FromSeconds(2);
         try
         {
             string host = "http://127.0.0.1:" + port;
@@ -315,15 +316,18 @@ internal static class Program
 
             string dir = Path.Combine(Path.GetTempPath(), "semsearch-hub-test");
             if (Directory.Exists(dir)) Directory.Delete(dir, true);
-            hub.DownloadAsync(plan, dir, null, default).GetAwaiter().GetResult(); // the mock drops model_q4.onnx_data once
+            // the mock drops model_q4.onnx_data once and goes silent on model_q4.onnx_data_1 once (for 30 s)
+            var took = System.Diagnostics.Stopwatch.StartNew();
+            hub.DownloadAsync(plan, dir, null, default).GetAwaiter().GetResult();
             bool same = plan.Files.All(f =>
             {
                 byte[] got = File.ReadAllBytes(Path.Combine(dir, f.Path));
                 int seed = Encoding.UTF8.GetBytes(f.Path).Sum(b => b);
                 return got.Length == f.Size && got.Select((b, i) => b == (seed + i * 31L) % 251).All(x => x);
             });
-            Check(same && HfRepo.IsComplete(plan, dir) && !Directory.EnumerateFiles(dir, "*.part", SearchOption.AllDirectories).Any(),
-                "hub download: resumed after a dropped connection, every byte matches");
+            Check(same && HfRepo.IsComplete(plan, dir) && !Directory.EnumerateFiles(dir, "*.part", SearchOption.AllDirectories).Any()
+                  && took.Elapsed.TotalSeconds < 20,
+                $"hub download: resumed after a dropped and a silent connection in {took.Elapsed.TotalSeconds:F1} s, every byte matches");
             string err = null;
             try { new HfRepo("someone/private", null, host).ListFilesAsync(default).GetAwaiter().GetResult(); }
             catch (IOException e) { err = e.Message; }
@@ -391,6 +395,25 @@ internal static class Program
             try { RemoteZip.ExtractAsync(url, "nope.dll", outFile + "3", Sha(stored), null, default).GetAwaiter().GetResult(); }
             catch (IOException e) { missing = e.Message; }
             Check(bad != null && !File.Exists(outFile + "2") && missing != null, "remote zip: wrong checksum and missing entry are refused");
+
+            RemoteZip.StallTimeout = TimeSpan.FromSeconds(1);
+            var sw0 = System.Diagnostics.Stopwatch.StartNew();
+            var hosts = new List<string>();
+            var sources = new[]
+            {
+                new RemoteZip.Source { Url = $"http://127.0.0.1:{port}/stall.zip", Entry = "bin/x64-win/DirectML.dll", Sha256 = Sha(text) },
+                new RemoteZip.Source { Url = $"http://127.0.0.1:{port}/missing.zip", Entry = "bin/x64-win/DirectML.dll", Sha256 = Sha(text) },
+                new RemoteZip.Source { Url = url, Entry = "bin/x64-win/DirectML.dll", Sha256 = Sha(text) },
+            };
+            string fb = Path.Combine(dir, "fallback.dll");
+            RemoteZip.ExtractFirstAsync(sources, fb, h => hosts.Add(h), null, default).GetAwaiter().GetResult();
+            Check(File.ReadAllBytes(fb).SequenceEqual(text) && hosts.Count == 3 && sw0.Elapsed.TotalSeconds < 15,
+                $"remote zip: silent and missing sources skipped in {sw0.Elapsed.TotalSeconds:F1} s, third source used");
+            string all = null;
+            try { RemoteZip.ExtractFirstAsync(sources.Take(2).ToList(), fb + "2", null, null, default).GetAwaiter().GetResult(); }
+            catch (IOException e) { all = e.Message; }
+            Check(all != null && all.Contains("нет ответа") && all.Contains("HTTP 404"), "remote zip: all sources down → one message with each reason: " + all);
+            RemoteZip.StallTimeout = TimeSpan.FromSeconds(15);
             if (File.Exists(nupkg))
             {
                 long last = 0;

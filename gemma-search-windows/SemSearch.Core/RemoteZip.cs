@@ -18,19 +18,58 @@ namespace SemSearch.Core
     /// </summary>
     public static class RemoteZip
     {
+        /// <summary>One place to get the file from; any host is fine since the result must match <see cref="Sha256"/>.</summary>
+        public sealed class Source
+        {
+            public string Url, Entry, Sha256;
+            public string Host => new Uri(Url).Host;
+        }
+
+        /// <summary>How long a request may go without any bytes (headers or body) before it counts as failed.</summary>
+        public static TimeSpan StallTimeout = TimeSpan.FromSeconds(15);
+
+        private const int Attempts = 2;
+
         private static readonly HttpClient Http = CreateClient();
 
         private static HttpClient CreateClient()
         {
-            var c = new HttpClient { Timeout = TimeSpan.FromMinutes(10) };
+            var c = new HttpClient(new SocketsHttpHandler { ConnectTimeout = TimeSpan.FromSeconds(15) })
+                { Timeout = Timeout.InfiniteTimeSpan };
             c.DefaultRequestHeaders.UserAgent.ParseAdd("SemSearch-Windows/0.1");
             return c;
+        }
+
+        /// <summary>
+        /// Tries the sources in order until one delivers the verified file. <paramref name="status"/> gets the host being
+        /// tried; the exception of the last failure lists why every source failed.
+        /// </summary>
+        public static async Task ExtractFirstAsync(System.Collections.Generic.IList<Source> sources, string dest, Action<string> status,
+                                                   Action<string, long, long> progress, CancellationToken ct)
+        {
+            var why = new StringBuilder();
+            foreach (var src in sources)
+            {
+                status?.Invoke(src.Host);
+                try
+                {
+                    await ExtractAsync(src.Url, src.Entry, dest, src.Sha256, (d, t) => progress?.Invoke(src.Host, d, t), ct);
+                    return;
+                }
+                catch (Exception e) when (!ct.IsCancellationRequested && (e is IOException || e is HttpRequestException))
+                {
+                    if (why.Length > 0) why.Append("; ");
+                    why.Append(src.Host).Append(" — ").Append(e.Message);
+                }
+            }
+            throw new IOException(why.ToString());
         }
 
         public static async Task ExtractAsync(string url, string entry, string dest, string sha256, Action<long, long> progress,
                                               CancellationToken ct)
         {
-            byte[] tail = await RangeAsync(url, null, 65536 + 22, ct);
+            // A host that does not answer the first request is filtered or down: no retry, the next source is tried.
+            byte[] tail = await RangeAsync(url, null, 65536 + 22, ct, attempts: 1);
             int eocd = -1;
             for (int i = tail.Length - 22; i >= 0; i--)
                 if (U32(tail, i) == 0x06054b50) { eocd = i; break; }
@@ -86,26 +125,45 @@ namespace SemSearch.Core
             File.Move(tmp, dest, true);
         }
 
-        /// <summary>Bytes [from, from + count), or the last <paramref name="count"/> bytes when from is null; retried on network errors.</summary>
-        private static async Task<byte[]> RangeAsync(string url, long? from, long count, CancellationToken ct, Action<long, long> progress = null)
+        /// <summary>Bytes [from, from + count), or the last <paramref name="count"/> bytes when from is null; retried once on network errors.</summary>
+        private static async Task<byte[]> RangeAsync(string url, long? from, long count, CancellationToken ct, Action<long, long> progress = null,
+                                                    int attempts = Attempts)
         {
             for (int attempt = 1; ; attempt++)
             {
                 try
                 {
+                    return await RangeOnceAsync(url, from, count, ct, progress);
+                }
+                catch (Exception e) when (attempt < attempts && !ct.IsCancellationRequested && (e is HttpRequestException || e is IOException))
+                {
+                    await Task.Delay(TimeSpan.FromSeconds(1), ct);
+                }
+            }
+        }
+
+        private static async Task<byte[]> RangeOnceAsync(string url, long? from, long count, CancellationToken ct, Action<long, long> progress)
+        {
+            // A stalled connection (filtered host, broken proxy) must fail in seconds, not hang the caller.
+            using (var stall = CancellationTokenSource.CreateLinkedTokenSource(ct))
+            {
+                stall.CancelAfter(StallTimeout);
+                try
+                {
                     var req = new HttpRequestMessage(HttpMethod.Get, url);
                     req.Headers.Range = from.HasValue ? new RangeHeaderValue(from, from + count - 1) : new RangeHeaderValue(null, count);
-                    using (var resp = await Http.SendAsync(req, HttpCompletionOption.ResponseHeadersRead, ct))
+                    using (var resp = await Http.SendAsync(req, HttpCompletionOption.ResponseHeadersRead, stall.Token))
                     {
                         if (resp.StatusCode != HttpStatusCode.PartialContent)
                             throw new IOException("сервер не отдал часть файла (HTTP " + (int)resp.StatusCode + ")");
-                        using (var s = await resp.Content.ReadAsStreamAsync(ct))
+                        using (var s = await resp.Content.ReadAsStreamAsync(stall.Token))
                         using (var ms = new MemoryStream())
                         {
                             var buf = new byte[1 << 16];
                             int n;
-                            while ((n = await s.ReadAsync(buf, 0, buf.Length, ct)) > 0)
+                            while ((n = await s.ReadAsync(buf, 0, buf.Length, stall.Token)) > 0)
                             {
+                                stall.CancelAfter(StallTimeout);
                                 ms.Write(buf, 0, n);
                                 progress?.Invoke(ms.Length, count);
                             }
@@ -114,9 +172,9 @@ namespace SemSearch.Core
                         }
                     }
                 }
-                catch (Exception e) when (attempt < 4 && !ct.IsCancellationRequested && (e is HttpRequestException || e is IOException))
+                catch (OperationCanceledException) when (!ct.IsCancellationRequested)
                 {
-                    await Task.Delay(TimeSpan.FromSeconds(1 << (attempt - 1)), ct);
+                    throw new IOException("нет ответа " + (int)StallTimeout.TotalSeconds + " с");
                 }
             }
         }

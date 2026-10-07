@@ -59,7 +59,8 @@ namespace SemSearch.Core
 
         public async Task<List<RemoteFile>> ListFilesAsync(CancellationToken ct)
         {
-            using (var resp = await Http.SendAsync(Request(host + "/api/models/" + repo + "?blobs=true", 0), ct))
+            using (var limit = CancellationTokenSource.CreateLinkedTokenSource(ct))
+            using (var resp = await Stalled(() => Http.SendAsync(Request(host + "/api/models/" + repo + "?blobs=true", 0), limit.Token), limit, ct))
             {
                 if (resp.StatusCode == HttpStatusCode.Unauthorized || resp.StatusCode == HttpStatusCode.Forbidden)
                     throw new IOException("Доступ к " + repo + " закрыт (HTTP " + (int)resp.StatusCode + "). Укажите токен Hugging Face.");
@@ -137,6 +138,23 @@ namespace SemSearch.Core
 
         private const int MaxAttempts = 5;
 
+        /// <summary>How long a request may go without any bytes before it is dropped and resumed.</summary>
+        public static TimeSpan StallTimeout = TimeSpan.FromSeconds(60);
+
+        /// <summary>Runs one network step under the stall timer: a silent connection becomes an IOException (retried).</summary>
+        private static async Task<T> Stalled<T>(Func<Task<T>> step, CancellationTokenSource stall, CancellationToken user)
+        {
+            stall.CancelAfter(StallTimeout);
+            try
+            {
+                return await step();
+            }
+            catch (OperationCanceledException) when (!user.IsCancellationRequested)
+            {
+                throw new IOException("нет ответа от сервера " + (int)StallTimeout.TotalSeconds + " с");
+            }
+        }
+
         /// <summary>An answer that retrying cannot change (no access, no such file).</summary>
         private sealed class AccessError : IOException
         {
@@ -154,8 +172,9 @@ namespace SemSearch.Core
                 File.Delete(part);
                 have = 0;
             }
-            using (var resp = await Http.SendAsync(Request(host + "/" + repo + "/resolve/main/" + f.Path, have),
-                       HttpCompletionOption.ResponseHeadersRead, ct))
+            using (var stall = CancellationTokenSource.CreateLinkedTokenSource(ct))
+            using (var resp = await Stalled(() => Http.SendAsync(Request(host + "/" + repo + "/resolve/main/" + f.Path, have),
+                       HttpCompletionOption.ResponseHeadersRead, stall.Token), stall, ct))
             {
                 if (resp.StatusCode == HttpStatusCode.RequestedRangeNotSatisfiable && f.Size >= 0 && have == f.Size)
                 {
@@ -177,7 +196,7 @@ namespace SemSearch.Core
                         var buf = new byte[1 << 16];
                         long last = 0;
                         int n;
-                        while ((n = await input.ReadAsync(buf, 0, buf.Length, ct)) > 0)
+                        while ((n = await Stalled(() => input.ReadAsync(buf, 0, buf.Length, stall.Token), stall, ct)) > 0)
                         {
                             await output.WriteAsync(buf, 0, n, ct);
                             have += n;

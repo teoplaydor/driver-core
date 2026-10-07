@@ -1,11 +1,13 @@
 """Minimal Hugging Face Hub stand-in for HfRepoTest: model info API + resolve with Range,
 and a one-time mid-file disconnect to exercise resumable downloads.
 
-usage: python3 mock_hub.py <port>
+usage: python3 mock_hub.py <port> [stall]
+  stall: model_q4.onnx_data_1 goes silent mid-file once instead of disconnecting (client stall timeout)
 """
 import json
 import os
 import sys
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 FILES = {
@@ -18,6 +20,7 @@ FILES = {
 }
 REPO = "onnx-community/embeddinggemma-2-ONNX"
 cut_once = {"onnx/model_q4.onnx_data"}
+stall_once = {"onnx/model_q4.onnx_data_1"} if "stall" in sys.argv[2:] else set()
 
 
 def content(name, size):
@@ -57,6 +60,12 @@ class H(BaseHTTPRequestHandler):
                 self.send_response(200)
             self.send_header("Content-Length", str(len(data) - start))
             self.end_headers()
+            if name in stall_once and start == 0:
+                stall_once.discard(name)
+                self.wfile.write(data[: len(data) // 2])
+                self.wfile.flush()
+                time.sleep(30)
+                return
             if name in cut_once and start == 0:
                 cut_once.discard(name)
                 self.wfile.write(data[: len(data) // 3])

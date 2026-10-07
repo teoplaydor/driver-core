@@ -1,9 +1,11 @@
-"""Static files with HTTP Range support for the RemoteZip test; drops the first large range once mid-way.
+"""Static files with HTTP Range support for the RemoteZip test; drops the first large range once mid-way,
+and never answers for paths containing "stall" (a filtered host).
 
 usage: python3 range_server.py <port> <dir>
 """
 import os
 import sys
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 ROOT = sys.argv[2]
@@ -15,6 +17,9 @@ class H(BaseHTTPRequestHandler):
         pass
 
     def do_GET(self):
+        if "stall" in self.path:
+            time.sleep(3600)
+            return
         path = os.path.join(ROOT, os.path.basename(self.path))
         if not os.path.isfile(path):
             self.send_response(404)

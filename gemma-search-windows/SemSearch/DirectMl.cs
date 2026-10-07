@@ -16,10 +16,32 @@ namespace SemSearch
     /// </summary>
     internal static class DirectMl
     {
-        private const string Url = "https://api.nuget.org/v3-flatcontainer/microsoft.ai.directml/1.15.4/microsoft.ai.directml.1.15.4.nupkg";
-        private const string Entry = "bin/x64-win/DirectML.dll";
-        private const string Sha256 = "9c9e6d822561c6c41b90e6994b3e8857cf1d66dbfb1e0c4c799c7c89b4e92da1";
+        // DirectML 1.15.4 x64 as shipped in Microsoft's NuGet package and in the onnxruntime-directml 1.24.4 wheel:
+        // the same signed code (identical Authenticode digest), the two files differ only in the signature block.
+        private const string NugetSha256 = "9c9e6d822561c6c41b90e6994b3e8857cf1d66dbfb1e0c4c799c7c89b4e92da1";
+        private const string WheelSha256 = "b73972115320e906a49602f2027a3266622881b0d325ba685e0f165a9482a8d7";
+        private const string NugetEntry = "bin/x64-win/DirectML.dll";
         private const long Size = 18527776;
+
+        private static readonly RemoteZip.Source[] Sources =
+        {
+            new RemoteZip.Source
+            {
+                Url = "https://api.nuget.org/v3-flatcontainer/microsoft.ai.directml/1.15.4/microsoft.ai.directml.1.15.4.nupkg",
+                Entry = NugetEntry, Sha256 = NugetSha256
+            },
+            new RemoteZip.Source
+            {
+                Url = "https://files.pythonhosted.org/packages/88/ea/33814eb0ec96775eda4c1d30b0d86e91d7d2cd0d84c66d3915aef0e06fa3/"
+                      + "onnxruntime_directml-1.24.4-cp312-cp312-win_amd64.whl",
+                Entry = "onnxruntime/capi/DirectML.dll", Sha256 = WheelSha256
+            },
+            new RemoteZip.Source
+            {
+                Url = "https://globalcdn.nuget.org/packages/microsoft.ai.directml.1.15.4.nupkg",
+                Entry = NugetEntry, Sha256 = NugetSha256
+            },
+        };
 
         private static readonly object Sync = new object();
         private static bool prepared;
@@ -28,19 +50,28 @@ namespace SemSearch
 
         public static bool Downloaded => File.Exists(FilePath) && new FileInfo(FilePath).Length == Size;
 
-        public static async Task EnsureAsync(Action<long, long> progress, CancellationToken ct)
+        /// <summary>
+        /// A DirectML.dll next to the exe (offline PCs) or the first source that answers; each source gets seconds, not
+        /// minutes, when the host is filtered. The exception names every source and why it failed.
+        /// </summary>
+        public static async Task EnsureAsync(Action<string> status, Action<string, long, long> progress, CancellationToken ct)
         {
             if (Downloaded) return;
-            string local = Path.Combine(AppContext.BaseDirectory, "DirectML.dll");
-            if (File.Exists(local) && Hash(local) == Sha256)
+            // the exe's own folder: in a single-file app AppContext.BaseDirectory is the extraction folder
+            string local = Path.Combine(Path.GetDirectoryName(Environment.ProcessPath) ?? "", "DirectML.dll");
+            if (File.Exists(local) && new FileInfo(local).Length == Size && Hash(local) is string h && (h == NugetSha256 || h == WheelSha256))
             {
                 Directory.CreateDirectory(Path.GetDirectoryName(FilePath));
                 File.Copy(local, FilePath, true);
                 return;
             }
-            // SEMSEARCH_DIRECTML_URL: a mirror of the same package (also used by the tests).
-            string url = Environment.GetEnvironmentVariable("SEMSEARCH_DIRECTML_URL") ?? Url;
-            await RemoteZip.ExtractAsync(url, Entry, FilePath, Sha256, progress, ct);
+            // SEMSEARCH_DIRECTML_URL: mirrors of the NuGet package, ';'-separated (used by the tests).
+            string mirrors = Environment.GetEnvironmentVariable("SEMSEARCH_DIRECTML_URL");
+            var sources = mirrors != null
+                ? Array.ConvertAll(mirrors.Split(';', StringSplitOptions.RemoveEmptyEntries),
+                    u => new RemoteZip.Source { Url = u, Entry = NugetEntry, Sha256 = NugetSha256 })
+                : Sources;
+            await RemoteZip.ExtractFirstAsync(sources, FilePath, status, progress, ct);
         }
 
         /// <summary>

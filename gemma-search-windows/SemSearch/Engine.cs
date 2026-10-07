@@ -173,17 +173,24 @@ namespace SemSearch
         {
             try
             {
-                Status = "Скачиваю DirectML для видеокарты (~9 МБ, один раз)…";
-                Notify();
-                await DirectMl.EnsureAsync((done, total) =>
+                long lastNotify = 0;
+                await DirectMl.EnsureAsync(host =>
                 {
-                    Status = $"Скачиваю DirectML для видеокарты: {done / 1048576.0:F1} из {total / 1048576.0:F1} МБ";
+                    Status = "Скачиваю DirectML для видеокарты (~9 МБ, один раз): соединяюсь с " + host + "…";
+                    Notify();
+                }, (host, done, total) =>
+                {
+                    long now = Environment.TickCount64;
+                    if (now - lastNotify < 200 && done < total) return;
+                    lastNotify = now;
+                    Status = $"Скачиваю DirectML для видеокарты: {done / 1048576.0:F1} из {total / 1048576.0:F1} МБ ({host})";
                     Notify();
                 }, CancellationToken.None);
+                dmlError = null;
             }
             catch (Exception e)
             {
-                dmlError = e.Message;
+                dmlError = e.Message + ". Можно положить DirectML.dll рядом с SemSearch.exe";
             }
         }
 
