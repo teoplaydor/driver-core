@@ -1,0 +1,14 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>disable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\SemSearch.Core\SemSearch.Core.csproj" />
+    <!-- CPU build with Linux/macOS/Windows natives so the parity tests run anywhere. -->
+    <PackageReference Include="Microsoft.ML.OnnxRuntime" Version="1.24.4" />
+  </ItemGroup>
+</Project>

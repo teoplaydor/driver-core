@@ -1,0 +1,16 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>disable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+    <RootNamespace>SemSearch.Core</RootNamespace>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Microsoft.ML.OnnxRuntime.Managed" Version="1.24.4" />
+  </ItemGroup>
+  <ItemGroup>
+    <!-- Same dictionary as the Android app. -->
+    <EmbeddedResource Include="..\..\gemma-search-android\assets\ru_en_lexicon.txt" LogicalName="ru_en_lexicon.txt" />
+  </ItemGroup>
+</Project>

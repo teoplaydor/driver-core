@@ -11,3 +11,7 @@ obj/
 *.exe
 *.dll
 *.pdb
+
+# gemma-search-windows build output
+gemma-search-windows/out/
+gemma-search-windows/redist/

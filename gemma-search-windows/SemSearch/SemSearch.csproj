@@ -1,0 +1,53 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- WinForms via FrameworkReference so the exe builds with any .NET 8 SDK (also on Linux). -->
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <EnableWindowsTargeting>true</EnableWindowsTargeting>
+    <Nullable>disable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+    <AssemblyName>SemSearch</AssemblyName>
+    <RootNamespace>SemSearch</RootNamespace>
+    <Product>Смысловой поиск</Product>
+    <AssemblyTitle>Смысловой поиск — EmbeddingGemma 2 на ПК</AssemblyTitle>
+    <Version>0.1.0</Version>
+    <ApplicationIcon>app.ico</ApplicationIcon>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <SelfContained>true</SelfContained>
+    <PublishSingleFile>true</PublishSingleFile>
+    <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
+    <EnableCompressionInSingleFile>true</EnableCompressionInSingleFile>
+    <DebugType>none</DebugType>
+    <InvariantGlobalization>false</InvariantGlobalization>
+    <Microsoft_AI_DirectML_SkipDebugLayerCopy>true</Microsoft_AI_DirectML_SkipDebugLayerCopy>
+  </PropertyGroup>
+  <ItemGroup>
+    <FrameworkReference Include="Microsoft.WindowsDesktop.App.WindowsForms" />
+    <ProjectReference Include="..\SemSearch.Core\SemSearch.Core.csproj" />
+    <PackageReference Include="Microsoft.ML.OnnxRuntime.DirectML" Version="1.24.4" />
+  </ItemGroup>
+  <ItemGroup>
+    <!-- App-local Visual C++ runtime for onnxruntime.dll (PCs without the VC++ Redistributable); build.sh fetches it. -->
+    <Content Include="..\redist\*.dll" Link="%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+  </ItemGroup>
+  <!-- The WindowsDesktop runtime pack also carries WPF (~20 MB compressed) and the DirectML debug layer;
+       WinForms references none of it, so keep it out of the exe. -->
+  <PropertyGroup>
+    <_DropPattern>^(Presentation.*|ReachFramework|System\.Windows\.Controls\.Ribbon|System\.Windows\.Input\.Manipulations|System\.Windows\.Presentation|System\.Xaml|UIAutomation.*|WindowsBase|WindowsFormsIntegration|DirectWriteForwarder|D3DCompiler_47_cor3|PenImc_cor3|wpfgfx_cor3|DirectML\.Debug)$</_DropPattern>
+  </PropertyGroup>
+  <Target Name="DropUnusedRuntimePackAssets" AfterTargets="ResolveRuntimePackAssets">
+    <ItemGroup>
+      <RuntimePackAsset Remove="@(RuntimePackAsset)" Condition="$([System.Text.RegularExpressions.Regex]::IsMatch('%(Filename)', '$(_DropPattern)'))" />
+      <ReferenceCopyLocalPaths Remove="@(ReferenceCopyLocalPaths)" Condition="$([System.Text.RegularExpressions.Regex]::IsMatch('%(Filename)', '$(_DropPattern)'))" />
+    </ItemGroup>
+  </Target>
+  <Target Name="DropUnusedPackageAssets" AfterTargets="ResolvePackageAssets">
+    <ItemGroup>
+      <RuntimeCopyLocalItems Remove="@(RuntimeCopyLocalItems)" Condition="$([System.Text.RegularExpressions.Regex]::IsMatch('%(Filename)', '$(_DropPattern)'))" />
+      <NativeCopyLocalItems Remove="@(NativeCopyLocalItems)" Condition="$([System.Text.RegularExpressions.Regex]::IsMatch('%(Filename)', '$(_DropPattern)'))" />
+    </ItemGroup>
+  </Target>
+</Project>

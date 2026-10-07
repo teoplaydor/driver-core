@@ -28,6 +28,13 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <!-- Separate projects that live in this repository (built on their own). -->
+    <Compile Remove="gemma-search-windows\**" />
+    <None Remove="gemma-search-windows\**" />
+    <EmbeddedResource Remove="gemma-search-windows\**" />
+  </ItemGroup>
+
+  <ItemGroup>
     <Reference Include="System.Management" />
     <Reference Include="Microsoft.CSharp" />
   </ItemGroup>
