@@ -24,6 +24,7 @@ import io.github.teoplaydor.semsearch.core.HfRepo;
 import io.github.teoplaydor.semsearch.core.HfTokenizer;
 import io.github.teoplaydor.semsearch.core.ModelConfig;
 import io.github.teoplaydor.semsearch.core.OnnxPatcher;
+import io.github.teoplaydor.semsearch.core.OrtProfile;
 import io.github.teoplaydor.semsearch.core.PatternSource;
 import io.github.teoplaydor.semsearch.core.QueryBridge;
 import io.github.teoplaydor.semsearch.core.SigLip;
@@ -624,6 +625,45 @@ public final class Engine {
         });
     }
 
+    /**
+     * Deletes EmbeddingGemma's full-precision vision encoder (the NPU's graph, ≈0.7 GB) when the NPU is not
+     * the chosen accelerator. The manifest forgets it first, so an interruption leaves at worst stray files.
+     */
+    public void deleteGemmaFp32() {
+        ml.submit(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    HfRepo.Plan p = HfRepo.loadManifest(manifest);
+                    if (p == null || p.accelVision == null) return;
+                    // a model still running on the NPU graph (accelerator changed, not reloaded yet) lets go of it
+                    boolean reload = isNpu(loadedAccel) && photo != null;
+                    if (reload) closeModels();
+                    String repo = HfRepo.manifestRepo(manifest);
+                    List<String> gone = new ArrayList<String>();
+                    for (java.util.Iterator<HfRepo.RemoteFile> it = p.files.iterator(); it.hasNext(); ) {
+                        HfRepo.RemoteFile f = it.next();
+                        if (!f.path.startsWith(p.accelVision)) continue;
+                        gone.add(f.path);
+                        p.totalBytes -= Math.max(0, f.size);
+                        it.remove();
+                    }
+                    p.accelVision = null;
+                    File tmp = new File(manifest.getPath() + ".tmp");
+                    HfRepo.saveManifest(p, repo, tmp);
+                    if (!tmp.renameTo(manifest)) throw new java.io.IOException("не удалось обновить манифест");
+                    for (String g : gone) new File(modelDir, g).delete();
+                    prefs.edit().remove("npu_check_pending").apply();
+                    if (isNpu(prefs.getInt("accel", ACCEL_CPU))) prefs.edit().putInt("accel", ACCEL_CPU).apply();
+                    if (reload) loadModel();
+                } catch (Exception e) {
+                    android.util.Log.w("SemSearch", "fp32 vision not deleted", e);
+                }
+                notifyChanged();
+            }
+        });
+    }
+
     /** Removes EmbeddingGemma 2 when it only serves notes (notes then use the fast model's text side). */
     public void deleteGemma() {
         if (photoModel() == FastModel.GEMMA) {
@@ -748,7 +788,8 @@ public final class Engine {
                     int photosN = store.count(IndexStore.KIND_PHOTO) + store.count(IndexStore.KIND_VIDEO);
                     sb.append("Модель фото: ").append(FastModel.NAMES[photoModel()]).append(", ").append(accelLabel)
                             .append("\nВ индексе фото/видео: ").append(photosN)
-                            .append(photoModel() == FastModel.GEMMA ? ", детализация фото: " + photoBudget()
+                            .append(photoModel() == FastModel.GEMMA ? ", детализация фото: "
+                                    + (autoDetail() ? "авто (" + photoBudget() + "/" + maxBudget() + ")" : String.valueOf(photoBudget()))
                                     + " токенов, длина вектора поиска: " + searchDims() : "")
                             .append("\n\nRU↔EN — косинус запросов; топ-10 — сколько фото совпало с выдачей по EN\n");
                     long tq = 0;
@@ -815,7 +856,7 @@ public final class Engine {
                     Bitmap b = Media.decode(ctx.getContentResolver(), uri, 0, 900_000L);
                     float[] q;
                     try {
-                        q = embedPhoto(b);
+                        q = embedPhoto(b, maxBudget()); // one picture: the most detail
                     } finally {
                         b.recycle();
                     }
@@ -898,25 +939,46 @@ public final class Engine {
 
     // ------------------------------------------------------------------ gallery indexing
 
+    /** pref "photo_detail": 0..2 = PHOTO_BUDGETS, 3 = auto (the default). */
+    public static final int DETAIL_AUTO = 3;
+
+    public boolean autoDetail() {
+        return prefs.getInt("photo_detail", DETAIL_AUTO) == DETAIL_AUTO;
+    }
+
+    /** Budget for an ordinary photo (auto: the fast one). */
     public int photoBudget() {
-        int i = prefs.getInt("photo_detail", 0);
+        int i = prefs.getInt("photo_detail", DETAIL_AUTO);
+        if (i == DETAIL_AUTO) return PHOTO_BUDGETS[0];
         return PHOTO_BUDGETS[Math.max(0, Math.min(PHOTO_BUDGETS.length - 1, i))];
+    }
+
+    /** The largest budget in use (auto: screenshots get the most detailed one). */
+    public int maxBudget() {
+        return autoDetail() ? PHOTO_BUDGETS[PHOTO_BUDGETS.length - 1] : photoBudget();
+    }
+
+    /**
+     * Auto detail: 70 soft tokens for ordinary photos (4× fewer patches for the vision encoder), 280 for
+     * screenshots and scans, where small text decides what a picture is about.
+     */
+    int budgetFor(Media.Entry e) {
+        return autoDetail() && e.textHeavy ? maxBudget() : photoBudget();
     }
 
     /**
      * Embeds a photo with the chosen detail level. If the exported vision encoder only accepts
      * its default token budget, falls back to it and remembers that.
      */
-    private float[] embedPhoto(Bitmap b) throws Exception {
-        return embedPhotos(java.util.Collections.singletonList(b))[0];
+    private float[] embedPhoto(Bitmap b, int budget) throws Exception {
+        return embedPhotos(java.util.Collections.singletonList(b), budget)[0];
     }
 
-    private float[][] embedPhotos(List<Bitmap> bitmaps) throws Exception {
+    private float[][] embedPhotos(List<Bitmap> bitmaps, int budget) throws Exception {
         List<io.github.teoplaydor.semsearch.core.ImagePreprocessor.Source> src =
                 new ArrayList<io.github.teoplaydor.semsearch.core.ImagePreprocessor.Source>();
         for (Bitmap b : bitmaps) src.add(new Media.BitmapSource(b));
-        if (!(photo instanceof EmbeddingGemma2)) return photo.embedImages(src, 0);
-        int budget = photoBudget();
+        if (!(photo instanceof EmbeddingGemma2)) return photo.embedImages(src, budget); // SigLIP: one resolution, ignores it
         try {
             return photo.embedImages(src, budget);
         } catch (Exception e) {
@@ -959,6 +1021,15 @@ public final class Engine {
         if (p == null || p.accelVision == null) return null;
         File f = new File(modelDir, p.accelVision);
         return f.exists() ? f : null;
+    }
+
+    /** Size of the downloaded NPU graph (0 when absent). */
+    public long gemmaFp32Bytes() {
+        HfRepo.Plan p = gemmaFp32Vision() != null ? gemmaPlan() : null;
+        if (p == null) return 0;
+        long n = 0;
+        for (HfRepo.RemoteFile f : p.files) if (f.path.startsWith(p.accelVision)) n += new File(modelDir, f.path).length();
+        return n;
     }
 
     /** EmbeddingGemma serves photos and its NPU graph is not on the phone yet. */
@@ -1012,12 +1083,14 @@ public final class Engine {
             if (vision == null || !vision.exists()) {
                 throw new java.io.IOException("для NPU нужна полная версия визуального энкодера — «Проверить NPU» в настройках");
             }
-            prefs.edit().putString("npu_probe", String.valueOf(accel)).commit();
+            // a caller that also runs the model (benchmark) holds the probe itself, past creation
+            boolean outer = prefs.contains("npu_probe");
+            if (!outer) prefs.edit().putString("npu_probe", String.valueOf(accel)).commit();
             try {
                 return new EmbeddingGemma2(cfg, tok, text, vision, nThreads, accel == ACCEL_NPU
-                        ? EmbeddingGemma2.VisionAccel.NPU : EmbeddingGemma2.VisionAccel.NPU_FP32, batch, photoBudget());
+                        ? EmbeddingGemma2.VisionAccel.NPU : EmbeddingGemma2.VisionAccel.NPU_FP32, batch, maxBudget());
             } finally {
-                prefs.edit().remove("npu_probe").commit();
+                if (!outer) prefs.edit().remove("npu_probe").commit();
             }
         }
         File vision = plan.visionModel == null ? null : graphFile(plan.visionModel, int8);
@@ -1072,6 +1145,32 @@ public final class Engine {
         return r;
     }
 
+    /** One profiled run of the vision encoder with variant {@code c}: which ops its accelerator left to the CPU. */
+    private String profileVision(ModelConfig cfg, HfTokenizer tok, HfRepo.Plan plan, int[] c, int budget) {
+        File dir = ctx.getCacheDir();
+        EmbeddingGemma2 m = null;
+        try {
+            EmbeddingGemma2.profileVision = new File(dir, "vision-profile").getPath();
+            try {
+                m = createModel(cfg, tok, plan, c[0], c[1], c[2]);
+            } finally {
+                EmbeddingGemma2.profileVision = null;
+            }
+            List<io.github.teoplaydor.semsearch.core.ImagePreprocessor.Source> imgs =
+                    new ArrayList<io.github.teoplaydor.semsearch.core.ImagePreprocessor.Source>();
+            for (int k = 0; k < c[2]; k++) imgs.add(new PatternSource(640, 480, 2 + k));
+            m.embedImages(imgs, budget); // warm-up; the summary covers the last run only
+            m.embedImages(imgs, budget);
+            return OrtProfile.parse(m.endVisionProfiling()).summary(6);
+        } catch (Throwable e) {
+            return "Профиль не снят: " + (e.getMessage() != null ? e.getMessage() : e.toString());
+        } finally {
+            if (m != null) m.close();
+            File[] left = dir.listFiles();
+            if (left != null) for (File f : left) if (f.getName().startsWith("vision-profile")) f.delete();
+        }
+    }
+
     /**
      * Measures photo embedding speed on this phone: every accelerator, then thread counts and
      * batch sizes for the best one. Variants whose result drifts from the plain CPU one are
@@ -1101,7 +1200,8 @@ public final class Engine {
                     HfTokenizer tok = EmbeddingGemma2.loadTokenizer(modelDir);
                     int budget = photoBudget();
                     int auto = autoThreads(), cores = Runtime.getRuntime().availableProcessors();
-                    rep.append("Детализация ").append(budget).append(" токенов, ядер ").append(cores)
+                    rep.append(autoDetail() ? "Детализация авто: подбор на " + budget + " токенах (обычные фото)"
+                            : "Детализация " + budget + " токенов").append(", ядер ").append(cores)
                             .append(", быстрых ").append(auto).append("\n(картинка + текст на одно фото)\n\n");
 
                     List<int[]> plan1 = new ArrayList<int[]>(); // {accel, threads, batch}
@@ -1161,8 +1261,41 @@ public final class Engine {
                     if (best == null) throw new IllegalStateException("ни один вариант не сработал");
                     prefs.edit().putInt("accel", best[0]).putInt("threads", best[1] == auto ? 0 : best[1])
                             .putInt("batch", best[2]).putBoolean("accel_chosen", true).apply();
-                    rep.append(String.format(java.util.Locale.ROOT, "\nВыбрано: %s, потоков %d%s — %.2f с на фото",
-                            ACCEL_NAMES[best[0]], best[1], best[2] > 1 ? ", пачка " + best[2] : "", bestMs / 1000.0));
+                    rep.append(String.format(java.util.Locale.ROOT, "\nВыбрано: %s, потоков %d%s — %.2f с на фото (%d токенов)",
+                            ACCEL_NAMES[best[0]], best[1], best[2] > 1 ? ", пачка " + best[2] : "", bestMs / 1000.0, budget));
+                    // the same choice at the other end of the detail scale
+                    int other = budget == PHOTO_BUDGETS[0] ? PHOTO_BUDGETS[PHOTO_BUDGETS.length - 1] : PHOTO_BUDGETS[0];
+                    // the NPU graph is compiled for at most maxBudget() tokens
+                    if (isNpu(best[0]) && other > maxBudget()) other = 0;
+                    if (other > 0) {
+                        status = "Подбираю ускорение: детализация " + other;
+                        notifyChanged();
+                        mark("подбор ускорения: " + ACCEL_NAMES[best[0]] + ", детализация " + other);
+                        if (isNpu(best[0])) prefs.edit().putString("npu_probe", String.valueOf(best[0])).commit();
+                        Measure o = measure(cfg, tok, plan, best[0], best[1], best[2], other, null);
+                        prefs.edit().remove("npu_probe").commit();
+                        mark("");
+                        if (o.error != null) {
+                            rep.append("\nПри ").append(other).append(" токенах не работает — ").append(o.error);
+                        } else {
+                            String t = String.format(java.util.Locale.ROOT, "%.2f с (%.2f + %.2f)", o.perPhotoMs / 1000.0,
+                                    o.visionMs / 1000.0, o.textMs / 1000.0);
+                            if (autoDetail()) rep.append("\nСкриншоты и документы (").append(other).append(" токенов): ").append(t);
+                            else if (other < budget) rep.append("\nС детализацией «Авто» обычные фото шли бы за ").append(t)
+                                    .append(" (").append(other).append(" токенов), скриншоты — как сейчас");
+                            else rep.append("\nПри ").append(other).append(" токенах: ").append(t);
+                        }
+                    }
+                    // where the accelerator's graph actually runs
+                    if (isGpu(best[0]) || isNpu(best[0])) {
+                        status = "Смотрю, какие операции остаются на процессоре…";
+                        notifyChanged();
+                        mark("подбор ускорения: профиль, " + ACCEL_NAMES[best[0]]);
+                        if (isNpu(best[0])) prefs.edit().putString("npu_probe", String.valueOf(best[0])).commit();
+                        rep.append("\n\n").append(profileVision(cfg, tok, plan, best, budget));
+                        prefs.edit().remove("npu_probe").commit();
+                        mark("");
+                    }
                     if (!fp32 && FastModel.acceleratorLikely()) {
                         rep.append(String.format(java.util.Locale.ROOT, "\n\nNPU не проверен: ему нужна полная версия визуального "
                                 + "энкодера (≈%d МБ) — кнопка «Проверить NPU» в настройках.", gemmaFp32EstimateBytes() >> 20));
@@ -1583,7 +1716,7 @@ public final class Engine {
         // EmbeddingGemma looks at up to 9 × budget patches of 16×16; SigLIP at one small square (decoded at ~2× its side).
         Embedder p = photo;
         final long target = p instanceof SigLip ? 4L * ((SigLip) p).imageSize() * ((SigLip) p).imageSize()
-                : (long) photoBudget() * 9 * 256;
+                : (long) budgetFor(e) * 9 * 256;
         return decoder.submit(new Callable<Bitmap>() {
             @Override
             public Bitmap call() throws Exception {
@@ -1721,7 +1854,9 @@ public final class Engine {
                 batch.add(queue.remove(0));
                 if (batch.get(0).kind == IndexStore.KIND_PHOTO) {
                     int n = batchSize();
-                    while (batch.size() < n && !queue.isEmpty() && queue.get(0).kind == IndexStore.KIND_PHOTO) {
+                    int budget = budgetFor(batch.get(0));
+                    while (batch.size() < n && !queue.isEmpty() && queue.get(0).kind == IndexStore.KIND_PHOTO
+                            && budgetFor(queue.get(0)) == budget) { // one vision run takes one budget
                         batch.add(queue.remove(0));
                     }
                 }
@@ -1776,14 +1911,14 @@ public final class Engine {
         try {
             float[][] embs;
             try {
-                embs = embedPhotos(bitmaps);
+                embs = embedPhotos(bitmaps, budgetFor(ok.get(0)));
             } catch (Throwable batchError) {
                 if (bitmaps.size() == 1) throw batchError;
                 // One bad photo (or a batch the encoder rejects) must not sink the others.
                 embs = new float[bitmaps.size()][];
                 for (int i = 0; i < bitmaps.size(); i++) {
                     try {
-                        embs[i] = embedPhotos(java.util.Collections.singletonList(bitmaps.get(i)))[0];
+                        embs[i] = embedPhotos(java.util.Collections.singletonList(bitmaps.get(i)), budgetFor(ok.get(i)))[0];
                     } catch (Throwable t) {
                         fail(ok.get(i), t);
                     }

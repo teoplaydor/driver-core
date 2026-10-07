@@ -48,9 +48,12 @@ public class AppIndexingTest {
         Application app = RuntimeEnvironment.getApplication();
         File dir = new File(app.getCacheDir(), "media");
         assertTrue(dir.mkdirs());
-        for (int i = 0; i < concepts.length; i++) {
+        for (int i = 0; i < concepts.length - 1; i++) {
             FakeMediaStore.ROWS.add(new FakeMediaStore.Row(100 + i, false, 1700000000L - i, "IMG_" + i + ".png", 64, 48, png(dir, i)));
         }
+        // the receipt is a screenshot: auto detail gives it the most detailed budget for its small text
+        FakeMediaStore.ROWS.add(new FakeMediaStore.Row(104, false, 1700000000L - 4, "Screenshot_20260101_120000.png", 64, 48,
+                png(dir, 4), "Screenshots"));
         FakeMediaStore.ROWS.add(new FakeMediaStore.Row(7, true, 1700000000L, "VID_7.mp4", 1920, 1080, null));
         FakeMediaStore.install();
         Shadows.shadowOf(app).grantPermissions("android.permission.READ_MEDIA_IMAGES", "android.permission.READ_MEDIA_VIDEO",
@@ -64,7 +67,8 @@ public class AppIndexingTest {
         e.attachModelForTest(fake);
         Robo.waitFor("ready", e::ready);
 
-        // Photos go through the model in batches of 3 (the benchmark's "пачка").
+        // Photos go through the model in batches of 3 (the benchmark's "пачка"); a batch takes one detail
+        // level, so with auto detail the screenshot runs on its own at 280 tokens, the photos at 70.
         e.prefs().edit().putInt("batch", 3).apply();
         // The real "Start indexing" path: permission check → MediaStore → decode → embed → SQLite.
         Robo.call(a, "requestMediaAndIndex");
@@ -72,7 +76,9 @@ public class AppIndexingTest {
         System.out.println("index status: " + e.idxStatus.replace('\n', ' '));
         assertEquals(5, e.store().count(IndexStore.KIND_PHOTO));
         System.out.println("vision batches: " + fake.batches);
-        assertEquals(Arrays.asList(3, 2), fake.batches);
+        System.out.println("vision budgets: " + fake.budgets);
+        assertEquals(Arrays.asList(3, 1, 1), fake.batches);
+        assertEquals(Arrays.asList(70, 70, 280), fake.budgets);
         assertEquals(0, e.store().count(IndexStore.KIND_VIDEO));
         assertTrue("first error is reported: " + e.idxStatus, e.idxStatus.contains("Первая ошибка: VID_7.mp4"));
         assertTrue(e.idxStatus, e.idxStatus.startsWith("Готово: 5 файлов, пропущено 1"));
@@ -92,7 +98,7 @@ public class AppIndexingTest {
 
         // Russian query through the bridge finds the right photo; without the bridge it can't.
         String[][] queries = {{"кот на диване", "IMG_0.png"}, {"собака в парке", "IMG_1.png"},
-                {"красная машина", "IMG_2.png"}, {"чек из магазина", "IMG_4.png"}};
+                {"красная машина", "IMG_2.png"}, {"чек из магазина", "Screenshot_20260101_120000.png"}};
         for (int mode : new int[]{0, 1, 2}) {
             e.prefs().edit().putInt("bridge_mode", mode).apply();
             int correct = 0;

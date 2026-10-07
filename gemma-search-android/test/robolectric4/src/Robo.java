@@ -120,7 +120,7 @@ final class Robo {
     /** Images embed as the given English concepts, in the order they are encoded. */
     static class FakeEmbedder implements Embedder {
         final String[] imageConcepts;
-        final List<Integer> batches = new ArrayList<Integer>();
+        final List<Integer> batches = new ArrayList<Integer>(), budgets = new ArrayList<Integer>();
         int next;
 
         FakeEmbedder(String... imageConcepts) {
@@ -138,6 +138,7 @@ final class Robo {
 
         public float[][] embedImages(List<ImagePreprocessor.Source> imgs, int budget) {
             batches.add(imgs.size());
+            budgets.add(budget);
             float[][] r = new float[imgs.size()][];
             for (int i = 0; i < r.length; i++) r[i] = embedImage(imgs.get(i), budget);
             return r;

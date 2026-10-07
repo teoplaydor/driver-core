@@ -196,6 +196,46 @@ public class AppFlowTest {
         assertEquals(Engine.State.ERROR, e.state);
         assertTrue(e.status, e.status.contains("закрывалось при загрузке"));
         assertTrue(e.errorDetails, e.errorDetails.contains("Шаг в момент сбоя: загрузка SigLIP 2 B/16"));
+
+        // The NPU's full-precision vision graph can go when the NPU lost the speed check: the manifest
+        // forgets it, its files are deleted, the 4-bit model the CPU/GPU use stays complete.
+        e.prefs().edit().putInt("photo_model", 0).putInt("accel", Engine.ACCEL_NPU).apply();
+        String[] files = {"config.json", "onnx/model_q4.onnx", "onnx/vision_encoder_q4.onnx", "onnx/vision_encoder.onnx",
+                "onnx/vision_encoder.onnx_data"};
+        StringBuilder m = new StringBuilder("{\"repo\":\"test/gemma\",\"text\":\"onnx/model_q4.onnx\",\"vision\":"
+                + "\"onnx/vision_encoder_q4.onnx\",\"accel_vision\":\"onnx/vision_encoder.onnx\",\"files\":[");
+        for (int i = 0; i < files.length; i++) {
+            File f = new File(model, files[i]);
+            f.getParentFile().mkdirs();
+            try (FileOutputStream o = new FileOutputStream(f)) {
+                o.write(new byte[files[i].contains("vision_encoder.onnx") ? 3 << 20 : 1000]);
+            }
+            m.append(i > 0 ? "," : "").append("{\"path\":\"").append(files[i]).append("\",\"size\":").append(f.length()).append('}');
+        }
+        try (FileOutputStream o = new FileOutputStream(new File(model, "manifest.json"))) {
+            o.write(m.append("]}").toString().getBytes("UTF-8"));
+        }
+        assertEquals(6, e.gemmaFp32Bytes() >> 20);
+        assertEquals(Engine.ACCEL_NPU, e.accel());
+        e.prefs().edit().putInt("accel", Engine.ACCEL_GPU_INT8).apply();
+        e.state = Engine.State.READY;
+        Robo.call(a, "openSettings");
+        Robo.settle(500);
+        assertTrue(Robo.allText(root), Robo.allText(root).contains("Удалить версию для NPU (6 МБ)"));
+        assertTrue(Robo.allText(root), Robo.allText(root).contains("Детализация"));
+        a.onBackPressed();
+        Robo.settle(500);
+        e.deleteGemmaFp32();
+        Robo.waitFor("fp32 deleted", () -> !new File(model, "onnx/vision_encoder.onnx_data").exists());
+        Robo.settle(200);
+        assertEquals(0, e.gemmaFp32Bytes());
+        assertFalse(new File(model, "onnx/vision_encoder.onnx").exists());
+        assertTrue(new File(model, "onnx/vision_encoder_q4.onnx").exists());
+        String left = new String(java.nio.file.Files.readAllBytes(new File(model, "manifest.json").toPath()), "UTF-8");
+        assertFalse(left, left.contains("accel_vision") || left.contains("\"onnx/vision_encoder.onnx"));
+        assertTrue(left, left.contains("onnx/vision_encoder_q4.onnx"));
+        assertTrue(e.hasModelFiles());
+        assertEquals(Engine.ACCEL_GPU_INT8, e.prefs().getInt("accel", -1));
         a.finish();
     }
 }

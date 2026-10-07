@@ -30,13 +30,24 @@ final class Media {
         long date;
         String name;
         int orientation;
+        /** A screenshot or a scanned document: small text matters, worth the higher detail. */
+        boolean textHeavy;
+    }
+
+    /** Screenshots and scans by their folder or file name (Samsung, Xiaomi, Pixel, CamScanner, …). */
+    static boolean textHeavy(String bucket, String name) {
+        String b = bucket == null ? "" : bucket.toLowerCase(java.util.Locale.ROOT);
+        String n = name == null ? "" : name.toLowerCase(java.util.Locale.ROOT);
+        return b.contains("screenshot") || b.contains("скриншот") || b.contains("снимки экрана") || b.contains("scan")
+                || b.contains("скан") || b.contains("document") || b.contains("документ")
+                || n.startsWith("screenshot") || n.startsWith("скриншот") || n.startsWith("scr_");
     }
 
     static List<Entry> recentImages(ContentResolver cr, int limit) {
         List<Entry> out = new ArrayList<Entry>();
         Uri base = MediaStore.Images.Media.EXTERNAL_CONTENT_URI;
         String[] proj = {MediaStore.Images.Media._ID, MediaStore.Images.Media.DATE_ADDED,
-                MediaStore.Images.Media.DISPLAY_NAME, MediaStore.Images.Media.ORIENTATION};
+                MediaStore.Images.Media.DISPLAY_NAME, MediaStore.Images.Media.ORIENTATION, "bucket_display_name"};
         Cursor c = cr.query(base, proj, null, null, MediaStore.Images.Media.DATE_ADDED + " DESC");
         if (c == null) return out;
         try {
@@ -48,6 +59,7 @@ final class Media {
                 e.date = c.getLong(1) * 1000L;
                 e.name = c.getString(2);
                 e.orientation = c.isNull(3) ? 0 : c.getInt(3);
+                e.textHeavy = textHeavy(c.isNull(4) ? null : c.getString(4), e.name);
                 out.add(e);
             }
         } finally {

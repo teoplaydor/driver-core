@@ -31,7 +31,7 @@ final class SettingsPanel extends FrameLayout implements Engine.Listener {
     // live parts
     private TextView modelValue, modelHint, indexValue, indexStatus, accelValue, photosValue, videosValue, detailValue,
             threadsValue, bridgeValue, dimsValue, photoModelValue, gemmaValue, sourceValue, sideValue;
-    private TextView modelButton, indexButton, errorButton, deleteButton, fp32Button, reportLink, compareButton;
+    private TextView modelButton, indexButton, errorButton, deleteButton, fp32Button, reportLink, compareButton, fp32Delete;
     private ProgressLine modelProgress, indexProgress;
     private Toggle autoToggle, idleToggle, batteryToggle;
     private View batteryRow;
@@ -476,12 +476,17 @@ final class SettingsPanel extends FrameLayout implements Engine.Listener {
         detailValue = row(card, "Детализация", null, new Runnable() {
             @Override
             public void run() {
-                Sheet.choose(root(), "Детализация фото", new String[]{"Быстрая", "Средняя", "Максимальная"},
-                        new String[]{"70 токенов — для обычных фото", "140 — мелкие детали", "280 — текст на скриншотах, медленно"},
-                        e.prefs().getInt("photo_detail", 0), new Sheet.Choice() {
+                // shown order: auto first; stored values: 0..2 = budgets, 3 = auto
+                final int[] stored = {Engine.DETAIL_AUTO, 0, 1, 2};
+                int cur = 0;
+                for (int i = 0; i < stored.length; i++) if (stored[i] == e.prefs().getInt("photo_detail", Engine.DETAIL_AUTO)) cur = i;
+                Sheet.choose(root(), "Детализация фото", new String[]{"Авто", "Быстрая", "Средняя", "Максимальная"},
+                        new String[]{"70 токенов для обычных фото, 280 для скриншотов и документов", "70 токенов — для обычных фото",
+                                "140 — мелкие детали", "280 — текст на скриншотах, медленно"},
+                        cur, new Sheet.Choice() {
                             @Override
                             public void chosen(int i) {
-                                e.prefs().edit().putInt("photo_detail", i).apply();
+                                e.prefs().edit().putInt("photo_detail", stored[i]).apply();
                                 // the NPU graph is compiled for one budget
                                 if (Engine.isNpu(e.loadedAccel) && e.ready() && !e.indexing) e.loadModel();
                                 onEngineChanged();
@@ -569,6 +574,19 @@ final class SettingsPanel extends FrameLayout implements Engine.Listener {
             public void run() {
                 String r = e.photoModel() == FastModel.GEMMA ? e.gemmaReport() : e.fastReport();
                 Sheet.message(root(), "Скорость на этом телефоне", r != null ? r : "Подбора ещё не было.", null, null);
+            }
+        });
+        fp32Delete = quiet(card, "Удалить версию для NPU", Ui.DANGER, new Runnable() {
+            @Override
+            public void run() {
+                Sheet.confirm(root(), "Удалить версию для NPU?", String.format(Locale.ROOT, "Освободится ≈%d МБ. NPU сейчас "
+                        + "не используется; если понадобится, «Проверить NPU» скачает её снова.", e.gemmaFp32Bytes() >> 20),
+                        "Удалить", new Runnable() {
+                            @Override
+                            public void run() {
+                                e.deleteGemmaFp32();
+                            }
+                        });
             }
         });
         threadsValue = row(card, "Потоки процессора", null, new Runnable() {
@@ -699,6 +717,10 @@ final class SettingsPanel extends FrameLayout implements Engine.Listener {
         rowOf(sourceValue).setVisibility(!fast || e.gemmaDownloaded() ? VISIBLE : GONE);
         fp32Button.setVisibility((fast ? e.fastNeedsFp32() : e.gemmaNeedsFp32()) && !busy && FastModel.acceleratorLikely()
                 ? VISIBLE : GONE);
+        fp32Delete.setVisibility(!fast && !busy && e.gemmaFp32Vision() != null && !Engine.isNpu(e.accel()) ? VISIBLE : GONE);
+        if (fp32Delete.getVisibility() == VISIBLE) {
+            fp32Delete.setText(String.format(Locale.ROOT, "Удалить версию для NPU (%d МБ)", e.gemmaFp32Bytes() >> 20));
+        }
         rowOf(detailValue).setVisibility(fast ? GONE : VISIBLE);
         rowOf(threadsValue).setVisibility(fast ? GONE : VISIBLE);
         rowOf(dimsValue).setVisibility(fast ? GONE : VISIBLE);
@@ -727,7 +749,8 @@ final class SettingsPanel extends FrameLayout implements Engine.Listener {
         photosValue.setText(pl >= 4 ? "все" : Engine.PHOTO_LIMITS[pl] + " последних");
         int vl = e.prefs().getInt("video_limit", 1);
         videosValue.setText(vl == 0 ? "нет" : Engine.VIDEO_LIMITS[vl] + " последних");
-        detailValue.setText(new String[]{"быстрая", "средняя", "максимальная"}[Math.max(0, Math.min(2, e.prefs().getInt("photo_detail", 0)))]);
+        detailValue.setText(new String[]{"быстрая", "средняя", "максимальная", "авто"}[Math.max(0, Math.min(3,
+                e.prefs().getInt("photo_detail", Engine.DETAIL_AUTO)))]);
         accelValue.setText(shortAccel(fast ? (e.accelLabel.isEmpty() ? "проверяю…" : e.accelLabel) : Engine.ACCEL_NAMES[e.accel()]));
         int t = e.prefs().getInt("threads", 0);
         threadsValue.setText(t == 0 ? "авто" : String.valueOf(t));

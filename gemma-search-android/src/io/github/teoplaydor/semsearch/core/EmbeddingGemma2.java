@@ -42,6 +42,11 @@ public final class EmbeddingGemma2 implements Embedder {
     private int fixedBatch, fixedPatches;
     private int embeddingDim = -1;
     private volatile long lastVisionMs, lastTextMs;
+    /**
+     * Diagnostics: when set, the vision session of the next model created writes an ONNX Runtime profile
+     * with this file prefix (see {@link #endVisionProfiling()} and OrtProfile).
+     */
+    public static volatile String profileVision;
 
     public EmbeddingGemma2(File dir, File textModel, File visionModel, int threads) throws IOException, OrtException {
         this(loadConfig(dir), loadTokenizer(dir), textModel, visionModel, threads, false);
@@ -89,6 +94,7 @@ public final class EmbeddingGemma2 implements Embedder {
         try {
             OrtSession.SessionOptions o = npu ? npuOptions(visionModel, threads, accel == VisionAccel.NPU, fixedBatch, fixedPatches)
                     : options(threads, accel == VisionAccel.GPU);
+            if (profileVision != null) o.enableProfiling(profileVision);
             visionSession = visionModel != null && visionModel.exists() ? env.createSession(visionModel.getPath(), o) : null;
         } catch (OrtException e) {
             textSession.close();
@@ -181,6 +187,11 @@ public final class EmbeddingGemma2 implements Embedder {
     public int embeddingDim() { return embeddingDim; }
 
     public int defaultImageTokens() { return cfg.image.maxSoftTokens; }
+
+    /** Stops a profile started through {@link #profileVision}; returns the JSON file it wrote. */
+    public File endVisionProfiling() throws OrtException {
+        return new File(visionSession.endProfiling());
+    }
 
     /** {vision encoder ms, text model ms} of the last image/video embedding. */
     public long[] lastTimingsMs() { return new long[]{lastVisionMs, lastTextMs}; }

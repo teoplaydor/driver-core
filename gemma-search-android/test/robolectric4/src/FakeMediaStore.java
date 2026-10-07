@@ -16,7 +16,7 @@ import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
 
 /**
- * MediaStore stand-in for the "media" authority: images and videos as rows (id, date, name, size)
+ * MediaStore stand-in for the "media" authority: images and videos as rows (id, date, name, size, album)
  * with an optional file behind each, served fresh to every query like the real provider.
  */
 public final class FakeMediaStore extends ContentProvider {
@@ -27,8 +27,14 @@ public final class FakeMediaStore extends ContentProvider {
         final String name;
         final int width, height;
         final File file;
+        final String bucket;
 
         public Row(long id, boolean video, long dateAdded, String name, int width, int height, File file) {
+            this(id, video, dateAdded, name, width, height, file, "Camera");
+        }
+
+        public Row(long id, boolean video, long dateAdded, String name, int width, int height, File file, String bucket) {
+            this.bucket = bucket;
             this.id = id;
             this.video = video;
             this.dateAdded = dateAdded;
@@ -81,6 +87,7 @@ public final class FakeMediaStore extends ContentProvider {
                     case "width": row[k] = r.width; break;
                     case "height": row[k] = r.height; break;
                     case "orientation": row[k] = 0; break;
+                    case "bucket_display_name": row[k] = r.bucket; break;
                     default: row[k] = null;
                 }
             }
