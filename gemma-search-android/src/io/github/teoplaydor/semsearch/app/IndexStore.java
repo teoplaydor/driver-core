@@ -148,6 +148,27 @@ public final class IndexStore {
         return n;
     }
 
+    /** Photos and/or videos (and notes), newest first: the gallery view. */
+    public synchronized List<Item> recent(boolean photos, boolean videos, boolean notes, int limit) {
+        List<Item> out = new ArrayList<Item>();
+        for (Item it : items) {
+            if ((it.kind == KIND_PHOTO && photos) || (it.kind == KIND_VIDEO && videos) || (it.kind == KIND_NOTE && notes)) out.add(it);
+        }
+        Collections.sort(out, new Comparator<Item>() {
+            @Override
+            public int compare(Item a, Item b) {
+                return Long.compare(b.date, a.date);
+            }
+        });
+        return out.size() > limit ? new ArrayList<Item>(out.subList(0, limit)) : out;
+    }
+
+    public synchronized List<Item> media() {
+        List<Item> out = new ArrayList<Item>();
+        for (Item it : items) if (it.kind != KIND_NOTE) out.add(it);
+        return out;
+    }
+
     public synchronized List<Item> notes() {
         List<Item> out = new ArrayList<Item>();
         for (Item it : items) if (it.kind == KIND_NOTE) out.add(it);

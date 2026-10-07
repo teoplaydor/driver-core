@@ -78,6 +78,115 @@ final class Media {
         return out;
     }
 
+    /** Every MediaStore id of a kind (to notice deleted files), or null when the query fails. */
+    static java.util.Set<Long> allIds(ContentResolver cr, int kind) {
+        Uri base = kind == IndexStore.KIND_VIDEO ? MediaStore.Video.Media.EXTERNAL_CONTENT_URI : MediaStore.Images.Media.EXTERNAL_CONTENT_URI;
+        Cursor c;
+        try {
+            c = cr.query(base, new String[]{MediaStore.MediaColumns._ID}, null, null, null);
+        } catch (Exception e) {
+            return null;
+        }
+        if (c == null) return null;
+        java.util.Set<Long> out = new java.util.HashSet<Long>();
+        try {
+            while (c.moveToNext()) out.add(c.getLong(0));
+        } finally {
+            c.close();
+        }
+        return out;
+    }
+
+    /** Key of a photo or video in {@link #aspects}. */
+    static long aspectKey(int kind, long mediaId) {
+        return mediaId * 2 + (kind == IndexStore.KIND_VIDEO ? 1 : 0);
+    }
+
+    /**
+     * Width / height (rotation applied) of every photo and video MediaStore knows, by
+     * {@link #aspectKey}: one cheap query per kind, so the gallery can lay out pictures uncropped
+     * before any thumbnail is decoded.
+     */
+    static java.util.Map<Long, Float> aspects(ContentResolver cr) {
+        java.util.Map<Long, Float> out = new java.util.HashMap<Long, Float>();
+        readAspects(cr, MediaStore.Images.Media.EXTERNAL_CONTENT_URI, IndexStore.KIND_PHOTO, out);
+        readAspects(cr, MediaStore.Video.Media.EXTERNAL_CONTENT_URI, IndexStore.KIND_VIDEO, out);
+        return out;
+    }
+
+    private static void readAspects(ContentResolver cr, Uri base, int kind, java.util.Map<Long, Float> out) {
+        Cursor c = null;
+        try {
+            // videos have an orientation column only from Android 10
+            c = cr.query(base, new String[]{MediaStore.MediaColumns._ID, "width", "height", "orientation"}, null, null, null);
+        } catch (Exception e) {
+            c = null;
+        }
+        if (c == null) {
+            try {
+                c = cr.query(base, new String[]{MediaStore.MediaColumns._ID, "width", "height"}, null, null, null);
+            } catch (Exception e) {
+                return;
+            }
+        }
+        if (c == null) return;
+        try {
+            int iw = c.getColumnIndex("width"), ih = c.getColumnIndex("height"), io = c.getColumnIndex("orientation");
+            while (c.moveToNext()) {
+                int w = c.isNull(iw) ? 0 : c.getInt(iw), h = c.isNull(ih) ? 0 : c.getInt(ih);
+                if (w <= 0 || h <= 0) continue;
+                int o = io >= 0 && !c.isNull(io) ? c.getInt(io) : 0;
+                boolean turned = o == 90 || o == 270;
+                out.put(aspectKey(kind, c.getLong(0)), turned ? h / (float) w : w / (float) h);
+            }
+        } catch (Exception ignored) {
+            // keep what was read
+        } finally {
+            c.close();
+        }
+    }
+
+    static int orientation(ContentResolver cr, long mediaId) {
+        Cursor c = null;
+        try {
+            c = cr.query(ContentUris.withAppendedId(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, mediaId),
+                    new String[]{MediaStore.Images.Media.ORIENTATION}, null, null, null);
+            if (c != null && c.moveToFirst() && !c.isNull(0)) return c.getInt(0);
+        } catch (Exception ignored) {
+            // no orientation column: keep the stored pixels
+        } finally {
+            if (c != null) c.close();
+        }
+        return 0;
+    }
+
+    /** Full-screen quality for the viewer: about {@code maxPixels} pixels, upright. */
+    static Bitmap full(ContentResolver cr, IndexStore.Item it, long maxPixels) throws Exception {
+        Uri uri = Uri.parse(it.uri);
+        BitmapFactory.Options o = new BitmapFactory.Options();
+        o.inJustDecodeBounds = true;
+        InputStream in = cr.openInputStream(uri);
+        try {
+            BitmapFactory.decodeStream(in, null, o);
+        } finally {
+            if (in != null) in.close();
+        }
+        if (o.outWidth <= 0 || o.outHeight <= 0) throw new IllegalStateException("не удалось прочитать изображение");
+        int sample = 1;
+        while ((long) o.outWidth * o.outHeight / ((long) sample * sample) > maxPixels) sample *= 2;
+        BitmapFactory.Options d = new BitmapFactory.Options();
+        d.inSampleSize = sample;
+        in = cr.openInputStream(uri);
+        Bitmap bmp;
+        try {
+            bmp = BitmapFactory.decodeStream(in, null, d);
+        } finally {
+            if (in != null) in.close();
+        }
+        if (bmp == null) throw new IllegalStateException("не удалось декодировать изображение");
+        return rotate(bmp, orientation(cr, it.mediaId));
+    }
+
     /**
      * Decodes an image subsampled to roughly {@code targetPixels} (at least), applying the
      * MediaStore/EXIF rotation so the encoder sees the photo upright.

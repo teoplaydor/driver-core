@@ -8,8 +8,8 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 ORT_VERSION=1.30.0
-VERSION_CODE=5
-VERSION_NAME=0.4.0
+VERSION_CODE=6
+VERSION_NAME=0.5.0
 ANDROID_JAR=${ANDROID_JAR:-/usr/lib/android-sdk/platforms/android-23/android.jar}
 AAPT2=${AAPT2:-$(ls /usr/lib/android-sdk/build-tools/*/aapt2 2>/dev/null | head -1)}
 DX=${DX:-dalvik-exchange}
@@ -87,5 +87,6 @@ fi
 apksigner sign --ks "$KEYSTORE" --ks-pass pass:android --key-pass pass:android \
   --out "$B/SemSearch.apk" "$B/aligned.apk"
 apksigner verify "$B/SemSearch.apk"
-rm -f "$B/unsigned.apk" "$B/aligned.apk" "$B/base.apk" "$B/SemSearch.apk.idsig"
+mv "$B/base.apk" "$B/resources.ap_" # resources-only APK, used by the Robolectric UI tests
+rm -f "$B/unsigned.apk" "$B/aligned.apk" "$B/SemSearch.apk.idsig"
 ls -l "$B/SemSearch.apk"

@@ -117,7 +117,27 @@ public final class Engine {
                 notifyChanged();
             }
         });
-        if (manifest.exists()) loadModel();
+    }
+
+    /** Loads the downloaded model unless it is already loaded or loading (screens and the background job call this). */
+    public void ensureLoaded() {
+        if (manifest.exists() && state == State.NO_MODEL) {
+            loadModel();
+        }
+    }
+
+    /** True while a screen of the app is visible; the background job unloads the model only when it is not. */
+    public volatile boolean uiVisible;
+    /** The current indexing run was started by the background job. */
+    public volatile boolean backgroundRun;
+
+    /** Frees the model's memory after a background run if nobody is looking at the app. */
+    public void releaseIfBackground() {
+        if (uiVisible || indexing || state != State.READY) return;
+        unloadModel();
+        state = State.NO_MODEL;
+        status = "";
+        notifyChanged();
     }
 
     /** Test hook: use a stand-in model (Robolectric can't run ONNX Runtime's native code). */
@@ -800,6 +820,60 @@ public final class Engine {
         });
     }
 
+    /** "How many recent photos/videos" choices in the settings. */
+    public static final int[] PHOTO_LIMITS = {100, 300, 1000, 3000, Integer.MAX_VALUE};
+    public static final int[] VIDEO_LIMITS = {0, 10, 30, 100};
+
+    public int photoLimit() {
+        return PHOTO_LIMITS[Math.max(0, Math.min(PHOTO_LIMITS.length - 1, prefs.getInt("photo_limit", 4)))];
+    }
+
+    public int videoLimit() {
+        return VIDEO_LIMITS[Math.max(0, Math.min(VIDEO_LIMITS.length - 1, prefs.getInt("video_limit", 1)))];
+    }
+
+    public void startIndexFromPrefs(boolean background) {
+        if (indexing) return;
+        backgroundRun = background;
+        startIndex(photoLimit(), videoLimit());
+    }
+
+    /** New photos/videos (not in the index yet) within the configured limits, counted without the model. */
+    public void countPending(final Callback<Integer> cb) {
+        ml.submit(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    ContentResolver cr = ctx.getContentResolver();
+                    int n = 0;
+                    for (Media.Entry e : Media.recentImages(cr, photoLimit())) if (isNew(e, true)) n++;
+                    if (videoLimit() > 0) {
+                        for (Media.Entry e : Media.recentVideos(cr, videoLimit())) if (isNew(e, true)) n++;
+                    }
+                    post(cb, n, null);
+                } catch (Exception e) {
+                    post(cb, null, e);
+                }
+            }
+        });
+    }
+
+    /** Drops index entries of photos/videos that are gone from the phone (only with access to the whole gallery). */
+    private int pruneDeleted(ContentResolver cr) {
+        if (!AutoIndex.hasFullMediaAccess(ctx)) return 0;
+        java.util.Set<Long> photos = Media.allIds(cr, IndexStore.KIND_PHOTO), videos = Media.allIds(cr, IndexStore.KIND_VIDEO);
+        if (photos == null || videos == null) return 0;
+        int n = 0;
+        for (IndexStore.Item it : store.media()) {
+            java.util.Set<Long> live = it.kind == IndexStore.KIND_PHOTO ? photos : videos;
+            if (!live.contains(it.mediaId)) {
+                store.delete(it);
+                n++;
+            }
+        }
+        return n;
+    }
+
     public void startIndex(final int photoLimit, final int videoLimit) {
         if (indexing) return;
         indexing = true;
@@ -818,16 +892,19 @@ public final class Engine {
                 try {
                     requireModel();
                     ContentResolver cr = ctx.getContentResolver();
+                    if (pruneDeleted(cr) > 0) notifyChanged();
+                    boolean background = backgroundRun;
+                    if (!background) clearFailed(); // a run the user started retries what failed before
                     synchronized (queue) {
                         queue.clear();
                         if (photoLimit > 0 && model.supportsImages()) {
                             for (Media.Entry e : Media.recentImages(cr, photoLimit)) {
-                                if (!store.hasMedia(e.kind, e.id)) queue.add(e);
+                                if (isNew(e, background)) queue.add(e);
                             }
                         }
                         if (videoLimit > 0 && model.supportsVideo()) {
                             for (Media.Entry e : Media.recentVideos(cr, videoLimit)) {
-                                if (!store.hasMedia(e.kind, e.id)) queue.add(e);
+                                if (isNew(e, background)) queue.add(e);
                             }
                         }
                         idxTotal = queue.size();
@@ -974,7 +1051,32 @@ public final class Engine {
         }
     }
 
+    /** Not in the index yet; files that failed before only count when the user started the run. */
+    private boolean isNew(Media.Entry e, boolean skipFailed) {
+        return !store.hasMedia(e.kind, e.id) && !(skipFailed && failedBefore(e));
+    }
+
+    // Files that could not be indexed (a broken video, an unsupported format): without this list the
+    // background job would load the model for them again on every new photo.
+    private java.util.Set<String> failed;
+
+    private synchronized boolean failedBefore(Media.Entry e) {
+        if (failed == null) failed = new java.util.HashSet<String>(prefs.getStringSet("failed_media", new java.util.HashSet<String>()));
+        return failed.contains(e.kind + ":" + e.id);
+    }
+
+    private synchronized void markFailed(Media.Entry e) {
+        failedBefore(e);
+        if (failed.add(e.kind + ":" + e.id)) prefs.edit().putStringSet("failed_media", new java.util.HashSet<String>(failed)).apply();
+    }
+
+    private synchronized void clearFailed() {
+        failed = new java.util.HashSet<String>();
+        prefs.edit().remove("failed_media").apply();
+    }
+
     private void fail(Media.Entry e, Throwable t) {
+        markFailed(e);
         idxErrors++;
         idxDone++;
         if (idxFirstError == null) {
@@ -999,6 +1101,7 @@ public final class Engine {
 
     private void finishIndex(String msg) {
         indexing = false;
+        backgroundRun = false;
         idxStatus = msg;
         notifyChanged();
     }

@@ -4,8 +4,9 @@
 #   2. pipeline parity   — EmbeddingGemma2 (Java + ONNX Runtime) vs transformers.js EmbeddingGemma2Model
 #                          on a dummy model with the same ONNX inputs/outputs (text, images, video)
 #   3. Hub download      — file selection, chunked external data, resume after disconnect, cancel
-#   4. app smoke test    — the real Activity/Engine/IndexStore on Robolectric (Android 8.1 runtime)
-# Needs: python3 (+pip), node/npm, JDK 21 and JDK 8 (/usr/lib/jvm/java-8-openjdk-amd64), Maven.
+#   4. app tests         — the real Activity/Engine/IndexStore/background jobs on Robolectric
+#                          (Android 14 runtime), plus screenshots of the screens in build/shots/
+# Needs: python3 (+pip), node/npm, JDK 21, Maven.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 T=build/test
@@ -64,30 +65,6 @@ sleep 1
 rm -rf "$T/dl" "$T/dl-cancel"
 java -Dhttp.nonProxyHosts=127.0.0.1 -cp "$T/cls" HfRepoTest http://127.0.0.1:18765 "$T/dl"
 
-echo "== 4. Robolectric smoke test"
-J8=/usr/lib/jvm/java-8-openjdk-amd64/bin/java
-R="$T/robo"
-mkdir -p "$R"
-cat > "$R/pom.xml" <<'POM'
-<project xmlns="http://maven.apache.org/POM/4.0.0">
-  <modelVersion>4.0.0</modelVersion>
-  <groupId>t</groupId><artifactId>robo</artifactId><version>1</version>
-  <dependencies>
-    <dependency><groupId>org.robolectric</groupId><artifactId>robolectric</artifactId><version>3.8</version></dependency>
-    <dependency><groupId>junit</groupId><artifactId>junit</artifactId><version>4.12</version></dependency>
-    <dependency><groupId>org.robolectric</groupId><artifactId>android-all</artifactId><version>8.1.0-robolectric-4611349</version></dependency>
-  </dependencies>
-</project>
-POM
-[ -d "$R/libs" ] || (cd "$R" && mvn -q -B -Daether.connector.http.retryHandler.count=8 \
-  -Daether.connector.http.retryHandler.serviceUnavailable=429,503 dependency:copy-dependencies -DoutputDirectory=libs)
-mkdir -p "$R/deps" "$R/cls"
-cp "$R"/libs/android-all-*.jar "$R/deps/"
-CP=$(ls "$R"/libs/*.jar | tr '\n' ':')
-javac --release 8 -nowarn -encoding UTF-8 -cp "${CP}build/classes:build/deps/ort-classes" -d "$R/cls" test/robolectric/*.java
-# One JVM per class: Engine is an app-wide singleton.
-for t in AppSmokeTest AppIndexingTest; do
-  "$J8" -Dfile.encoding=UTF-8 -Drobolectric.offline=true -Drobolectric.dependency.dir="$R/deps" \
-    -cp "$R/cls:${CP}build/classes:build/deps/ort-classes" org.junit.runner.JUnitCore $t
-done
+echo "== 4. app on Robolectric 4.14 (Android 14): screens, flows, indexing, background jobs"
+test/robolectric4/run.sh
 echo "ALL TESTS PASSED"

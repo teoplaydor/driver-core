@@ -1,13 +1,16 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <style name="AppTheme" parent="android:Theme.Material.Light.NoActionBar">
-        <item name="android:colorPrimary">#5B4BDB</item>
-        <item name="android:colorPrimaryDark">#4535B8</item>
-        <item name="android:colorAccent">#5B4BDB</item>
-        <item name="android:statusBarColor">#4535B8</item>
-        <item name="android:navigationBarColor">#F5F3FA</item>
+    <!-- One quiet dark theme: near-black blue-grey, no light variant. -->
+    <style name="AppTheme" parent="android:Theme.Material.NoActionBar">
+        <item name="android:colorPrimary">#141920</item>
+        <item name="android:colorPrimaryDark">#0E1116</item>
+        <item name="android:colorAccent">#8DA6C0</item>
+        <item name="android:colorControlActivated">#8DA6C0</item>
+        <item name="android:textColorHighlight">#3A4858</item>
+        <item name="android:statusBarColor">#0E1116</item>
+        <item name="android:navigationBarColor">#0E1116</item>
         <item name="android:windowBackground">@color/bg</item>
     </style>
-    <color name="bg">#F5F3FA</color>
-    <color name="icon_bg">#5B4BDB</color>
+    <color name="bg">#0E1116</color>
+    <color name="icon_bg">#18202A</color>
 </resources>

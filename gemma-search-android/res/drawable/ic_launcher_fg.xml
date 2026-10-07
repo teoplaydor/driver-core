@@ -7,18 +7,18 @@
     <!-- magnifier ring -->
     <path
         android:fillColor="#00000000"
-        android:strokeColor="#FFFFFF"
+        android:strokeColor="#C2CBD4"
         android:strokeWidth="6"
         android:pathData="M48,32 a16,16 0 1,0 0.01,0 Z" />
     <!-- handle -->
     <path
         android:fillColor="#00000000"
-        android:strokeColor="#FFFFFF"
+        android:strokeColor="#C2CBD4"
         android:strokeWidth="7"
         android:strokeLineCap="round"
         android:pathData="M60,60 L74,74" />
     <!-- sparkle -->
     <path
-        android:fillColor="#FFD86B"
+        android:fillColor="#8DA6C0"
         android:pathData="M48,38 L50.2,45.8 L58,48 L50.2,50.2 L48,58 L45.8,50.2 L38,48 L45.8,45.8 Z" />
 </vector>

@@ -1,0 +1,553 @@
+package io.github.teoplaydor.semsearch.app;
+
+import android.content.ClipData;
+import android.content.ClipboardManager;
+import android.content.Context;
+import android.text.InputType;
+import android.view.Gravity;
+import android.view.View;
+import android.view.ViewGroup;
+import android.widget.EditText;
+import android.widget.FrameLayout;
+import android.widget.ImageView;
+import android.widget.LinearLayout;
+import android.widget.ScrollView;
+import android.widget.TextView;
+
+import java.util.Locale;
+
+import io.github.teoplaydor.semsearch.core.HfRepo;
+
+/**
+ * Everything that is not searching, on one calm page: model, indexing (incl. the background mode),
+ * speed and search options. Values open bottom sheets; explanations are one quiet line at most.
+ */
+final class SettingsPanel extends FrameLayout implements Engine.Listener {
+    private final MainActivity a;
+    private final Engine e;
+    private final LinearLayout list;
+    private boolean closing;
+
+    // live parts
+    private TextView modelValue, modelHint, indexValue, indexStatus, accelValue, photosValue, videosValue, detailValue,
+            threadsValue, bridgeValue, dimsValue;
+    private TextView modelButton, indexButton, errorButton, deleteButton;
+    private ProgressLine modelProgress, indexProgress;
+    private Toggle autoToggle;
+
+    SettingsPanel(MainActivity activity) {
+        super(activity);
+        a = activity;
+        e = Engine.get(activity);
+        setBackgroundColor(Ui.BG);
+        setClickable(true);
+        Context c = activity;
+
+        LinearLayout column = new LinearLayout(c);
+        column.setOrientation(LinearLayout.VERTICAL);
+        addView(column, new LayoutParams(-1, -1));
+
+        LinearLayout bar = new LinearLayout(c);
+        bar.setGravity(Gravity.CENTER_VERTICAL);
+        bar.setPadding(Ui.dp(c, 8), Ui.dp(c, 10), Ui.dp(c, 16), Ui.dp(c, 6));
+        ImageView back = Ui.icon(c, Icon.BACK, Ui.TEXT, 44);
+        back.setOnClickListener(new OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                close();
+            }
+        });
+        bar.addView(back, new LinearLayout.LayoutParams(Ui.dp(c, 44), Ui.dp(c, 44)));
+        TextView title = Ui.text(c, "Настройки", 20, Ui.TEXT, Ui.SEMIBOLD);
+        title.setPadding(Ui.dp(c, 6), 0, 0, 0);
+        bar.addView(title);
+        column.addView(bar);
+
+        ScrollView sv = new ScrollView(c);
+        sv.setVerticalScrollBarEnabled(false);
+        sv.setOverScrollMode(OVER_SCROLL_NEVER);
+        list = new LinearLayout(c);
+        list.setOrientation(LinearLayout.VERTICAL);
+        list.setPadding(Ui.dp(c, 16), Ui.dp(c, 4), Ui.dp(c, 16), Ui.dp(c, 40));
+        sv.addView(list);
+        column.addView(sv, new LinearLayout.LayoutParams(-1, 0, 1));
+
+        buildModel();
+        buildIndex();
+        buildSpeed();
+        buildSearch();
+        TextView about = Ui.text(c, "EmbeddingGemma 2 (Google DeepMind, Apache 2.0) · версия " + BuildInfo.version(c)
+                + "\nВсё считается на телефоне, файлы никуда не отправляются.", 12, Ui.TEXT3, Ui.REGULAR);
+        about.setPadding(Ui.dp(c, 6), Ui.dp(c, 18), Ui.dp(c, 6), 0);
+        list.addView(about);
+        onEngineChanged();
+    }
+
+    // ------------------------------------------------------------------ building blocks
+
+    private LinearLayout section(String name) {
+        Context c = getContext();
+        TextView h = Ui.text(c, name, 13, Ui.TEXT3, Ui.MEDIUM);
+        h.setPadding(Ui.dp(c, 6), Ui.dp(c, 22), 0, Ui.dp(c, 8));
+        list.addView(h);
+        LinearLayout card = new LinearLayout(c);
+        card.setOrientation(LinearLayout.VERTICAL);
+        card.setBackground(Ui.round(c, Ui.SURFACE, 22));
+        card.setPadding(0, Ui.dp(c, 4), 0, Ui.dp(c, 4));
+        list.addView(card, new LinearLayout.LayoutParams(-1, -2));
+        return card;
+    }
+
+    /** "Title ........ value >" row; returns the value view. */
+    private TextView row(LinearLayout card, String title, String hint, final Runnable onClick) {
+        Context c = getContext();
+        LinearLayout r = new LinearLayout(c);
+        r.setGravity(Gravity.CENTER_VERTICAL);
+        r.setPadding(Ui.dp(c, 18), Ui.dp(c, 14), Ui.dp(c, 12), Ui.dp(c, 14));
+        LinearLayout texts = new LinearLayout(c);
+        texts.setOrientation(LinearLayout.VERTICAL);
+        texts.addView(Ui.text(c, title, 15, Ui.TEXT, Ui.MEDIUM));
+        if (hint != null) {
+            TextView h = Ui.text(c, hint, 12.5f, Ui.TEXT3, Ui.REGULAR);
+            h.setPadding(0, Ui.dp(c, 4), 0, 0);
+            texts.addView(h);
+        }
+        r.addView(texts, new LinearLayout.LayoutParams(0, -2, 1));
+        TextView value = Ui.text(c, "", 14, Ui.TEXT2, Ui.REGULAR);
+        value.setGravity(Gravity.END);
+        value.setMaxLines(2);
+        LinearLayout.LayoutParams vl = new LinearLayout.LayoutParams(-2, -2);
+        vl.leftMargin = Ui.dp(c, 12);
+        r.addView(value, vl);
+        if (onClick != null) {
+            r.addView(Ui.icon(c, Icon.CHEVRON, Ui.TEXT3, 22), new LinearLayout.LayoutParams(Ui.dp(c, 22), Ui.dp(c, 22)));
+            r.setOnClickListener(new OnClickListener() {
+                @Override
+                public void onClick(View v) {
+                    onClick.run();
+                }
+            });
+            r.setBackground(Ui.round(c, 0x00000000, 22));
+        }
+        card.addView(r, new LinearLayout.LayoutParams(-1, -2));
+        return value;
+    }
+
+    private TextView action(LinearLayout card, String label, boolean primary, final Runnable r) {
+        Context c = getContext();
+        TextView b = Sheet.button(c, label, primary);
+        b.setOnClickListener(new OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                r.run();
+            }
+        });
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-1, Ui.dp(c, 48));
+        lp.setMargins(Ui.dp(c, 14), Ui.dp(c, 6), Ui.dp(c, 14), Ui.dp(c, 8));
+        card.addView(b, lp);
+        return b;
+    }
+
+    private TextView quiet(LinearLayout card, String label, int color, final Runnable r) {
+        Context c = getContext();
+        TextView t = Ui.text(c, label, 14, color, Ui.MEDIUM);
+        t.setPadding(Ui.dp(c, 18), Ui.dp(c, 12), Ui.dp(c, 18), Ui.dp(c, 12));
+        t.setOnClickListener(new OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                r.run();
+            }
+        });
+        card.addView(t);
+        return t;
+    }
+
+    private ProgressLine progress(LinearLayout card) {
+        Context c = getContext();
+        ProgressLine p = new ProgressLine(c);
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-1, Ui.dp(c, 3));
+        lp.setMargins(Ui.dp(c, 18), Ui.dp(c, 2), Ui.dp(c, 18), Ui.dp(c, 8));
+        card.addView(p, lp);
+        return p;
+    }
+
+    private TextView note(LinearLayout card) {
+        Context c = getContext();
+        TextView t = Ui.text(c, "", 12.5f, Ui.TEXT2, Ui.REGULAR);
+        t.setPadding(Ui.dp(c, 18), 0, Ui.dp(c, 18), Ui.dp(c, 8));
+        card.addView(t);
+        return t;
+    }
+
+    private ViewGroup root() {
+        return (ViewGroup) getParent();
+    }
+
+    // ------------------------------------------------------------------ sections
+
+    private void buildModel() {
+        LinearLayout card = section("Модель");
+        modelValue = row(card, "EmbeddingGemma 2", null, null);
+        modelProgress = progress(card);
+        modelHint = note(card);
+        modelButton = action(card, "Скачать", true, new Runnable() {
+            @Override
+            public void run() {
+                if (e.state == Engine.State.DOWNLOADING) e.cancelDownload();
+                else a.downloadModel();
+            }
+        });
+        errorButton = quiet(card, "Скопировать подробности ошибки", Ui.ACCENT, new Runnable() {
+            @Override
+            public void run() {
+                ClipboardManager cm = (ClipboardManager) getContext().getSystemService(Context.CLIPBOARD_SERVICE);
+                cm.setPrimaryClip(ClipData.newPlainText("SemSearch error", e.errorDetails));
+                a.toast("Скопировано — вставьте в чат");
+            }
+        });
+        row(card, "Источник", "Hugging Face, токен, фото и видео", new Runnable() {
+            @Override
+            public void run() {
+                sourceSheet();
+            }
+        });
+        deleteButton = quiet(card, "Удалить модель с телефона", Ui.DANGER, new Runnable() {
+            @Override
+            public void run() {
+                Sheet.confirm(root(), "Удалить модель?", "Индекс сохранится, модель можно скачать снова.", "Удалить", new Runnable() {
+                    @Override
+                    public void run() {
+                        e.deleteModel();
+                    }
+                });
+            }
+        });
+    }
+
+    private void sourceSheet() {
+        Context c = getContext();
+        final Sheet s = new Sheet(c, "Источник модели");
+        final EditText repo = field(c, HfRepo.DEFAULT_REPO);
+        repo.setText(e.repo());
+        final EditText token = field(c, "Токен — только если доступ закрыт");
+        token.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
+        token.setText(e.prefs().getString("token", ""));
+        s.body().addView(repo, new LinearLayout.LayoutParams(-1, Ui.dp(c, 50)));
+        LinearLayout.LayoutParams tl = new LinearLayout.LayoutParams(-1, Ui.dp(c, 50));
+        tl.topMargin = Ui.dp(c, 8);
+        s.body().addView(token, tl);
+        LinearLayout vr = new LinearLayout(c);
+        vr.setGravity(Gravity.CENTER_VERTICAL);
+        vr.setPadding(Ui.dp(c, 4), Ui.dp(c, 14), 0, Ui.dp(c, 4));
+        vr.addView(Ui.text(c, "Фото и видео (визуальный энкодер)", 14.5f, Ui.TEXT, Ui.MEDIUM), new LinearLayout.LayoutParams(0, -2, 1));
+        final Toggle vision = new Toggle(c, e.prefs().getBoolean("vision", true));
+        vr.addView(vision);
+        s.body().addView(vr);
+        final TextView plan = Ui.text(c, "", 13, Ui.TEXT2, Ui.REGULAR);
+        plan.setPadding(Ui.dp(c, 4), Ui.dp(c, 10), 0, 0);
+        s.body().addView(plan);
+        LinearLayout buttons = new LinearLayout(c);
+        buttons.setPadding(0, Ui.dp(c, 16), 0, 0);
+        TextView check = Sheet.button(c, "Проверить", false);
+        check.setOnClickListener(new OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                plan.setText("Проверяю…");
+                e.checkRepo(repo.getText().toString(), token.getText().toString(), vision.isOn(), new Engine.Callback<HfRepo.Plan>() {
+                    @Override
+                    public void done(HfRepo.Plan p, Exception err) {
+                        plan.setText(err != null ? "Ошибка: " + err.getMessage()
+                                : String.format(Locale.ROOT, "Будет скачано %.0f МБ, %d файлов", p.totalBytes / 1048576.0, p.files.size()));
+                    }
+                });
+            }
+        });
+        TextView dl = Sheet.button(c, "Скачать", true);
+        dl.setOnClickListener(new OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                e.download(repo.getText().toString(), token.getText().toString(), vision.isOn());
+                s.dismiss();
+            }
+        });
+        LinearLayout.LayoutParams b1 = new LinearLayout.LayoutParams(0, Ui.dp(c, 50), 1);
+        LinearLayout.LayoutParams b2 = new LinearLayout.LayoutParams(0, Ui.dp(c, 50), 1);
+        b2.leftMargin = Ui.dp(c, 10);
+        buttons.addView(check, b1);
+        buttons.addView(dl, b2);
+        s.body().addView(buttons);
+        s.show(root());
+    }
+
+    static EditText field(Context c, String hint) {
+        EditText t = new EditText(c);
+        t.setHint(hint);
+        t.setSingleLine(true);
+        t.setTextColor(Ui.TEXT);
+        t.setHintTextColor(Ui.TEXT3);
+        t.setTextSize(15);
+        t.setTypeface(Ui.font(c, Ui.REGULAR));
+        t.setBackground(Ui.round(c, Ui.SURFACE2, 16));
+        t.setPadding(Ui.dp(c, 16), 0, Ui.dp(c, 16), 0);
+        return t;
+    }
+
+    private void buildIndex() {
+        LinearLayout card = section("Индексация");
+        indexValue = row(card, "В индексе", null, null);
+        indexProgress = progress(card);
+        indexStatus = note(card);
+        indexButton = action(card, "Индексировать сейчас", true, new Runnable() {
+            @Override
+            public void run() {
+                if (e.indexing) e.stopIndex();
+                else a.requestMediaAndIndex();
+            }
+        });
+        Context c = getContext();
+        LinearLayout r = new LinearLayout(c);
+        r.setGravity(Gravity.CENTER_VERTICAL);
+        r.setPadding(Ui.dp(c, 18), Ui.dp(c, 12), Ui.dp(c, 16), Ui.dp(c, 12));
+        LinearLayout texts = new LinearLayout(c);
+        texts.setOrientation(LinearLayout.VERTICAL);
+        texts.addView(Ui.text(c, "Новые фото — автоматически", 15, Ui.TEXT, Ui.MEDIUM));
+        TextView h = Ui.text(c, "в фоне, когда появляются фото, скриншоты и видео", 12.5f, Ui.TEXT3, Ui.REGULAR);
+        h.setPadding(0, Ui.dp(c, 4), 0, 0);
+        texts.addView(h);
+        r.addView(texts, new LinearLayout.LayoutParams(0, -2, 1));
+        autoToggle = new Toggle(c, AutoIndex.enabled(c));
+        autoToggle.setListener(new Toggle.Listener() {
+            @Override
+            public void changed(boolean on) {
+                AutoIndex.setEnabled(getContext(), on);
+            }
+        });
+        r.addView(autoToggle);
+        card.addView(r);
+
+        photosValue = row(card, "Фото", null, new Runnable() {
+            @Override
+            public void run() {
+                Sheet.choose(root(), "Сколько последних фото", new String[]{"100", "300", "1000", "3000", "Все"}, null,
+                        e.prefs().getInt("photo_limit", 4), new Sheet.Choice() {
+                            @Override
+                            public void chosen(int i) {
+                                e.prefs().edit().putInt("photo_limit", i).apply();
+                                onEngineChanged();
+                            }
+                        });
+            }
+        });
+        videosValue = row(card, "Видео", null, new Runnable() {
+            @Override
+            public void run() {
+                Sheet.choose(root(), "Видео", new String[]{"Не индексировать", "Последние 10", "Последние 30", "Последние 100"},
+                        new String[]{null, "по " + Engine.VIDEO_FRAMES + " кадра из каждого", null, null},
+                        e.prefs().getInt("video_limit", 1), new Sheet.Choice() {
+                            @Override
+                            public void chosen(int i) {
+                                e.prefs().edit().putInt("video_limit", i).apply();
+                                onEngineChanged();
+                            }
+                        });
+            }
+        });
+        detailValue = row(card, "Детализация", null, new Runnable() {
+            @Override
+            public void run() {
+                Sheet.choose(root(), "Детализация фото", new String[]{"Быстрая", "Средняя", "Максимальная"},
+                        new String[]{"70 токенов — для обычных фото", "140 — мелкие детали", "280 — текст на скриншотах, медленно"},
+                        e.prefs().getInt("photo_detail", 0), new Sheet.Choice() {
+                            @Override
+                            public void chosen(int i) {
+                                e.prefs().edit().putInt("photo_detail", i).apply();
+                                onEngineChanged();
+                            }
+                        });
+            }
+        });
+        quiet(card, "Очистить индекс фото и видео", Ui.DANGER, new Runnable() {
+            @Override
+            public void run() {
+                Sheet.confirm(root(), "Очистить индекс?", "Сами файлы не трогаются, заметки останутся.", "Очистить", new Runnable() {
+                    @Override
+                    public void run() {
+                        e.clearMediaIndex();
+                    }
+                });
+            }
+        });
+    }
+
+    private void buildSpeed() {
+        LinearLayout card = section("Скорость");
+        accelValue = row(card, "Ускорение", null, new Runnable() {
+            @Override
+            public void run() {
+                Sheet.choose(root(), "Где считать", Engine.ACCEL_NAMES, null, e.accel(), new Sheet.Choice() {
+                    @Override
+                    public void chosen(int i) {
+                        if (i == e.accel()) return;
+                        if (i >= Engine.ACCEL_GPU && e.gpuBroken()) {
+                            a.toast("Видеокарта на этом телефоне уже приводила к сбою — оставляю процессор");
+                            return;
+                        }
+                        e.prefs().edit().putInt("accel", i).apply();
+                        if (e.ready() && !e.indexing) e.loadModel();
+                        onEngineChanged();
+                    }
+                });
+            }
+        });
+        action(card, "Подобрать самое быстрое", false, new Runnable() {
+            @Override
+            public void run() {
+                a.runBenchmark();
+            }
+        });
+        threadsValue = row(card, "Потоки процессора", null, new Runnable() {
+            @Override
+            public void run() {
+                final int[] opts = {0, 2, 3, 4, 6, 8};
+                int cur = 0;
+                for (int i = 0; i < opts.length; i++) if (opts[i] == e.prefs().getInt("threads", 0)) cur = i;
+                Sheet.choose(root(), "Потоки", new String[]{"Авто (" + Engine.autoThreads() + ")", "2", "3", "4", "6", "8"},
+                        new String[]{"быстрые ядра", null, null, null, null, null}, cur, new Sheet.Choice() {
+                            @Override
+                            public void chosen(int i) {
+                                if (opts[i] == e.prefs().getInt("threads", 0)) return;
+                                e.prefs().edit().putInt("threads", opts[i]).apply();
+                                if (e.ready() && !e.indexing) e.loadModel();
+                                onEngineChanged();
+                            }
+                        });
+            }
+        });
+    }
+
+    private void buildSearch() {
+        LinearLayout card = section("Поиск");
+        bridgeValue = row(card, "Русские запросы к фото", null, new Runnable() {
+            @Override
+            public void run() {
+                Sheet.choose(root(), "Русские запросы к фото", new String[]{"Русский + перевод", "Только перевод", "Без перевода"},
+                        new String[]{"рекомендуется: модель лучше понимает английский", null, null}, e.bridgeMode(),
+                        new Sheet.Choice() {
+                            @Override
+                            public void chosen(int i) {
+                                e.prefs().edit().putInt("bridge_mode", i).apply();
+                                onEngineChanged();
+                            }
+                        });
+            }
+        });
+        dimsValue = row(card, "Длина вектора", null, new Runnable() {
+            @Override
+            public void run() {
+                final int[] dims = {768, 512, 256, 128};
+                int cur = 0;
+                for (int i = 0; i < dims.length; i++) if (dims[i] == e.searchDims()) cur = i;
+                Sheet.choose(root(), "Длина вектора", new String[]{"768", "512", "256", "128"},
+                        new String[]{"полная точность", null, null, "меньше памяти, чуть ниже точность"}, cur, new Sheet.Choice() {
+                            @Override
+                            public void chosen(int i) {
+                                e.prefs().edit().putInt("dims", dims[i]).apply();
+                                onEngineChanged();
+                            }
+                        });
+            }
+        });
+        action(card, "Проверить качество поиска", false, new Runnable() {
+            @Override
+            public void run() {
+                a.runDiagnostics();
+            }
+        });
+    }
+
+    // ------------------------------------------------------------------ state
+
+    @Override
+    public void onEngineChanged() {
+        Engine.State st = e.state;
+        boolean busy = st == Engine.State.DOWNLOADING || st == Engine.State.LOADING;
+        String mv;
+        switch (st) {
+            case READY: mv = "готова"; break;
+            case DOWNLOADING: mv = e.dlTotal > 0 ? String.format(Locale.ROOT, "%d%%", 100 * e.dlDone / Math.max(1, e.dlTotal)) : "загрузка"; break;
+            case LOADING: mv = "загружается"; break;
+            case ERROR: mv = "ошибка"; break;
+            default: mv = e.hasModelFiles() ? "не загружена" : "не скачана";
+        }
+        modelValue.setText(mv);
+        modelValue.setTextColor(st == Engine.State.ERROR ? Ui.DANGER : st == Engine.State.READY ? Ui.ACCENT : Ui.TEXT2);
+        modelProgress.setVisibility(busy ? VISIBLE : GONE);
+        modelProgress.setIndeterminate(st == Engine.State.LOADING || e.dlTotal <= 0);
+        if (e.dlTotal > 0) modelProgress.setProgress((float) e.dlDone / e.dlTotal);
+        String hint = st == Engine.State.READY ? Engine.ACCEL_NAMES[e.loadedAccel] + ", потоков " + e.threads
+                : st == Engine.State.DOWNLOADING && e.dlTotal > 0
+                ? String.format(Locale.ROOT, "%.0f из %.0f МБ", e.dlDone / 1048576.0, e.dlTotal / 1048576.0)
+                : st == Engine.State.ERROR ? e.status : "";
+        modelHint.setText(hint);
+        modelHint.setVisibility(hint.isEmpty() ? GONE : VISIBLE);
+        modelButton.setText(st == Engine.State.DOWNLOADING ? "Остановить загрузку"
+                : st == Engine.State.READY ? "Скачать заново" : st == Engine.State.ERROR && e.hasModelFiles() ? "Повторить" : "Скачать");
+        modelButton.setVisibility(st == Engine.State.LOADING ? GONE : VISIBLE);
+        modelButton.setBackground(Ui.round(getContext(), st == Engine.State.READY ? Ui.SURFACE3 : Ui.ACCENT, 16));
+        modelButton.setTextColor(st == Engine.State.READY ? Ui.TEXT : Ui.ON_ACCENT);
+        errorButton.setVisibility(st == Engine.State.ERROR && e.errorDetails != null ? VISIBLE : GONE);
+        deleteButton.setVisibility(e.hasModelFiles() && !busy ? VISIBLE : GONE);
+
+        IndexStore s = e.store();
+        if (s != null) {
+            indexValue.setText(String.format(Locale.ROOT, "%d фото · %d видео\n%d заметок", s.count(IndexStore.KIND_PHOTO),
+                    s.count(IndexStore.KIND_VIDEO), s.count(IndexStore.KIND_NOTE)));
+        }
+        indexProgress.setVisibility(e.indexing ? VISIBLE : GONE);
+        indexProgress.setIndeterminate(e.idxTotal == 0);
+        if (e.idxTotal > 0) indexProgress.setProgress((float) e.idxDone / e.idxTotal);
+        String status = e.idxStatus == null ? "" : e.idxStatus.split("\n")[0];
+        indexStatus.setText(status);
+        indexStatus.setVisibility(status.isEmpty() ? GONE : VISIBLE);
+        indexButton.setText(e.indexing ? "Остановить" : "Индексировать сейчас");
+        autoToggle.setOn(AutoIndex.enabled(getContext()), false);
+        int pl = e.prefs().getInt("photo_limit", 4);
+        photosValue.setText(pl >= 4 ? "все" : Engine.PHOTO_LIMITS[pl] + " последних");
+        int vl = e.prefs().getInt("video_limit", 1);
+        videosValue.setText(vl == 0 ? "нет" : Engine.VIDEO_LIMITS[vl] + " последних");
+        detailValue.setText(new String[]{"быстрая", "средняя", "максимальная"}[Math.max(0, Math.min(2, e.prefs().getInt("photo_detail", 0)))]);
+        accelValue.setText(Engine.ACCEL_NAMES[e.accel()].replace(" (WebGPU)", ""));
+        int t = e.prefs().getInt("threads", 0);
+        threadsValue.setText(t == 0 ? "авто" : String.valueOf(t));
+        bridgeValue.setText(new String[]{"русский + перевод", "только перевод", "без перевода"}[e.bridgeMode()]);
+        dimsValue.setText(String.valueOf(e.searchDims()));
+    }
+
+    // ------------------------------------------------------------------ open / close
+
+    void open(ViewGroup parent) {
+        parent.addView(this, new ViewGroup.LayoutParams(-1, -1));
+        e.addListener(this);
+        setTranslationY(Ui.dp(getContext(), 60));
+        setAlpha(0f);
+        animate().translationY(0).alpha(1f).setDuration(280).setInterpolator(Ui.EASE).start();
+    }
+
+    boolean isClosing() {
+        return closing;
+    }
+
+    void close() {
+        if (closing) return;
+        closing = true;
+        e.removeListener(this);
+        animate().translationY(Ui.dp(getContext(), 60)).alpha(0f).setDuration(200).setInterpolator(Ui.EASE).withEndAction(new Runnable() {
+            @Override
+            public void run() {
+                ViewGroup p = (ViewGroup) getParent();
+                if (p != null) p.removeView(SettingsPanel.this);
+                a.settingsClosed();
+            }
+        }).start();
+    }
+}
