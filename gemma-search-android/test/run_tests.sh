@@ -47,6 +47,15 @@ python3 tools/stemmer_reference.py "$T/gemma3/tokenizer.json" "$T/stem-cases.tsv
 java -Dfile.encoding=UTF-8 -cp "$T/cls" StemmerParityTest "$T/stem-cases.tsv"
 java -Dfile.encoding=UTF-8 -cp "$T/cls" QueryBridgeTest assets/ru_en_lexicon.txt
 
+echo "== 2c. int8 compute (accuracy_level) and GPU fallback"
+python3 -m pip install -q onnxruntime onnx_ir
+python3 test/accel/make_q4_model.py "$T/accel" >/dev/null 2>&1
+javac --release 8 -XDstringConcat=inline -nowarn -encoding UTF-8 -cp "$T/cls:$T/ort-desktop.jar" -d "$T/cls" \
+  test/accel/AccuracyLevelTest.java test/accel/AccelPipelineTest.java
+java -cp "$T/cls:$T/ort-desktop.jar" AccuracyLevelTest "$T/accel"
+python3 test/accel/quantize_dummy.py "$T/models/dummy" >/dev/null 2>&1
+java -cp "$T/cls:build/deps/ort-classes:$T/ort-desktop.jar" AccelPipelineTest "$T/models/dummy"
+
 echo "== 3. Hub download"
 python3 tools/mock_hub.py 18765 & HUB=$!
 trap 'kill $HUB 2>/dev/null || true' EXIT

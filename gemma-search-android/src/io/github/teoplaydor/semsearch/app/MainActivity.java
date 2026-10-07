@@ -91,6 +91,8 @@ public final class MainActivity extends Activity implements Engine.Listener {
     private EditText repoField, tokenField;
     private CheckBox visionBox;
     private Button dlButton, cancelButton, deleteButton, copyErrorButton;
+    private TextView accelInfo;
+    private Spinner accelSpinner;
 
     private Intent pendingShare;
     private final ExecutorService thumbPool = Executors.newFixedThreadPool(2);
@@ -686,6 +688,17 @@ public final class MainActivity extends Activity implements Engine.Listener {
         gap(set, 6);
         set.addView(text("Больше токенов — точнее мелкие детали и текст на скриншотах, но медленнее. "
                 + "Если поменять детализацию, уже проиндексированные фото останутся как есть.", 13, cText2, false));
+        gap(set, 10);
+        Button bench = button("Подобрать самое быстрое ускорение (1–2 мин)", false);
+        bench.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                runBenchmark();
+            }
+        });
+        set.addView(bench, new LinearLayout.LayoutParams(-1, -2));
+        accelInfo = text("", 13, cText2, false);
+        set.addView(accelInfo);
 
         LinearLayout run = card(page, "Индексация");
         indexButton = button("Начать индексацию", true);
@@ -1060,6 +1073,29 @@ public final class MainActivity extends Activity implements Engine.Listener {
         r2.addView(deleteButton, lp2);
         src.addView(r2);
 
+        LinearLayout acc = card(page, "Ускорение");
+        acc.addView(text("Где считается модель. «Подобрать» на вкладке «Индекс» замерит все варианты на этом телефоне "
+                + "и выберет самый быстрый; здесь можно выбрать вручную.", 13, cText2, false));
+        accelSpinner = spinner(Engine.ACCEL_NAMES, engine.accel());
+        accelSpinner.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
+            @Override
+            public void onItemSelected(AdapterView<?> p, View v, int pos, long id) {
+                if (pos == engine.accel()) return; // initial selection / no change
+                if (pos >= Engine.ACCEL_GPU && engine.gpuBroken()) {
+                    toast("Видеокарта на этом телефоне уже приводила к сбою — оставляю процессор");
+                    accelSpinner.setSelection(engine.accel());
+                    return;
+                }
+                engine.prefs.edit().putInt("accel", pos).apply();
+                if (engine.ready() && !engine.indexing) engine.loadModel();
+            }
+
+            @Override
+            public void onNothingSelected(AdapterView<?> p) {
+            }
+        });
+        acc.addView(accelSpinner);
+
         LinearLayout s = card(page, "Поиск");
         s.addView(text("Длина вектора (Matryoshka): короче — меньше памяти, чуть ниже точность", 13, cText2, false));
         final int[] dims = {768, 512, 256, 128};
@@ -1126,6 +1162,43 @@ public final class MainActivity extends Activity implements Engine.Listener {
         });
         s.addView(diag, new LinearLayout.LayoutParams(-1, -2));
         return sv;
+    }
+
+    private void runBenchmark() {
+        if (!engine.ready()) {
+            toast("Сначала скачайте модель");
+            return;
+        }
+        if (engine.indexing) {
+            toast("Остановите индексацию — замер идёт на том же процессоре");
+            return;
+        }
+        toast("Замеряю варианты… телефон может нагреться");
+        engine.benchmark(new Engine.Callback<String>() {
+            @Override
+            public void done(final String report, Exception e) {
+                accelSpinner.setSelection(engine.accel());
+                TextView t = text(report != null ? report : String.valueOf(e), 13, cText, false);
+                t.setTextIsSelectable(true);
+                t.setPadding(dp(20), dp(12), dp(20), dp(12));
+                ScrollView sv = new ScrollView(MainActivity.this);
+                sv.addView(t);
+                new AlertDialog.Builder(MainActivity.this)
+                        .setTitle("Скорость индексации")
+                        .setView(sv)
+                        .setPositiveButton("Скопировать", new DialogInterface.OnClickListener() {
+                            @Override
+                            public void onClick(DialogInterface d, int w) {
+                                android.content.ClipboardManager cm =
+                                        (android.content.ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
+                                cm.setPrimaryClip(android.content.ClipData.newPlainText("SemSearch benchmark", report));
+                                toast("Скопировано — вставьте в чат");
+                            }
+                        })
+                        .setNegativeButton("Закрыть", null)
+                        .show();
+            }
+        });
     }
 
     private void runDiagnostics() {
@@ -1207,6 +1280,10 @@ public final class MainActivity extends Activity implements Engine.Listener {
             notesAdapter.notifyDataSetChanged();
         }
         indexButton.setText(engine.indexing ? "Остановить" : "Начать индексацию");
+        if (engine.ready()) {
+            accelInfo.setText("Сейчас: " + Engine.ACCEL_NAMES[engine.loadedAccel] + ", потоков " + engine.threads
+                    + (engine.prefs.getBoolean("accel_chosen", false) ? "" : " · ещё не подбиралось"));
+        }
         indexStatus.setText(engine.idxStatus);
         indexProgress.setVisibility(engine.indexing ? View.VISIBLE : View.GONE);
         indexProgress.setIndeterminate(engine.idxTotal == 0);

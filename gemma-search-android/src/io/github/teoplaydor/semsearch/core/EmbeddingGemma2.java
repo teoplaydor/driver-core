@@ -42,29 +42,47 @@ public final class EmbeddingGemma2 implements Embedder {
     private volatile long lastVisionMs, lastTextMs;
 
     public EmbeddingGemma2(File dir, File textModel, File visionModel, int threads) throws IOException, OrtException {
-        try {
-            cfg = ModelConfig.load(dir);
-        } catch (Exception e) {
-            throw new IOException("конфиги модели: " + e, e);
-        }
-        try {
-            tokenizer = HfTokenizer.load(new File(dir, "tokenizer.json"), new File(dir, "tokenizer.bin"));
-        } catch (Exception e) {
-            throw new IOException("токенизатор: " + e, e);
-        }
+        this(loadConfig(dir), loadTokenizer(dir), textModel, visionModel, threads, false);
+    }
+
+    /**
+     * @param gpuVision run the vision encoder on the GPU through ONNX Runtime's WebGPU execution
+     *                  provider (Vulkan on Android); unsupported ops fall back to the CPU.
+     */
+    public EmbeddingGemma2(ModelConfig config, HfTokenizer tok, File textModel, File visionModel, int threads,
+                           boolean gpuVision) throws IOException, OrtException {
+        cfg = config;
+        tokenizer = tok;
         resolveSpecialTokens();
         env = OrtEnvironment.getEnvironment();
         try {
-            textSession = env.createSession(textModel.getPath(), options(threads));
+            textSession = env.createSession(textModel.getPath(), options(threads, false));
         } catch (OrtException e) {
             throw new IOException("текстовая модель " + textModel.getName() + ": " + e.getMessage(), e);
         }
         try {
             visionSession = visionModel != null && visionModel.exists()
-                    ? env.createSession(visionModel.getPath(), options(threads)) : null;
+                    ? env.createSession(visionModel.getPath(), options(threads, gpuVision)) : null;
         } catch (OrtException e) {
             textSession.close();
-            throw new IOException("визуальный энкодер " + visionModel.getName() + ": " + e.getMessage(), e);
+            throw new IOException("визуальный энкодер " + visionModel.getName() + (gpuVision ? " (GPU)" : "")
+                    + ": " + e.getMessage(), e);
+        }
+    }
+
+    public static ModelConfig loadConfig(File dir) throws IOException {
+        try {
+            return ModelConfig.load(dir);
+        } catch (Exception e) {
+            throw new IOException("конфиги модели: " + e, e);
+        }
+    }
+
+    public static HfTokenizer loadTokenizer(File dir) throws IOException {
+        try {
+            return HfTokenizer.load(new File(dir, "tokenizer.json"), new File(dir, "tokenizer.bin"));
+        } catch (Exception e) {
+            throw new IOException("токенизатор: " + e, e);
         }
     }
 
@@ -83,10 +101,11 @@ public final class EmbeddingGemma2 implements Embedder {
         cfg.hasVideo = cfg.hasVideo || (cfg.videoToken != null && cfg.videoTokenId >= 0 && cfg.hasVideoProcessor);
     }
 
-    private static OrtSession.SessionOptions options(int threads) throws OrtException {
+    private static OrtSession.SessionOptions options(int threads, boolean gpu) throws OrtException {
         OrtSession.SessionOptions o = new OrtSession.SessionOptions();
         o.setOptimizationLevel(OrtSession.SessionOptions.OptLevel.ALL_OPT);
         if (threads > 0) o.setIntraOpNumThreads(threads);
+        if (gpu) o.addWebGPU(new java.util.HashMap<String, String>());
         // Thread spinning stays at ORT's default (on): indexing runs back-to-back inferences, and parking
         // worker threads between ops made each photo noticeably slower.
         return o;

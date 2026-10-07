@@ -21,6 +21,10 @@ import java.util.concurrent.Future;
 import io.github.teoplaydor.semsearch.core.Embedder;
 import io.github.teoplaydor.semsearch.core.EmbeddingGemma2;
 import io.github.teoplaydor.semsearch.core.HfRepo;
+import io.github.teoplaydor.semsearch.core.HfTokenizer;
+import io.github.teoplaydor.semsearch.core.ModelConfig;
+import io.github.teoplaydor.semsearch.core.OnnxPatcher;
+import io.github.teoplaydor.semsearch.core.PatternSource;
 import io.github.teoplaydor.semsearch.core.QueryBridge;
 import io.github.teoplaydor.semsearch.core.VectorMath;
 
@@ -57,6 +61,7 @@ public final class Engine {
     private long sumWaitMs, sumVisionMs, sumTextMs;
     private int timedPhotos;
     public volatile int threads;
+    public volatile int loadedAccel;
     private final CopyOnWriteArrayList<Listener> listeners = new CopyOnWriteArrayList<Listener>();
     final SharedPreferences prefs;
     final File modelDir;
@@ -94,6 +99,12 @@ public final class Engine {
     private Engine(Context ctx) {
         this.ctx = ctx;
         prefs = ctx.getSharedPreferences("settings", Context.MODE_PRIVATE);
+        if (prefs.getBoolean("gpu_probe", false)) {
+            // The previous run died while creating a GPU session (a driver crash cannot be caught):
+            // never try the GPU again on this phone and fall back to the CPU.
+            prefs.edit().putBoolean("gpu_broken", true).putBoolean("gpu_probe", false)
+                    .putInt("accel", Math.min(prefs.getInt("accel", ACCEL_CPU), ACCEL_CPU_INT8)).apply();
+        }
         modelDir = new File(ctx.getFilesDir(), "model");
         manifest = new File(modelDir, "manifest.json");
         ml.submit(new Runnable() {
@@ -243,9 +254,20 @@ public final class Engine {
                     }
                     long t0 = System.currentTimeMillis();
                     threads = threadCount();
-                    File vision = plan.visionModel == null ? null : new File(modelDir, plan.visionModel);
                     step = "инициализация";
-                    model = new EmbeddingGemma2(modelDir, new File(modelDir, plan.textModel), vision, threads);
+                    ModelConfig cfg = EmbeddingGemma2.loadConfig(modelDir);
+                    HfTokenizer tok = EmbeddingGemma2.loadTokenizer(modelDir);
+                    int accel = accel();
+                    try {
+                        model = createModel(cfg, tok, plan, accel, threads);
+                    } catch (Exception gpuOrInt8Failure) {
+                        if (accel == ACCEL_CPU) throw gpuOrInt8Failure;
+                        android.util.Log.w("SemSearch", "accel " + accel + " failed, using CPU", gpuOrInt8Failure);
+                        prefs.edit().putInt("accel", ACCEL_CPU).apply();
+                        accel = ACCEL_CPU;
+                        model = createModel(cfg, tok, plan, ACCEL_CPU, threads);
+                    }
+                    loadedAccel = accel;
                     // Warm-up run (first inference allocates buffers) and embedding size.
                     step = "пробный запуск";
                     model.embedQuery("привет");
@@ -259,7 +281,7 @@ public final class Engine {
                     }
                     state = State.READY;
                     status = "Модель готова (" + (System.currentTimeMillis() - t0) / 100 / 10.0 + " с), "
-                            + model.embeddingDim() + " изм., потоков: " + threads
+                            + model.embeddingDim() + " изм., " + ACCEL_NAMES[loadedAccel] + ", потоков: " + threads
                             + (model.supportsImages() ? "" : " · только текст");
                 } catch (Throwable e) {
                     if (model != null) model.close();
@@ -552,6 +574,157 @@ public final class Engine {
             prefs.edit().putInt("photo_detail", PHOTO_BUDGETS.length - 1).apply();
             return model.embedImage(new Media.BitmapSource(b), 0);
         }
+    }
+
+    // ------------------------------------------------------------------ acceleration
+
+    public static final int ACCEL_CPU = 0, ACCEL_CPU_INT8 = 1, ACCEL_GPU = 2, ACCEL_GPU_INT8 = 3;
+    public static final String[] ACCEL_NAMES = {"Процессор", "Процессор, int8", "Видеокарта (WebGPU)",
+            "Видеокарта (WebGPU), int8"};
+
+    public int accel() {
+        int a = prefs.getInt("accel", ACCEL_CPU);
+        if (a >= ACCEL_GPU && prefs.getBoolean("gpu_broken", false)) a = ACCEL_CPU;
+        return Math.max(0, Math.min(ACCEL_NAMES.length - 1, a));
+    }
+
+    public boolean gpuBroken() { return prefs.getBoolean("gpu_broken", false); }
+
+    /**
+     * Graph file for a component: the original, or a copy whose 4-bit MatMuls compute in int8
+     * (accuracy_level 4, see OnnxPatcher). The copy shares the original's external weights.
+     */
+    private File graphFile(String rel, boolean int8) throws java.io.IOException {
+        File orig = new File(modelDir, rel);
+        if (!int8) return orig;
+        File patched = new File(modelDir, rel.replace(".onnx", ".int8.onnx"));
+        if (!patched.exists() || patched.lastModified() < orig.lastModified()) {
+            if (OnnxPatcher.setMatMulNBitsAccuracy(orig, patched, 4) == 0) {
+                patched.delete();
+                return orig;
+            }
+        }
+        return patched;
+    }
+
+    private EmbeddingGemma2 createModel(ModelConfig cfg, HfTokenizer tok, HfRepo.Plan plan, int accel, int nThreads)
+            throws Exception {
+        boolean int8 = accel == ACCEL_CPU_INT8 || accel == ACCEL_GPU_INT8;
+        boolean gpu = accel >= ACCEL_GPU;
+        File text = graphFile(plan.textModel, int8);
+        File vision = plan.visionModel == null ? null : graphFile(plan.visionModel, int8);
+        if (gpu) prefs.edit().putBoolean("gpu_probe", true).commit();
+        try {
+            return new EmbeddingGemma2(cfg, tok, text, vision, nThreads, gpu);
+        } finally {
+            if (gpu) prefs.edit().putBoolean("gpu_probe", false).commit();
+        }
+    }
+
+    /**
+     * Measures photo embedding speed for each accelerator (and a few thread counts) on this phone,
+     * rejects variants whose result drifts from the plain CPU one, and keeps the fastest.
+     */
+    public void benchmark(final Callback<String> cb) {
+        if (indexing) {
+            post(cb, null, new IllegalStateException("дождитесь конца индексации"));
+            return;
+        }
+        state = State.LOADING;
+        status = "Подбираю ускорение…";
+        notifyChanged();
+        ml.submit(new Runnable() {
+            @Override
+            public void run() {
+                StringBuilder rep = new StringBuilder();
+                try {
+                    if (model != null) {
+                        model.close();
+                        model = null;
+                    }
+                    HfRepo.Plan plan = HfRepo.loadManifest(manifest);
+                    if (plan == null || plan.visionModel == null) throw new IllegalStateException("нет визуального энкодера");
+                    ModelConfig cfg = EmbeddingGemma2.loadConfig(modelDir);
+                    HfTokenizer tok = EmbeddingGemma2.loadTokenizer(modelDir);
+                    int budget = photoBudget();
+                    int auto = autoThreads(), cores = Runtime.getRuntime().availableProcessors();
+                    rep.append("Детализация ").append(budget).append(" токенов, ядер ").append(cores)
+                            .append(", быстрых ").append(auto).append("\n\n");
+                    List<int[]> cands = new ArrayList<int[]>();
+                    for (int a = 0; a < ACCEL_NAMES.length; a++) {
+                        if (a >= ACCEL_GPU && gpuBroken()) continue;
+                        cands.add(new int[]{a, auto});
+                    }
+                    float[] reference = null;
+                    long bestMs = Long.MAX_VALUE;
+                    int bestA = ACCEL_CPU, bestT = auto, bestCpuA = ACCEL_CPU;
+                    long bestCpuMs = Long.MAX_VALUE;
+                    for (int i = 0; i < cands.size(); i++) {
+                        int a = cands.get(i)[0], t = cands.get(i)[1];
+                        String name = ACCEL_NAMES[a] + ", потоков " + t;
+                        status = "Подбираю ускорение " + (i + 1) + "/" + cands.size() + ": " + name;
+                        notifyChanged();
+                        EmbeddingGemma2 m = null;
+                        try {
+                            m = createModel(cfg, tok, plan, a, t);
+                            m.embedImage(new PatternSource(640, 480, 1), budget); // warm-up (GPU shader compile)
+                            long best = Long.MAX_VALUE;
+                            float[] emb = null;
+                            for (int k = 0; k < 2; k++) {
+                                long t0 = System.currentTimeMillis();
+                                emb = m.embedImage(new PatternSource(640, 480, 2), budget);
+                                best = Math.min(best, System.currentTimeMillis() - t0);
+                            }
+                            String sim = "";
+                            boolean ok = true;
+                            if (reference == null) {
+                                reference = emb;
+                            } else {
+                                float cos = 0;
+                                for (int j = 0; j < emb.length; j++) cos += emb[j] * reference[j];
+                                ok = cos >= 0.98f;
+                                sim = String.format(java.util.Locale.ROOT, ", совпадение %.3f", cos);
+                            }
+                            rep.append(String.format(java.util.Locale.ROOT, "• %s: %.2f с на фото%s%s\n", name,
+                                    best / 1000.0, sim, ok ? "" : " — отклонено, результат расходится"));
+                            if (ok && best < bestMs) {
+                                bestMs = best;
+                                bestA = a;
+                                bestT = t;
+                            }
+                            if (ok && a < ACCEL_GPU && best < bestCpuMs) {
+                                bestCpuMs = best;
+                                bestCpuA = a;
+                            }
+                        } catch (Throwable e) {
+                            rep.append("• ").append(name).append(": не работает — ")
+                                    .append(e.getMessage() != null ? e.getMessage() : e.toString()).append('\n');
+                        } finally {
+                            if (m != null) m.close();
+                        }
+                        // After the accelerators, try other thread counts for the best CPU variant.
+                        if (i == cands.size() - 1 && cands.size() <= ACCEL_NAMES.length && bestCpuMs < Long.MAX_VALUE) {
+                            java.util.LinkedHashSet<Integer> ts = new java.util.LinkedHashSet<Integer>();
+                            if (auto > 2) ts.add(auto - 1);
+                            ts.add(Math.min(cores, auto + 2));
+                            ts.add(cores);
+                            ts.remove(auto);
+                            for (int tt : ts) cands.add(new int[]{bestCpuA, tt});
+                        }
+                    }
+                    if (bestMs == Long.MAX_VALUE) throw new IllegalStateException("ни один вариант не сработал");
+                    prefs.edit().putInt("accel", bestA).putInt("threads", bestT == auto ? 0 : bestT)
+                            .putBoolean("accel_chosen", true).apply();
+                    rep.append(String.format(java.util.Locale.ROOT, "\nВыбрано: %s, потоков %d — %.2f с на фото",
+                            ACCEL_NAMES[bestA], bestT, bestMs / 1000.0));
+                    post(cb, rep.toString(), null);
+                } catch (Throwable e) {
+                    rep.append("\nОшибка: ").append(e.getMessage() != null ? e.getMessage() : e.toString());
+                    post(cb, rep.toString(), null);
+                }
+                loadModel();
+            }
+        });
     }
 
     /** Number of "big" CPU cores (max frequency ≥ 80% of the fastest one), clamped to 2..6. */
