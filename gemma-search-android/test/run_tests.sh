@@ -79,11 +79,15 @@ python3 test/accel/make_mha_graph.py "$T/accel/mha.onnx"
 javac --release 8 -XDstringConcat=inline -nowarn -encoding UTF-8 -cp "$T/cls:$T/ort-desktop.jar" -d "$T/cls" test/accel/Fp16AttentionTest.java
 java -Dfile.encoding=UTF-8 -Dstdout.encoding=UTF-8 -cp "$T/cls:build/deps/ort-classes:$T/ort-desktop.jar" Fp16AttentionTest \
   "$T/accel/mha.onnx" "$T/accel" "$T/models/dummy/onnx/vision_encoder.onnx"
+python3 test/accel/make_vit_block.py "$T/accel/vit.onnx"
+javac --release 8 -XDstringConcat=inline -nowarn -encoding UTF-8 -cp "$T/cls:$T/ort-desktop.jar" -d "$T/cls" test/accel/QnnRewriteTest.java
+java -Dfile.encoding=UTF-8 -Dstdout.encoding=UTF-8 -cp "$T/cls:build/deps/ort-classes:$T/ort-desktop.jar" QnnRewriteTest \
+  "$T/accel/vit.onnx" "$T/accel"
 python3 test/accel/make_attention_graph.py "$T/accel/attention.onnx"
 java -Dfile.encoding=UTF-8 -Dstdout.encoding=UTF-8 -cp "$T/cls:build/deps/ort-classes:$T/ort-desktop.jar" ProfileTest "$T/models/dummy" \
   "$T/accel/attention.onnx"
 
-echo "== 2d. LiteRT-LM: JNI contract, install"
+echo "== 2d. LiteRT-LM: JNI contract, install; Qualcomm QNN install"
 L="$T/litert"
 rm -rf "$L/lib" && mkdir -p "$L/lib" "$L/cls"
 JH=$(dirname "$(dirname "$(readlink -f "$(command -v javac)")")")
@@ -91,9 +95,10 @@ g++ -std=c++17 -O1 -shared -fPIC -I"$JH/include" -I"$JH/include/linux" test/lite
 echo 'int litert_gpu_accelerator_stub = 1;' > "$L/gpu.c" && gcc -shared -fPIC "$L/gpu.c" -o "$L/lib/libLiteRtGpuAccelerator.so"
 printf 'not an elf' > "$L/lib/libLiteRtOpenClAccelerator.so"
 javac --release 8 -XDstringConcat=inline -nowarn -encoding UTF-8 -cp "$T/cls" -d "$T/cls" \
-  test/litert/LiteRtJniTest.java test/litert/LiteRtInstallTest.java
+  test/litert/LiteRtJniTest.java test/litert/LiteRtInstallTest.java test/litert/QnnInstallTest.java
 java -Dfile.encoding=UTF-8 -Dstdout.encoding=UTF-8 -cp "$T/cls" LiteRtJniTest "$L/lib" 2>&1 | grep -v "stack guard\|execstack"
 java -Dfile.encoding=UTF-8 -Dstdout.encoding=UTF-8 -Dhttp.nonProxyHosts=127.0.0.1 -cp "$T/cls" LiteRtInstallTest
+java -Dfile.encoding=UTF-8 -Dstdout.encoding=UTF-8 -Dhttp.nonProxyHosts=127.0.0.1 -cp "$T/cls" QnnInstallTest
 
 echo "== 3. Hub download"
 python3 tools/mock_hub.py 18765 & HUB=$!

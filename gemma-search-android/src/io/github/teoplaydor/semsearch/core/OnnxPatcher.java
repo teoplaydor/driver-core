@@ -166,6 +166,278 @@ public final class OnnxPatcher {
         return out.toByteArray();
     }
 
+    // ---------------------------------------------------------------- Qualcomm QNN (Snapdragon NPU)
+
+    /**
+     * Copies a graph into ops the QNN execution provider can put on the Hexagon NPU. QNN (ONNX Runtime 1.29)
+     * has no {@code com.microsoft:MultiHeadAttention} and no {@code SimplifiedLayerNormalization}, so:
+     * <ul>
+     * <li>attention becomes Reshape/Transpose → MatMul(Q, Kᵀ) → ×scale (+ mask, floored to −60000 for fp16)
+     *     → Softmax → MatMul(V) → Transpose/Reshape (scale = 1/√head when the node has none);</li>
+     * <li>RMS normalisation becomes X/4 → mean of squares → +ε/16 → √ → divide → ×weight — the same values,
+     *     but the squares of X/4 stay inside fp16 (the NPU computes in fp16) for |X| up to ~1000.</li>
+     * </ul>
+     * Everything else is copied as is. Initializers stay in the external data file next to the original.
+     *
+     * @return {attention nodes, normalisation nodes} rewritten
+     */
+    public static int[] forQnn(File in, File out) throws IOException {
+        java.util.Map<String, Long> opsets = new java.util.HashMap<String, Long>();
+        nodes(in, opsets);
+        Long ai = opsets.get("ai.onnx");
+        QnnRewrite q = new QnnRewrite(ai == null ? 17 : ai);
+        byte[] model = readAll(in);
+        ByteArrayOutputStream res = new ByteArrayOutputStream(model.length + 65536);
+        Reader r = new Reader(model, 0, model.length);
+        while (r.more()) {
+            int start = r.pos;
+            long key = r.varint();
+            int field = (int) (key >>> 3), wire = (int) (key & 7);
+            if (field == 7 && wire == 2) {
+                int len = (int) r.varint();
+                byte[] g = q.graph(model, r.pos, r.pos + len);
+                r.pos += len;
+                writeLenField(res, 7, g);
+            } else {
+                r.skip(wire);
+                res.write(model, start, r.pos - start);
+            }
+        }
+        File tmp = new File(out.getPath() + ".tmp");
+        OutputStream os = new FileOutputStream(tmp);
+        try {
+            os.write(res.toByteArray());
+        } finally {
+            os.close();
+        }
+        if (out.exists() && !out.delete()) throw new IOException("cannot replace " + out);
+        if (!tmp.renameTo(out)) throw new IOException("cannot write " + out);
+        return new int[]{q.attention, q.norms};
+    }
+
+    private static final class QnnRewrite {
+        final long opset;
+        int attention, norms;
+        final java.util.Set<String> constants = new java.util.HashSet<String>();
+        ByteArrayOutputStream out;
+
+        QnnRewrite(long opset) {
+            this.opset = opset;
+        }
+
+        byte[] graph(byte[] b, int from, int to) throws IOException {
+            out = new ByteArrayOutputStream(to - from + 65536);
+            Reader r = new Reader(b, from, to);
+            while (r.more()) {
+                int start = r.pos;
+                long key = r.varint();
+                int field = (int) (key >>> 3), wire = (int) (key & 7);
+                if (field != 1 || wire != 2) {
+                    r.skip(wire);
+                    out.write(b, start, r.pos - start);
+                    continue;
+                }
+                int len = (int) r.varint();
+                byte[] raw = new byte[len];
+                System.arraycopy(b, r.pos, raw, 0, len);
+                r.pos += len;
+                Node n = parseNode(raw);
+                if ("MultiHeadAttention".equals(n.opType) && "com.microsoft".equals(n.domain)) {
+                    attention(n, attributes(raw));
+                } else if ("SimplifiedLayerNormalization".equals(n.opType)) {
+                    rmsNorm(n, attributes(raw));
+                } else {
+                    writeLenField(out, 1, raw);
+                }
+            }
+            return out.toByteArray();
+        }
+
+        private void emit(String op, String[] ins, String[] outs, String name, byte[]... attrs) {
+            ByteArrayOutputStream nb = new ByteArrayOutputStream();
+            for (String x : ins) writeLenField(nb, 1, x.getBytes(UTF8));
+            for (String y : outs) writeLenField(nb, 2, y.getBytes(UTF8));
+            writeLenField(nb, 3, name.getBytes(UTF8));
+            writeLenField(nb, 4, op.getBytes(UTF8));
+            for (byte[] a : attrs) writeLenField(nb, 5, a);
+            writeLenField(out, 1, nb.toByteArray());
+        }
+
+        private String constInts(String name, long... v) {
+            if (constants.add(name)) emit("Constant", new String[0], new String[]{name}, name, attrInts("value_ints", v));
+            return name;
+        }
+
+        private String constInt(String name, long v) {
+            if (constants.add(name)) emit("Constant", new String[0], new String[]{name}, name, attrInt("value_int", v));
+            return name;
+        }
+
+        private String constFloat(String name, float v) {
+            if (constants.add(name)) emit("Constant", new String[0], new String[]{name}, name, attrFloat("value_float", v));
+            return name;
+        }
+
+        private void attention(Node n, java.util.Map<String, Object> attrs) throws IOException {
+            java.util.List<String> in = n.inputs;
+            for (int i = 3; i < in.size(); i++) {
+                if (i != 5 && !in.get(i).isEmpty()) {
+                    throw new IOException("MultiHeadAttention с входом " + i + " (bias, key_padding_mask или past) не поддержан");
+                }
+            }
+            if (attrs.containsKey("unidirectional") && ((Long) attrs.get("unidirectional")) != 0) {
+                throw new IOException("однонаправленное внимание не поддержано");
+            }
+            long heads = (Long) attrs.get("num_heads");
+            String t = "qnn" + attention++ + "_" + (n.name.isEmpty() ? "mha" : n.name.replaceAll("[^A-Za-z0-9_./]", "_"));
+            String split = constInts("qnn_shape_heads_" + heads, 0, 0, heads, -1);
+            String q = t + "/q", k = t + "/k", v = t + "/v";
+            emit("Reshape", new String[]{in.get(0), split}, new String[]{q + "4"}, q + "4");
+            emit("Transpose", new String[]{q + "4"}, new String[]{q}, q, attrInts("perm", 0, 2, 1, 3));
+            emit("Reshape", new String[]{in.get(1), split}, new String[]{k + "4"}, k + "4");
+            emit("Transpose", new String[]{k + "4"}, new String[]{k}, k, attrInts("perm", 0, 2, 3, 1));
+            emit("Reshape", new String[]{in.get(2), split}, new String[]{v + "4"}, v + "4");
+            emit("Transpose", new String[]{v + "4"}, new String[]{v}, v, attrInts("perm", 0, 2, 1, 3));
+            emit("MatMul", new String[]{q, k}, new String[]{t + "/qk"}, t + "/qk");
+            String scale;
+            Float given = (Float) attrs.get("scale");
+            if (given != null && given != 0f) {
+                scale = constFloat(t + "/scale", given);
+            } else {
+                // 1/sqrt(head size) from the shape; with fixed input shapes ONNX Runtime folds this to a constant
+                emit("Shape", new String[]{q}, new String[]{t + "/qshape"}, t + "/qshape");
+                emit("Gather", new String[]{t + "/qshape", constInt("qnn_index_3", 3)}, new String[]{t + "/head"}, t + "/head",
+                        attrInt("axis", 0));
+                emit("Cast", new String[]{t + "/head"}, new String[]{t + "/headf"}, t + "/headf", attrInt("to", FLOAT));
+                emit("Sqrt", new String[]{t + "/headf"}, new String[]{t + "/sqrt"}, t + "/sqrt");
+                emit("Reciprocal", new String[]{t + "/sqrt"}, new String[]{t + "/scale"}, t + "/scale");
+                scale = t + "/scale";
+            }
+            emit("Mul", new String[]{t + "/qk", scale}, new String[]{t + "/scores"}, t + "/scores");
+            String scores = t + "/scores";
+            if (in.size() > 5 && !in.get(5).isEmpty()) {
+                emit("Max", new String[]{in.get(5), constFloat(FLOOR_NAME, MASK_FLOOR)}, new String[]{t + "/mask"}, t + "/mask");
+                emit("Add", new String[]{scores, t + "/mask"}, new String[]{t + "/masked"}, t + "/masked");
+                scores = t + "/masked";
+            }
+            emit("Softmax", new String[]{scores}, new String[]{t + "/probs"}, t + "/probs", attrInt("axis", -1));
+            emit("MatMul", new String[]{t + "/probs", v}, new String[]{t + "/ctx"}, t + "/ctx");
+            emit("Transpose", new String[]{t + "/ctx"}, new String[]{t + "/ctxt"}, t + "/ctxt", attrInts("perm", 0, 2, 1, 3));
+            emit("Reshape", new String[]{t + "/ctxt", constInts("qnn_shape_merge", 0, 0, -1)}, new String[]{n.outputs.get(0)},
+                    t + "/out");
+        }
+
+        private void rmsNorm(Node n, java.util.Map<String, Object> attrs) throws IOException {
+            if (n.outputs.size() > 1) {
+                for (int i = 1; i < n.outputs.size(); i++) {
+                    if (!n.outputs.get(i).isEmpty()) throw new IOException("SimplifiedLayerNormalization с выходом inv_std_var");
+                }
+            }
+            long axis = attrs.containsKey("axis") ? (Long) attrs.get("axis") : -1;
+            float eps = attrs.containsKey("epsilon") ? (Float) attrs.get("epsilon") : 1e-5f;
+            String t = "qnn" + norms++ + "_" + (n.name.isEmpty() ? "rms" : n.name.replaceAll("[^A-Za-z0-9_./]", "_"));
+            String x = n.inputs.get(0), w = n.inputs.size() > 1 ? n.inputs.get(1) : "";
+            emit("Mul", new String[]{x, constFloat("qnn_quarter", 0.25f)}, new String[]{t + "/x4"}, t + "/x4");
+            emit("Mul", new String[]{t + "/x4", t + "/x4"}, new String[]{t + "/sq"}, t + "/sq");
+            if (opset >= 18) {
+                emit("ReduceMean", new String[]{t + "/sq", constInts("qnn_axes_" + (axis < 0 ? "m" + -axis : String.valueOf(axis)), axis)},
+                        new String[]{t + "/ms"}, t + "/ms", attrInt("keepdims", 1));
+            } else {
+                emit("ReduceMean", new String[]{t + "/sq"}, new String[]{t + "/ms"}, t + "/ms", attrInts("axes", axis),
+                        attrInt("keepdims", 1));
+            }
+            emit("Add", new String[]{t + "/ms", constFloat("qnn_eps_" + Float.floatToIntBits(eps), eps / 16f)},
+                    new String[]{t + "/mse"}, t + "/mse");
+            emit("Sqrt", new String[]{t + "/mse"}, new String[]{t + "/rms"}, t + "/rms");
+            String normed = w.isEmpty() ? n.outputs.get(0) : t + "/normed";
+            emit("Div", new String[]{t + "/x4", t + "/rms"}, new String[]{normed}, normed);
+            if (!w.isEmpty()) emit("Mul", new String[]{normed, w}, new String[]{n.outputs.get(0)}, t + "/out");
+        }
+    }
+
+    /** name → Long (INT), Float (FLOAT), long[] (INTS) for the attributes a rewrite needs. */
+    private static java.util.Map<String, Object> attributes(byte[] node) throws IOException {
+        java.util.Map<String, Object> m = new java.util.HashMap<String, Object>();
+        Reader r = new Reader(node, 0, node.length);
+        while (r.more()) {
+            long k = r.varint();
+            int f = (int) (k >>> 3), w = (int) (k & 7);
+            if (f != 5 || w != 2) {
+                r.skip(w);
+                continue;
+            }
+            int len = (int) r.varint();
+            Reader a = new Reader(node, r.pos, r.pos + len);
+            r.pos += len;
+            String name = null;
+            Object value = null;
+            java.util.List<Long> ints = new java.util.ArrayList<Long>();
+            while (a.more()) {
+                long ak = a.varint();
+                int af = (int) (ak >>> 3), aw = (int) (ak & 7);
+                if (af == 1 && aw == 2) {
+                    name = a.string();
+                } else if (af == 2 && aw == 5) {
+                    int bits = (node[a.pos] & 0xff) | (node[a.pos + 1] & 0xff) << 8 | (node[a.pos + 2] & 0xff) << 16
+                            | (node[a.pos + 3] & 0xff) << 24;
+                    a.pos += 4;
+                    value = Float.intBitsToFloat(bits);
+                } else if (af == 3 && aw == 0) {
+                    value = a.varint();
+                } else if (af == 8 && aw == 0) {
+                    ints.add(a.varint());
+                } else if (af == 8 && aw == 2) {
+                    int pl = (int) a.varint(), end = a.pos + pl;
+                    while (a.pos < end) ints.add(a.varint());
+                } else {
+                    a.skip(aw);
+                }
+            }
+            if (value == null && !ints.isEmpty()) {
+                long[] v = new long[ints.size()];
+                for (int i = 0; i < v.length; i++) v[i] = ints.get(i);
+                value = v;
+            }
+            if (name != null && value != null) m.put(name, value);
+        }
+        return m;
+    }
+
+    private static byte[] attrInt(String name, long v) {
+        ByteArrayOutputStream a = new ByteArrayOutputStream();
+        writeLenField(a, 1, name.getBytes(UTF8));
+        writeVarint(a, 3L << 3);
+        writeVarint(a, v);
+        writeVarint(a, 20L << 3);
+        writeVarint(a, ATTR_TYPE_INT);
+        return a.toByteArray();
+    }
+
+    private static final int ATTR_TYPE_INTS = 7;
+
+    private static byte[] attrInts(String name, long... v) {
+        ByteArrayOutputStream a = new ByteArrayOutputStream();
+        writeLenField(a, 1, name.getBytes(UTF8));
+        for (long x : v) {
+            writeVarint(a, 8L << 3);
+            writeVarint(a, x);
+        }
+        writeVarint(a, 20L << 3);
+        writeVarint(a, ATTR_TYPE_INTS);
+        return a.toByteArray();
+    }
+
+    private static byte[] attrFloat(String name, float v) {
+        ByteArrayOutputStream a = new ByteArrayOutputStream();
+        writeLenField(a, 1, name.getBytes(UTF8));
+        writeVarint(a, (2L << 3) | 5);
+        int bits = Float.floatToIntBits(v);
+        for (int i = 0; i < 4; i++) a.write((bits >>> (8 * i)) & 0xff);
+        writeVarint(a, 20L << 3);
+        writeVarint(a, ATTR_TYPE_FLOAT);
+        return a.toByteArray();
+    }
+
     /** NodeProto with an optional INT attribute. */
     private static byte[] node(String op, String domain, String[] ins, String[] outs, String name, String attr, long value) {
         ByteArrayOutputStream nb = new ByteArrayOutputStream();

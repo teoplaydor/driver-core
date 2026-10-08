@@ -31,6 +31,7 @@ import io.github.teoplaydor.semsearch.core.ModelConfig;
 import io.github.teoplaydor.semsearch.core.OnnxPatcher;
 import io.github.teoplaydor.semsearch.core.OrtProfile;
 import io.github.teoplaydor.semsearch.core.PatternSource;
+import io.github.teoplaydor.semsearch.core.QnnRuntime;
 import io.github.teoplaydor.semsearch.core.QueryBridge;
 import io.github.teoplaydor.semsearch.core.SigLip;
 import io.github.teoplaydor.semsearch.core.VectorMath;
@@ -567,7 +568,7 @@ public final class Engine {
             use.textModel = plan.textModel;
         }
         int accel = accel();
-        if (!withVision && isLiteRt(accel)) accel = ACCEL_CPU; // notes beside SigLIP: the ONNX text model
+        if (!withVision && (isLiteRt(accel) || isQnn(accel))) accel = ACCEL_CPU; // notes beside SigLIP: the ONNX text model
         if (withVision && liteRtSpace() && !isLiteRt(accel)) {
             throw new java.io.IOException("LiteRT-LM на этом телефоне больше не запускается, а индекс построен им — "
                     + "«Вернуться на ONNX Runtime» в настройках переиндексирует галерею.");
@@ -689,7 +690,7 @@ public final class Engine {
                     String variant = p == null ? null : fp32 ? p.accelVision : p.fp16Vision;
                     if (variant == null) return;
                     // a model still running on that graph (accelerator changed, not reloaded yet) lets go of it
-                    boolean reload = photo != null && (fp32 ? isNpu(loadedAccel) : loadedAccel == ACCEL_GPU_FP16);
+                    boolean reload = photo != null && (fp32 ? isNpu(loadedAccel) || isQnn(loadedAccel) : loadedAccel == ACCEL_GPU_FP16);
                     if (reload) closeModels();
                     String repo = HfRepo.manifestRepo(manifest);
                     List<String> gone = new ArrayList<String>();
@@ -708,8 +709,11 @@ public final class Engine {
                     for (String g : gone) new File(modelDir, g).delete();
                     int a = prefs.getInt("accel", ACCEL_CPU);
                     if (fp32) {
+                        // the NPU's QNN graph and its compiled contexts are made from the fp32 graph
+                        File[] ctxs = new File(modelDir, "onnx").listFiles();
+                        if (ctxs != null) for (File f : ctxs) if (f.getName().contains(".qnn.")) f.delete();
                         prefs.edit().remove("npu_check_pending").apply();
-                        if (isNpu(a)) prefs.edit().putInt("accel", ACCEL_CPU).apply();
+                        if (isNpu(a) || isQnn(a)) prefs.edit().putInt("accel", ACCEL_CPU).apply();
                     } else if (a == ACCEL_GPU_FP16) {
                         prefs.edit().putInt("accel", ACCEL_CPU).apply();
                     }
@@ -811,6 +815,83 @@ public final class Engine {
                 }
                 unloadModel();
                 loadModel();
+            }
+        });
+    }
+
+    /**
+     * Downloads what the Snapdragon NPU needs: the full-precision vision encoder (if missing) and Qualcomm's QNN
+     * runtime with the ONNX Runtime build for it (Maven Central, ≈72 MB); then the speed check compares the NPU
+     * with the rest.
+     */
+    public void downloadQnn() {
+        if (state == State.DOWNLOADING || state == State.LOADING || photoModel() != FastModel.GEMMA) return;
+        final String repo = repo(), token = prefs.getString("token", "");
+        stopIndex();
+        cancelDownload = false;
+        dlError = null;
+        state = State.DOWNLOADING;
+        status = "Получаю список файлов…";
+        dlDone = 0;
+        dlTotal = 0;
+        notifyChanged();
+        net.submit(new Runnable() {
+            @Override
+            public void run() {
+                HfRepo.Progress progress = new HfRepo.Progress() {
+                    @Override
+                    public boolean onProgress(String file, long fd, long ft, long all, long allTotal) {
+                        dlDone = all;
+                        dlTotal = allTotal;
+                        status = "Скачиваю " + file;
+                        notifyChanged();
+                        return !cancelDownload;
+                    }
+                };
+                StringBuilder errors = new StringBuilder();
+                if (gemmaFp32Vision() == null) {
+                    try {
+                        HfRepo r = new HfRepo(repo, token);
+                        HfRepo.Plan plan = HfRepo.plan(r.listFiles(), true, true, gemmaFp16Vision() != null);
+                        dlTotal = plan.totalBytes;
+                        r.download(plan, modelDir, progress);
+                        HfRepo.saveManifest(plan, repo, manifest);
+                    } catch (Exception e) {
+                        if (!cancelDownload) errors.append("полная версия визуального энкодера: ").append(e.getMessage());
+                    }
+                }
+                if (!cancelDownload && !qnnInstalled()) {
+                    try {
+                        dlDone = 0;
+                        dlTotal = 0;
+                        qnn().install(socModel(), progress);
+                    } catch (Exception e) {
+                        if (!cancelDownload) errors.append(errors.length() > 0 ? "\n" : "").append("QNN: ").append(e.getMessage());
+                    }
+                }
+                dlError = cancelDownload ? "Загрузка остановлена — её можно продолжить" : errors.length() > 0 ? errors.toString() : null;
+                if (!cancelDownload && qnnInstalled() && gemmaFp32Vision() != null) {
+                    prefs.edit().putBoolean("qnn_broken", false).putBoolean("speed_check_pending", true).apply();
+                }
+                unloadModel();
+                loadModel();
+            }
+        });
+    }
+
+    /** Deletes QNN and the compiled NPU graphs (not while the NPU is the chosen accelerator). */
+    public void deleteQnn() {
+        ml.submit(new Runnable() {
+            @Override
+            public void run() {
+                boolean reload = photo != null && isQnn(loadedAccel);
+                if (reload) closeModels();
+                LiteRtRuntime.deleteTree(qnn().dir());
+                File[] ctxs = new File(modelDir, "onnx").listFiles();
+                if (ctxs != null) for (File f : ctxs) if (f.getName().contains(".qnn.")) f.delete();
+                if (isQnn(prefs.getInt("accel", ACCEL_CPU))) prefs.edit().putInt("accel", ACCEL_CPU).apply();
+                if (reload) loadModel();
+                notifyChanged();
             }
         });
     }
@@ -1160,18 +1241,25 @@ public final class Engine {
     // ------------------------------------------------------------------ acceleration
 
     public static final int ACCEL_CPU = 0, ACCEL_CPU_INT8 = 1, ACCEL_GPU = 2, ACCEL_GPU_INT8 = 3, ACCEL_NPU = 4,
-            ACCEL_NPU_FP32 = 5, ACCEL_GPU_FP16 = 6, ACCEL_LITERT_GPU = 7, ACCEL_LITERT_CPU = 8, ACCEL_GPU_FP16_ATTN = 9;
+            ACCEL_NPU_FP32 = 5, ACCEL_GPU_FP16 = 6, ACCEL_LITERT_GPU = 7, ACCEL_LITERT_CPU = 8, ACCEL_GPU_FP16_ATTN = 9,
+            ACCEL_NPU_QNN = 10;
     /**
      * For the NPU and fp16 variants the vision encoder (most of the work per photo) runs there, the text model on
      * the CPU in int8. The LiteRT-LM variants run Google's own build of the model with its own kernels.
      */
     public static final String[] ACCEL_NAMES = {"Процессор", "Процессор, int8", "Видеокарта (WebGPU)",
             "Видеокарта (WebGPU), int8", "NPU (NNAPI)", "NPU (NNAPI, fp32)", "Видеокарта (WebGPU), fp16",
-            "LiteRT-LM, видеокарта", "LiteRT-LM, процессор", "Видеокарта (WebGPU), int8 + fp16-внимание"};
+            "LiteRT-LM, видеокарта", "LiteRT-LM, процессор", "Видеокарта (WebGPU), int8 + fp16-внимание",
+            "NPU Snapdragon (QNN)"};
 
     /** ONNX Runtime's WebGPU provider (the "gpu_broken" guard covers these). */
     public static boolean isGpu(int a) {
         return a == ACCEL_GPU || a == ACCEL_GPU_INT8 || a == ACCEL_GPU_FP16 || a == ACCEL_GPU_FP16_ATTN;
+    }
+
+    /** The vision encoder on the Snapdragon NPU through Qualcomm QNN, in the separate NPU process. */
+    public static boolean isQnn(int a) {
+        return a == ACCEL_NPU_QNN;
     }
 
     public static boolean isLiteRt(int a) {
@@ -1187,6 +1275,7 @@ public final class Engine {
         if (isGpu(a) && prefs.getBoolean("gpu_broken", false)) a = ACCEL_CPU;
         if (isNpu(a) && (npuBroken(a) || gemmaFp32Vision() == null)) a = ACCEL_CPU;
         if (a == ACCEL_GPU_FP16 && gemmaFp16Vision() == null) a = ACCEL_CPU;
+        if (isQnn(a) && !qnnUsable()) a = ACCEL_CPU;
         if (isLiteRt(a) && (liteRtBroken(a) || !liteRtInstalled())) {
             // in LiteRT-LM's vector space only its other backend keeps the index usable
             int other = a == ACCEL_LITERT_GPU ? ACCEL_LITERT_CPU : ACCEL_LITERT_GPU;
@@ -1197,6 +1286,58 @@ public final class Engine {
 
     public boolean liteRtBroken(int a) {
         return prefs.getBoolean("litert_broken_" + a, false);
+    }
+
+    QnnRuntime qnn() {
+        return new QnnRuntime(new File(ctx.getFilesDir(), "qnn"));
+    }
+
+    /** Build.SOC_MODEL (API 31+), e.g. "SM8850", or null. */
+    static String socModel() {
+        if (android.os.Build.VERSION.SDK_INT < 31) return null;
+        try {
+            String s = (String) android.os.Build.class.getField("SOC_MODEL").get(null);
+            return s == null || s.isEmpty() || "unknown".equalsIgnoreCase(s) ? null : s;
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    /** A Qualcomm Snapdragon (its NPU is reachable through QNN). */
+    public static boolean isSnapdragon() {
+        String soc = socModel();
+        if (soc != null && soc.toUpperCase(java.util.Locale.ROOT).startsWith("SM")) return true;
+        if (android.os.Build.VERSION.SDK_INT >= 31) {
+            try {
+                String m = (String) android.os.Build.class.getField("SOC_MANUFACTURER").get(null);
+                if (m != null && (m.equalsIgnoreCase("QTI") || m.toLowerCase(java.util.Locale.ROOT).contains("qualcomm"))) return true;
+            } catch (Exception ignored) {
+                // not available
+            }
+        }
+        return android.os.Build.HARDWARE != null && android.os.Build.HARDWARE.toLowerCase(java.util.Locale.ROOT).startsWith("qcom");
+    }
+
+    public boolean qnnInstalled() {
+        return qnn().installed() != null;
+    }
+
+    /** QNN downloaded, the full-precision vision graph present, and the NPU process has not crashed before. */
+    public boolean qnnUsable() {
+        return qnnInstalled() && gemmaFp32Vision() != null && !prefs.getBoolean("qnn_broken", false);
+    }
+
+    /** On a Snapdragon with EmbeddingGemma for photos, something the NPU needs is not on the phone yet. */
+    public boolean qnnMissing() {
+        if (photoModel() != FastModel.GEMMA || gemmaPlan() == null || !isSnapdragon()) return false;
+        return !qnnInstalled() || gemmaFp32Vision() == null;
+    }
+
+    public long qnnBytes() {
+        long n = qnn().bytesOnDisk();
+        File[] ctxs = new File(modelDir, "onnx").listFiles();
+        if (ctxs != null) for (File f : ctxs) if (f.getName().contains(".qnn.")) n += f.length();
+        return n;
     }
 
     LiteRtRuntime liteRt() {
@@ -1299,6 +1440,7 @@ public final class Engine {
     private Embedder createModel(ModelConfig cfg, HfTokenizer tok, HfRepo.Plan plan, int accel, int nThreads,
                                  int batch) throws Exception {
         if (isLiteRt(accel)) return openLiteRt(accel, nThreads, batch);
+        if (isQnn(accel) && plan.visionModel != null) return openQnn(cfg, tok, plan, nThreads);
         boolean npu = isNpu(accel) && plan.visionModel != null;
         boolean int8 = accel == ACCEL_CPU_INT8 || accel == ACCEL_GPU_INT8 || isNpu(accel) || accel == ACCEL_GPU_FP16
                 || accel == ACCEL_GPU_FP16_ATTN;
@@ -1347,6 +1489,44 @@ public final class Engine {
             }
         }
         return patched;
+    }
+
+    /**
+     * The text model here (int8 on the CPU), the vision encoder on the Snapdragon NPU in the NPU process: the
+     * full-precision graph rewritten into ops QNN can run (OnnxPatcher.forQnn), compiled there on first use.
+     */
+    private Embedder openQnn(ModelConfig cfg, HfTokenizer tok, HfRepo.Plan plan, int nThreads) throws Exception {
+        File fp32 = plan.accelVision == null ? null : new File(modelDir, plan.accelVision);
+        if (fp32 == null || !fp32.exists()) {
+            throw new java.io.IOException("для NPU Snapdragon нужна полная версия визуального энкодера — «Проверить NPU Snapdragon»");
+        }
+        if (!qnnInstalled()) throw new java.io.IOException("QNN не скачан — «Проверить NPU Snapdragon» в настройках");
+        File graph = new File(fp32.getParentFile(), fp32.getName().replace(".onnx", ".qnn.onnx"));
+        if (!graph.exists() || graph.lastModified() < fp32.lastModified()) OnnxPatcher.forQnn(fp32, graph);
+        File text = graphFile(plan.textModel, true);
+        NpuVision vision = new NpuVision(ctx, qnn().libDir(), graph);
+        try {
+            return new EmbeddingGemma2(cfg, tok, text, vision, nThreads);
+        } catch (Exception e) {
+            vision.close();
+            throw e;
+        }
+    }
+
+    /** Where the NPU graph's nodes run for {@code budget} tokens (profiled in the NPU process). */
+    private String profileQnn(ModelConfig cfg, HfRepo.Plan plan, int budget) {
+        NpuVision v = null;
+        try {
+            File fp32 = new File(modelDir, plan.accelVision);
+            File graph = new File(fp32.getParentFile(), fp32.getName().replace(".onnx", ".qnn.onnx"));
+            v = new NpuVision(ctx, qnn().libDir(), graph);
+            int pool = Math.max(1, cfg.image.poolingKernelSize);
+            return v.profile(budget * pool * pool, cfg.image.patchSize * cfg.image.patchSize * 3);
+        } catch (Exception e) {
+            return "профиль не снят: " + e.getMessage();
+        } finally {
+            if (v != null) v.close();
+        }
     }
 
     private static volatile boolean liteRtLoaded;
@@ -1646,11 +1826,18 @@ public final class Engine {
                     // the exact CPU run first (the reference), then the likely winners while the phone is still cool,
                     // the NPU last (slow on most phones, and its driver may crash)
                     int[] order = space ? new int[]{ACCEL_LITERT_CPU, ACCEL_LITERT_GPU}
-                            : new int[]{ACCEL_CPU, ACCEL_GPU_FP16_ATTN, ACCEL_GPU_INT8, ACCEL_GPU_FP16, ACCEL_GPU, ACCEL_CPU_INT8,
-                            ACCEL_LITERT_GPU, ACCEL_LITERT_CPU, ACCEL_NPU, ACCEL_NPU_FP32};
+                            : new int[]{ACCEL_CPU, ACCEL_NPU_QNN, ACCEL_GPU_FP16_ATTN, ACCEL_GPU_INT8, ACCEL_GPU_FP16, ACCEL_GPU,
+                            ACCEL_CPU_INT8, ACCEL_LITERT_GPU, ACCEL_LITERT_CPU, ACCEL_NPU, ACCEL_NPU_FP32};
                     for (int a : order) {
                         if (isGpu(a) && gpuBroken()) continue;
                         if (a == ACCEL_GPU_FP16 && !fp16) continue;
+                        if (isQnn(a) && !(qnnInstalled() && fp32)) continue;
+                        if (isQnn(a) && prefs.getBoolean("qnn_broken", false)) {
+                            rep.append("• ").append(ACCEL_NAMES[a]).append(": пропущено — в прошлый раз NPU-процесс упал\n");
+                            continue;
+                        }
+                        // with QNN the NPU is reached directly; NNAPI (slow here, deprecated) would only heat the phone
+                        if (isNpu(a) && fp32 && qnnInstalled()) continue;
                         if (isNpu(a) && (!fp32 || npuBroken(a))) {
                             if (fp32) rep.append("• ").append(ACCEL_NAMES[a]).append(": пропущено — в прошлый раз уронило драйвер\n");
                             continue;
@@ -1667,6 +1854,7 @@ public final class Engine {
                     double bestMs = Double.MAX_VALUE, offerMs = Double.MAX_VALUE, lrtBestMs = Double.MAX_VALUE;
                     float offerCos = 0, lrtBestCos = 0;
                     List<int[]> okCands = new ArrayList<int[]>();
+                    boolean qnnMeasured = false;
                     List<Double> okMs = new ArrayList<Double>();
                     int step = 0;
                     for (int phase = 0; phase < 3; phase++) {
@@ -1689,10 +1877,18 @@ public final class Engine {
                             status = "Подбираю ускорение (" + step + "): " + name;
                             notifyChanged();
                             mark("подбор ускорения: " + name);
+                            if (isQnn(c[0]) && phase == 0) {
+                                status = "NPU Snapdragon: компилирую модель под NPU — в первый раз до нескольких минут";
+                                notifyChanged();
+                            }
                             probe(c[0], true);
                             Measure m = measure(cfg, tok, plan, c[0], c[1], c[2], budget, reference);
                             probe(c[0], false);
                             mark("");
+                            if (isQnn(c[0]) && m.error != null && m.error.startsWith("NPU-процесс упал")) {
+                                prefs.edit().putBoolean("qnn_broken", true).apply();
+                            }
+                            if (isQnn(c[0]) && m.error == null && phase == 0) qnnMeasured = true;
                             if (m.error != null) {
                                 rep.append("• ").append(name).append(": не работает — ").append(m.error).append('\n');
                                 continue;
@@ -1893,6 +2089,11 @@ public final class Engine {
                         rep.append("\n\n").append(profileVision(cfg, tok, plan, best, budget));
                         prefs.edit().remove("npu_probe").commit();
                         mark("");
+                    }
+                    if (qnnMeasured) {
+                        status = "Смотрю, что NPU взял на себя…";
+                        notifyChanged();
+                        rep.append("\n\nNPU Snapdragon (").append(budget).append(" токенов):\n").append(profileQnn(cfg, plan, budget));
                     }
                     try {
                         // how the vision encoder computes attention (the cost that grows quadratically with detail)

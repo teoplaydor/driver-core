@@ -27,6 +27,8 @@
         <!-- LiteRT-LM's GPU backend opens the vendor's OpenCL driver (Android 12+ asks apps to declare it) -->
         <uses-native-library android:name="libOpenCL.so" android:required="false" />
         <uses-native-library android:name="libvndksupport.so" android:required="false" />
+        <!-- Qualcomm QNN reaches the Hexagon NPU through FastRPC -->
+        <uses-native-library android:name="libcdsprpc.so" android:required="false" />
         <activity
             android:name=".app.MainActivity"
             android:exported="true"
@@ -48,6 +50,11 @@
                 <data android:mimeType="text/plain" />
             </intent-filter>
         </activity>
+        <!-- the vision encoder on the Snapdragon NPU: its own ONNX Runtime build (QNN), its own process -->
+        <service
+            android:name=".app.NpuService"
+            android:exported="false"
+            android:process=":npu" />
         <service
             android:name=".app.AutoIndexService"
             android:exported="false"

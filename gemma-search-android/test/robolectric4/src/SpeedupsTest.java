@@ -180,6 +180,78 @@ public class SpeedupsTest {
         assertTrue(e.prefs().getBoolean("speed_check_pending", false));
         Robo.settle(500);
 
+        // Snapdragon: the NPU is reached through QNN (its own button, the NNAPI one is not offered there).
+        org.robolectric.shadows.ShadowBuild.setSystemOnChipModel("SM8850");
+        org.robolectric.shadows.ShadowBuild.setSystemOnChipManufacturer("QTI");
+        assertTrue(Engine.isSnapdragon());
+        assertTrue("no QNN, no fp32 graph", e.qnnMissing());
+        e.prefs().edit().putInt("accel", Engine.ACCEL_NPU_QNN).apply();
+        assertEquals(Engine.ACCEL_CPU, e.accel());
+        e.prefs().edit().putInt("accel", Engine.ACCEL_CPU).apply();
+        refresh(root);
+        assertTrue(text(a), text(a).contains("Проверить NPU Snapdragon"));
+        assertFalse(text(a), text(a).contains("Проверить NPU\n") || text(a).contains("| Проверить NPU |"));
+        click(root, "Проверить NPU Snapdragon");
+        Robo.settle(400);
+        assertTrue(text(a), text(a).contains("через Qualcomm QNN") && text(a).contains("отдельном процессе"));
+        a.onBackPressed();
+        Robo.settle(400);
+        // QNN and the full-precision vision graph in place: usable, the download goes, the delete link appears
+        File q = new File(a.getFilesDir(), "qnn/lib");
+        String[] qlibs = {"libonnxruntime.so", "libonnxruntime4j_jni.so", "libQnnHtp.so", "libQnnHtpPrepare.so", "libQnnSystem.so",
+                "libQnnHtpV81Stub.so", "libQnnHtpV81Skel.so"};
+        StringBuilder ql = new StringBuilder();
+        for (String l : qlibs) {
+            write(new File(q, l), l.contains("Prepare") ? 2 << 20 : 1000);
+            ql.append(ql.length() > 0 ? "," : "").append('"').append(l).append('"');
+        }
+        writeText(new File(a.getFilesDir(), "qnn/manifest.json"), "{\"ort\":\"1.29.0\",\"qnn\":\"2.42.0\",\"arch\":\"81\",\"libs\":[" + ql + "]}");
+        String m2 = new String(java.nio.file.Files.readAllBytes(new File(model, "manifest.json").toPath()), "UTF-8");
+        write(new File(model, "onnx/vision_encoder.onnx"), 1 << 20);
+        writeText(new File(model, "manifest.json"), m2.replace("\"vision\":", "\"accel_vision\":\"onnx/vision_encoder.onnx\",\"vision\":")
+                .replace("\"files\":[", "\"files\":[{\"path\":\"onnx/vision_encoder.onnx\",\"size\":" + (1 << 20) + "},"));
+        assertTrue(e.qnnInstalled());
+        assertTrue(e.qnnUsable());
+        assertFalse(e.qnnMissing());
+        e.prefs().edit().putInt("accel", Engine.ACCEL_NPU_QNN).apply();
+        assertEquals(Engine.ACCEL_NPU_QNN, e.accel());
+        e.prefs().edit().putBoolean("qnn_broken", true).apply(); // the NPU process crashed once
+        assertEquals(Engine.ACCEL_CPU, e.accel());
+        e.prefs().edit().putBoolean("qnn_broken", false).putInt("accel", Engine.ACCEL_CPU).apply();
+        refresh(root);
+        assertFalse(text(a), text(a).contains("Проверить NPU Snapdragon"));
+        assertTrue(text(a), text(a).contains("Удалить NPU Snapdragon (2 МБ)"));
+        // The NPU process round trip (bound service, interface token, status, error text): here the "libraries"
+        // are junk, so starting fails — with the reason, not a hang or a crash.
+        Class<?> svc = Class.forName("io.github.teoplaydor.semsearch.app.NpuService");
+        @SuppressWarnings("unchecked")
+        android.app.Service service = Robolectric.buildService((Class<android.app.Service>) svc).create().get();
+        org.robolectric.Shadows.shadowOf(a.getApplication()).setComponentNameAndServiceForBindService(
+                new android.content.ComponentName(a, svc), service.onBind(new android.content.Intent(a, svc)));
+        final Object[] npu = new Object[1];
+        Thread t = new Thread(() -> {
+            try {
+                java.lang.reflect.Constructor<?> k = Class.forName("io.github.teoplaydor.semsearch.app.NpuVision")
+                        .getDeclaredConstructor(Context.class, File.class, File.class);
+                k.setAccessible(true);
+                npu[0] = k.newInstance(a, q, new File(model, "onnx/vision_encoder.qnn.onnx"));
+            } catch (java.lang.reflect.InvocationTargetException x) {
+                npu[0] = x.getCause();
+            } catch (Exception x) {
+                npu[0] = x;
+            }
+        });
+        t.start();
+        Robo.waitFor("npu start", () -> npu[0] != null);
+        assertTrue(String.valueOf(npu[0]), npu[0] instanceof java.io.IOException
+                && ((Exception) npu[0]).getMessage().startsWith("NPU: ") && ((Exception) npu[0]).getMessage().contains("libQnn"));
+        System.out.println("NPU process with junk libraries: " + ((Exception) npu[0]).getMessage());
+        e.deleteQnn();
+        Robo.waitFor("qnn deleted", () -> !new File(a.getFilesDir(), "qnn").exists());
+        assertFalse(e.qnnInstalled());
+        org.robolectric.shadows.ShadowBuild.setSystemOnChipModel("");
+        org.robolectric.shadows.ShadowBuild.setSystemOnChipManufacturer("");
+
         // A throttled phone measures several times slower (seen: 9% battery while charging): the check says so.
         android.content.Intent bat = new android.content.Intent(android.content.Intent.ACTION_BATTERY_CHANGED);
         bat.putExtra(android.os.BatteryManager.EXTRA_LEVEL, 9).putExtra(android.os.BatteryManager.EXTRA_SCALE, 100)

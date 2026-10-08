@@ -32,7 +32,7 @@ final class SettingsPanel extends FrameLayout implements Engine.Listener {
     private TextView modelValue, modelHint, indexValue, indexStatus, accelValue, photosValue, videosValue, detailValue,
             threadsValue, bridgeValue, dimsValue, photoModelValue, gemmaValue, sourceValue, sideValue;
     private TextView modelButton, indexButton, errorButton, deleteButton, fp32Button, reportLink, compareButton, fp32Delete,
-            speedButton, liteRtSwitch, liteRtLeave, fp16Delete, liteRtDelete;
+            speedButton, liteRtSwitch, liteRtLeave, fp16Delete, liteRtDelete, qnnButton, qnnDelete;
     private ProgressLine modelProgress, indexProgress;
     private Toggle autoToggle, idleToggle, batteryToggle;
     private View batteryRow;
@@ -571,6 +571,11 @@ final class SettingsPanel extends FrameLayout implements Engine.Listener {
                             a.toast("Сначала «Проверить LiteRT-LM и fp16»: этой версии ещё нет на телефоне");
                             return;
                         }
+                        if (Engine.isQnn(i) && !e.qnnUsable()) {
+                            a.toast(e.prefs().getBoolean("qnn_broken", false) ? "NPU Snapdragon уже приводил к сбою — не включаю"
+                                    : "Сначала «Проверить NPU Snapdragon»");
+                            return;
+                        }
                         if (Engine.isLiteRt(i) && e.liteRtBroken(i)) {
                             a.toast("Этот вариант LiteRT-LM уже приводил к сбою — не включаю");
                             return;
@@ -638,6 +643,38 @@ final class SettingsPanel extends FrameLayout implements Engine.Listener {
                             @Override
                             public void run() {
                                 e.deleteGemmaFp32();
+                            }
+                        });
+            }
+        });
+        qnnButton = action(card, "Проверить NPU Snapdragon", true, new Runnable() {
+            @Override
+            public void run() {
+                long fp32 = e.gemmaFp32Vision() == null ? e.gemmaFp32EstimateBytes() >> 20 : 0;
+                Sheet.confirm(root(), "Проверить NPU Snapdragon?", "Визуальная часть модели — основная работа на каждое фото — "
+                        + "пойдёт на нейропроцессор Snapdragon напрямую, через Qualcomm QNN, а не через NNAPI. Докачаю движок "
+                        + "QNN и сборку ONNX Runtime для него (≈72 МБ с Maven Central)"
+                        + (fp32 > 0 ? String.format(Locale.ROOT, " и полную версию визуальной части (≈%d МБ)", fp32) : "")
+                        + ".\n\nПервый запуск скомпилирует модель под NPU — это может занять несколько минут на каждую "
+                        + "детализацию; потом подбор сравнит NPU с видеокартой и оставит самое быстрое из точного. NPU работает "
+                        + "в отдельном процессе: если драйвер упадёт, приложение останется работать.", "Докачать и проверить",
+                        new Runnable() {
+                            @Override
+                            public void run() {
+                                e.downloadQnn();
+                            }
+                        });
+            }
+        });
+        qnnDelete = quiet(card, "Удалить NPU Snapdragon", Ui.DANGER, new Runnable() {
+            @Override
+            public void run() {
+                Sheet.confirm(root(), "Удалить NPU Snapdragon?", String.format(Locale.ROOT, "Освободится ≈%d МБ (движок QNN и "
+                        + "скомпилированные под NPU графы). «Проверить NPU Snapdragon» скачает его снова.", e.qnnBytes() >> 20),
+                        "Удалить", new Runnable() {
+                            @Override
+                            public void run() {
+                                e.deleteQnn();
                             }
                         });
             }
@@ -826,10 +863,15 @@ final class SettingsPanel extends FrameLayout implements Engine.Listener {
         rowOf(gemmaValue).setVisibility(fast ? VISIBLE : GONE);
         gemmaValue.setText(e.gemmaDownloaded() ? "скачана" : "не скачана");
         rowOf(sourceValue).setVisibility(!fast || e.gemmaDownloaded() ? VISIBLE : GONE);
-        fp32Button.setVisibility((fast ? e.fastNeedsFp32() : e.gemmaNeedsFp32()) && !busy && FastModel.acceleratorLikely()
+        fp32Button.setVisibility((fast ? e.fastNeedsFp32() : e.gemmaNeedsFp32() && !Engine.isSnapdragon()) && !busy
+                && FastModel.acceleratorLikely() ? VISIBLE : GONE);
+        fp32Delete.setVisibility(!fast && !busy && e.gemmaFp32Vision() != null && !Engine.isNpu(e.accel()) && !Engine.isQnn(e.accel())
                 ? VISIBLE : GONE);
-        fp32Delete.setVisibility(!fast && !busy && e.gemmaFp32Vision() != null && !Engine.isNpu(e.accel()) ? VISIBLE : GONE);
         speedButton.setVisibility(!fast && !busy && e.speedupsMissing() ? VISIBLE : GONE);
+        qnnButton.setVisibility(!fast && !busy && e.qnnMissing() ? VISIBLE : GONE);
+        boolean qnnUnused = !fast && !busy && e.qnnInstalled() && !Engine.isQnn(e.accel());
+        qnnDelete.setVisibility(qnnUnused ? VISIBLE : GONE);
+        if (qnnUnused) qnnDelete.setText(String.format(Locale.ROOT, "Удалить NPU Snapdragon (%d МБ)", e.qnnBytes() >> 20));
         liteRtSwitch.setVisibility(!fast && !busy && e.liteRtOffer() >= 0 ? VISIBLE : GONE);
         liteRtLeave.setVisibility(!fast && !busy && e.liteRtSpace() ? VISIBLE : GONE);
         fp16Delete.setVisibility(!fast && !busy && e.gemmaFp16Vision() != null && e.accel() != Engine.ACCEL_GPU_FP16 ? VISIBLE : GONE);

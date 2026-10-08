@@ -36,6 +36,8 @@ public final class EmbeddingGemma2 implements Embedder {
     private final OrtEnvironment env;
     private final OrtSession textSession;
     private final OrtSession visionSession;
+    /** The vision encoder elsewhere (the NPU process) instead of {@link #visionSession}. */
+    private final VisionRunner visionRunner;
     private final HfTokenizer tokenizer;
     private final ModelConfig cfg;
     /** With an NPU (NNAPI) the vision graph runs with fixed shapes: this many images of this many patches. */
@@ -79,6 +81,7 @@ public final class EmbeddingGemma2 implements Embedder {
                            VisionAccel accel, int batch, int budget) throws IOException, OrtException {
         cfg = config;
         tokenizer = tok;
+        visionRunner = null;
         resolveSpecialTokens();
         env = OrtEnvironment.getEnvironment();
         try {
@@ -99,6 +102,22 @@ public final class EmbeddingGemma2 implements Embedder {
         } catch (OrtException e) {
             textSession.close();
             throw new IOException("визуальный энкодер " + visionModel.getName() + " (" + accel + "): " + e.getMessage(), e);
+        }
+    }
+
+    /** The text model here, the vision encoder through {@code vision} (e.g. on the Snapdragon NPU). */
+    public EmbeddingGemma2(ModelConfig config, HfTokenizer tok, File textModel, VisionRunner vision, int threads)
+            throws IOException {
+        cfg = config;
+        tokenizer = tok;
+        visionRunner = vision;
+        visionSession = null;
+        resolveSpecialTokens();
+        env = OrtEnvironment.getEnvironment();
+        try {
+            textSession = env.createSession(textModel.getPath(), options(threads, false));
+        } catch (OrtException e) {
+            throw new IOException("текстовая модель " + textModel.getName() + ": " + e.getMessage(), e);
         }
     }
 
@@ -177,7 +196,7 @@ public final class EmbeddingGemma2 implements Embedder {
     public HfTokenizer tokenizer() { return tokenizer; }
 
     public boolean supportsImages() {
-        return visionSession != null && cfg.imageToken != null && cfg.imageTokenId >= 0;
+        return (visionSession != null || visionRunner != null) && cfg.imageToken != null && cfg.imageTokenId >= 0;
     }
 
     public boolean supportsVideo() {
@@ -366,6 +385,21 @@ public final class EmbeddingGemma2 implements Embedder {
                 expected += p.numSoftTokens;
             }
         }
+        if (visionRunner != null) {
+            float[] data;
+            try {
+                data = visionRunner.run(pixels, positions, b, maxPatches, patchDim);
+            } catch (RuntimeException e) {
+                throw e;
+            } catch (Exception e) {
+                throw new IllegalStateException(e.getMessage() != null ? e.getMessage() : e.toString(), e);
+            }
+            if (data.length != expected * cfg.hiddenSize) {
+                throw new IllegalStateException("vision encoder returned " + data.length / cfg.hiddenSize + " rows for "
+                        + expected + " soft tokens");
+            }
+            return data;
+        }
         Map<String, OnnxTensor> in = new HashMap<String, OnnxTensor>();
         try {
             for (String name : visionSession.getInputNames()) {
@@ -481,6 +515,7 @@ public final class EmbeddingGemma2 implements Embedder {
             textSession.close();
         } catch (OrtException ignored) {
         }
+        if (visionRunner != null) visionRunner.close();
         if (visionSession != null) {
             try {
                 visionSession.close();

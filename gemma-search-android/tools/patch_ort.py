@@ -53,4 +53,20 @@ sub("ai/onnxruntime/TensorInfo.java",
                       })
                   .collect(Collectors.joining(","))""",
     """              + String.join(",", dimensionNames)""")
+# SemSearch's NPU process runs another build of the same ONNX Runtime (with the Qualcomm QNN provider),
+# downloaded at runtime: there the libraries come from a directory instead of the APK.
+sub("ai/onnxruntime/OnnxRuntime.java",
+    """    if (isAndroid()) {
+      System.loadLibrary(library);
+      return;
+    }""",
+    """    if (isAndroid()) {
+      String dir = System.getProperty("onnxruntime.native.dir");
+      if (dir != null) {
+        System.load(new File(dir, System.mapLibraryName(library)).getAbsolutePath());
+      } else {
+        System.loadLibrary(library);
+      }
+      return;
+    }""")
 print("patched", root)
