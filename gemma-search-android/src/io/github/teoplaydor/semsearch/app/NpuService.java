@@ -928,7 +928,14 @@ public final class NpuService extends Service {
                 o.close();
             }
             List<String> lines = new ArrayList<String>(java.util.Arrays.asList(readText(csv).split("\n")));
-            return QnnLog.profile(lines, OnnxPatcher.nodes(graph, new HashMap<String, Long>()), 2);
+            final Map<String, OnnxPatcher.TensorType> types = QnnBuild.tensorTypes(env, graph, dims(graph, patches));
+            final Map<String, double[]> consts = OnnxPatcher.smallConstants(graph);
+            return QnnLog.profile(lines, OnnxPatcher.nodes(graph, new HashMap<String, Long>()), 2, new QnnLog.Describer() {
+                @Override
+                public String describe(OnnxPatcher.Node n) {
+                    return QnnBuild.describe(n, types, consts);
+                }
+            });
         } catch (Exception e) {
             return "не снят: " + e.getMessage();
         } finally {

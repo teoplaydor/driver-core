@@ -74,6 +74,35 @@ public class AppFlowTest {
         Robo.settle(300);
         assertTrue(Robo.allText(root), Robo.allText(root).contains("Галерея ещё не проиндексирована"));
 
+        // the accelerator check shows how it goes: the status line with its percentage and stage (a tap opens the
+        // stages), the sheet with every stage and its result; at the end the sheet goes (the report follows)
+        long now = System.currentTimeMillis();
+        io.github.teoplaydor.semsearch.core.StageProgress bp = new io.github.teoplaydor.semsearch.core.StageProgress("Подбор ускорения", now);
+        io.github.teoplaydor.semsearch.core.StageProgress.Stage cpu = bp.add("Процессор", 10000), npu = bp.add("NPU Snapdragon (QNN)", 10000);
+        bp.add("Профиль: где работает ускоритель", 10000);
+        bp.start(cpu, now - 1000);
+        bp.done(cpu, "1.37 с", now);
+        bp.start(npu, now);
+        bp.detail(npu, "первый запуск: сборка модели под NPU");
+        e.bench = bp;
+        a.onEngineChanged();
+        Robo.settle(300);
+        android.widget.TextView status = (android.widget.TextView) Robo.field(a, "status");
+        assertTrue(String.valueOf(status.getText()), String.valueOf(status.getText())
+                .startsWith("Подбор ускорения · 33% · этап 2 из 3: NPU Snapdragon (QNN) — первый запуск: сборка модели под NPU"));
+        status.performClick();
+        Robo.settle(600);
+        String sheetText = Robo.allText(root);
+        assertTrue(sheetText, sheetText.contains("Подбор ускорения") && sheetText.contains("✓") && sheetText.contains("1.37 с")
+                && sheetText.contains("▸") && sheetText.contains("○") && sheetText.contains("этап 2 из 3"));
+        bp.finish(System.currentTimeMillis());
+        a.onEngineChanged();
+        Robo.settle(600);
+        assertNull("the sheet goes when the check ends", Robo.byName(a.getWindow().getDecorView(), "BenchView"));
+        e.bench = null;
+        a.onEngineChanged();
+        Robo.settle(300);
+
         // fill the index as the indexer would, drive the gallery from it
         IndexStore s = e.store();
         Random rnd = new Random(1);

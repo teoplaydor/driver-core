@@ -6,6 +6,7 @@
 #  - clipped linears: Clip(x, -inf, +inf) around the projections;
 #  - the padding mask carried inside attention: q padded with ones (Pad, value 1), k with a mask channel block
 #    (Concat of Where(valid, 0, -3.4e38)), so q·k already holds the mask (q/k heads 4 wider than v);
+#  - RoPE's rotate_half as a Gather of the activations with constant indices (the export's index_select);
 #  - the pooler's sqrt(hidden) scaling at the end.
 # usage: make_gemma4_block.py <out.onnx>
 import sys
@@ -64,8 +65,12 @@ heads = c("heads", np.array([0, 0, H, HD], np.int64))
 q4 = n("Reshape", [n("MatMul", [xc, c("wq", (rnd.randn(D, D) * 0.3).astype(np.float32))], "q"), heads], "q4")
 k4 = n("Reshape", [n("MatMul", [xc, c("wk", (rnd.randn(D, D) * 0.3).astype(np.float32))], "k"), heads], "k4")
 v = n("MatMul", [xc, c("wv", (rnd.randn(D, D) * 0.3).astype(np.float32))], "v")
-qr = n("Add", [n("Mul", [q4, cos], "qc"), n("Mul", [q4, sin], "qs")], "qr")
-kr = n("Add", [n("Mul", [k4, cos], "kc"), n("Mul", [k4, sin], "ks")], "kr")
+# rotate_half as the export spells it: the halves swapped by a Gather with constant indices (index_select)
+perm = c("rot_perm", np.array(list(range(HD // 2, HD)) + list(range(0, HD // 2)), np.int64))
+qrot = n("Gather", [q4, perm], "node_index_select_q", axis=-1)
+krot = n("Gather", [k4, perm], "node_index_select_k", axis=-1)
+qr = n("Add", [n("Mul", [q4, cos], "qc"), n("Mul", [qrot, sin], "qs")], "qr")
+kr = n("Add", [n("Mul", [k4, cos], "kc"), n("Mul", [krot, sin], "ks")], "kr")
 qp = n("Pad", [qr, c("qpads", np.array([0, 0, 0, 0, 0, 0, 0, 4], np.int64)), c("one", np.array(1, np.float32))], "qp")
 v4 = n("Unsqueeze", [valid2, c("ax23", np.array([2, 3], np.int64))], "valid4")
 mcol = n("Where", [v4, "zf", "fmin"], "mcol")

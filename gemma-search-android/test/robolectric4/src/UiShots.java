@@ -522,7 +522,55 @@ public class UiShots {
         shot(a, "13-left-rail");
         call(a, "setRailSide", 0);
         settle(400);
+
+        // the accelerator check as it goes: stages done with results, the NPU compiling (its process's own step), the rest
+        e.bench = benchExample(System.currentTimeMillis());
+        a.onEngineChanged();
+        settle(400);
+        shot(a, "15-check-status");
+        call(a, "showBenchProgress", e.bench.startedMs());
+        settle(900);
+        shot(a, "16-check-progress");
+        a.onBackPressed();
+        settle(600);
+        e.bench = null;
         a.finish();
+    }
+
+    /** A check part-way through, as on the phone: what was measured, the NPU compiling for 280 tokens, the rest. */
+    static io.github.teoplaydor.semsearch.core.StageProgress benchExample(long now) {
+        io.github.teoplaydor.semsearch.core.StageProgress p = new io.github.teoplaydor.semsearch.core.StageProgress("Подбор ускорения", now - 512000);
+        String[][] done = {{"Процессор", "1.37 с"}, {"NPU Snapdragon (QNN)", "0.36 с, совпадение 0.994"},
+                {"Видеокарта (WebGPU), int8 + fp16-внимание", "0.49 с, совпадение 1.000"}, {"Видеокарта (WebGPU), int8", "0.53 с, совпадение 1.000"},
+                {"Видеокарта (WebGPU), fp16", "0.68 с, совпадение 0.995"}, {"LiteRT-LM, видеокарта", "0.19 с, совпадение 0.965 — расходится"}};
+        long t = now - 512000;
+        for (String[] d : done) {
+            io.github.teoplaydor.semsearch.core.StageProgress.Stage st = p.add(d[0], 20000);
+            p.start(st, t);
+            t += 20000;
+            p.done(st, d[1], t);
+        }
+        io.github.teoplaydor.semsearch.core.StageProgress.Stage th = p.add("Число потоков для лучшего", 45000);
+        p.start(th, t);
+        t += 45000;
+        p.done(th, "лучше всего потоков 2", t);
+        io.github.teoplaydor.semsearch.core.StageProgress.Stage ba = p.add("Пачки по 2 и 4 фото", 30000);
+        p.start(ba, t);
+        t += 30000;
+        p.done(ba, "лучше по одному фото", t);
+        io.github.teoplaydor.semsearch.core.StageProgress.Stage du = p.add("Перемер двух лучших вперемешку", 48000);
+        p.start(du, t);
+        t += 48000;
+        p.done(du, "0.36 с против 0.49 с", t);
+        io.github.teoplaydor.semsearch.core.StageProgress.Stage other = p.add("Замер на 280 токенах", 480000);
+        p.start(other, now - 155000);
+        p.parts(other, 1);
+        p.detail(other, "первый запуск: сборка модели под NPU (минуты) · NPU: сборка под 2520 фрагментов: QNN компилирует граф — "
+                + "способ 1: внимание по 4 частям, оптимизация QNN 3 · память процесса 1890 МБ, пик 2240 МБ");
+        p.add("Профиль: где работает ускоритель", 15000);
+        p.add("NPU изнутри: что он взял и профиль QNN", 25000);
+        p.skip(p.add("Пауза: телефон остывает", 20000), "");
+        return p;
     }
 
     static Object fieldUnchecked(Object o, String name) {

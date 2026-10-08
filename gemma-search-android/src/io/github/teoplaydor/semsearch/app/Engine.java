@@ -34,6 +34,7 @@ import io.github.teoplaydor.semsearch.core.PatternSource;
 import io.github.teoplaydor.semsearch.core.QnnRuntime;
 import io.github.teoplaydor.semsearch.core.QueryBridge;
 import io.github.teoplaydor.semsearch.core.SigLip;
+import io.github.teoplaydor.semsearch.core.StageProgress;
 import io.github.teoplaydor.semsearch.core.VectorMath;
 
 /**
@@ -1579,10 +1580,11 @@ public final class Engine {
     /**
      * The vision graph rewritten for QNN; the "r" number changes with the rewrite (r2: unique node names; r3:
      * RMS norm and constants safe in fp16; r4: sentinels used as data — the mask carried in the keys — become
-     * ±10⁴, bounds ±65504).
+     * ±10⁴, bounds ±65504; r5: Gathers with constant indices as Slices, divisions by a per-vector value as
+     * multiplications by its reciprocal, no scaling of scores by 1).
      */
     private static File qnnGraph(File fp32) {
-        return new File(fp32.getParentFile(), fp32.getName().replace(".onnx", ".qnn.r4.onnx"));
+        return new File(fp32.getParentFile(), fp32.getName().replace(".onnx", ".qnn.r5.onnx"));
     }
 
     /** Where the NPU's result differs from the CPU's (NpuService.scan), for the last image it ran. */
@@ -1692,6 +1694,112 @@ public final class Engine {
     /** Times the NPU process may crash while compiling a large graph before the NPU gives up (each time another way). */
     static final int MAX_NPU_RESTARTS = 3;
 
+    /** The running (or last) accelerator check by stages, for the progress on screen; null before the first. */
+    public volatile StageProgress bench;
+    /** The stage being measured, what the measurement does now, and whether it runs on the NPU (its process's stage is shown). */
+    private volatile StageProgress.Stage benchStage;
+    private volatile String benchDoing = "";
+    private volatile boolean benchNpu;
+    private volatile long benchStageMs;
+    private java.util.concurrent.ScheduledExecutorService ticker;
+
+    private static long now() {
+        return System.currentTimeMillis();
+    }
+
+    /** The stage measured from now on (its sub-steps go to its detail). */
+    private void benchAt(StageProgress.Stage s, int accel) {
+        benchStage = s;
+        benchNpu = isQnn(accel);
+        benchStageMs = now();
+        benchDoing = "";
+    }
+
+    /** What the measurement of the current stage does now. */
+    private void benchDoing(String what) {
+        benchDoing = what;
+        StageProgress pr = bench;
+        StageProgress.Stage s = benchStage;
+        if (pr != null && s != null) pr.detail(s, what);
+        notifyChanged();
+    }
+
+    /**
+     * Once a second while the check runs: the progress moves on screen, and on the NPU the NPU process's own stage
+     * (compiling, checking, its memory) joins the detail.
+     */
+    private void startTicker() {
+        stopTicker();
+        ticker = java.util.concurrent.Executors.newSingleThreadScheduledExecutor();
+        ticker.scheduleAtFixedRate(new Runnable() {
+            @Override
+            public void run() {
+                StageProgress pr = bench;
+                if (pr == null || pr.finished()) return;
+                StageProgress.Stage s = benchStage;
+                if (s != null && benchNpu) {
+                    File f = NpuService.stageFile(ctx);
+                    if (f.exists() && f.lastModified() >= benchStageMs - 1000) {
+                        String npu = readSmall(f).trim();
+                        if (!npu.isEmpty()) pr.detail(s, (benchDoing.isEmpty() ? "" : benchDoing + " · ") + "NPU: " + npu);
+                    }
+                }
+                notifyChanged();
+            }
+        }, 1, 1, java.util.concurrent.TimeUnit.SECONDS);
+    }
+
+    private void finishBench() {
+        StageProgress pr = bench;
+        if (pr != null) pr.finish(now());
+        benchStage = null;
+        stopTicker();
+        notifyChanged();
+    }
+
+    private void stopTicker() {
+        if (ticker != null) ticker.shutdownNow();
+        ticker = null;
+    }
+
+    private static String readSmall(File f) {
+        try {
+            return new String(java.nio.file.Files.readAllBytes(f.toPath()), "UTF-8");
+        } catch (Exception e) {
+            return "";
+        }
+    }
+
+    /** Expected time of a measurement: the last one of the same kind on this phone, else a guess. */
+    private double expectMs(int accel, int budget, int batch, boolean cold) {
+        long seen = prefs.getLong(expectKey(accel, budget, batch, cold), 0);
+        if (seen > 0) return seen;
+        double scale = Math.max(1, budget / 70.0);
+        if (isQnn(accel) && cold) return budget * 9 > NpuService.BIG_PATCHES ? 480000 : 180000;
+        if (isLiteRt(accel)) return 15000;
+        return Math.min(90000, 15000 * scale * Math.max(1, batch / 2.0));
+    }
+
+    private static String expectKey(int accel, int budget, int batch, boolean cold) {
+        return "bench_ms_" + accel + "_" + budget + "_" + batch + (cold ? "_cold" : "");
+    }
+
+    /** The NPU has no checked compilation for this budget yet: its first run compiles one (minutes). */
+    private boolean qnnCold(ModelConfig cfg, HfRepo.Plan plan, int budget) {
+        if (plan.accelVision == null || cfg == null) return true;
+        File g = qnnGraph(new File(modelDir, plan.accelVision));
+        int pool = Math.max(1, cfg.image.poolingKernelSize);
+        return !new File(g.getParentFile(), g.getName().replace(".onnx", "") + ".p" + budget * pool * pool + "_precision.txt").exists();
+    }
+
+    /** "0.36 с, совпадение 0.994" for a stage's row. */
+    private static String shortResult(Measure m, boolean withCos) {
+        if (m.error != null) return "не работает";
+        String r = String.format(java.util.Locale.ROOT, "%.2f с", m.perPhotoMs / 1000.0);
+        if (withCos) r += String.format(java.util.Locale.ROOT, ", совпадение %.3f", m.cos);
+        return r;
+    }
+
     /** The NPU with a graph so large that it compiles in lighter ways, each tried in a new process after a crash. */
     private static boolean bigNpu(int accel, int budget, int pool) {
         return isQnn(accel) && budget * pool * pool > NpuService.BIG_PATCHES;
@@ -1704,25 +1812,30 @@ public final class Engine {
     private Measure measure(ModelConfig cfg, HfTokenizer tok, HfRepo.Plan plan, int accel, int nThreads, int batch,
                             int budget, float[] reference) {
         int pool = cfg != null ? Math.max(1, cfg.image.poolingKernelSize) : 1;
+        boolean cold = isQnn(accel) && plan != null && qnnCold(cfg, plan, budget);
+        long t0 = now();
         StringBuilder crashes = new StringBuilder();
         for (int attempt = 0; ; attempt++) {
-            Measure r = measureOnce(cfg, tok, plan, accel, nThreads, batch, budget, reference);
+            Measure r = measureOnce(cfg, tok, plan, accel, nThreads, batch, budget, reference, cold);
             boolean crashed = r.error != null && r.error.startsWith("NPU-процесс упал");
             if (!crashed || !bigNpu(accel, budget, pool) || attempt >= MAX_NPU_RESTARTS) {
                 if (crashes.length() > 0) r.crashes = "\n  до этого NPU-процесс падал при сборке:" + crashes;
+                // how long this kind takes on this phone: the next check's progress expects it
+                if (r.error == null) prefs.edit().putLong(expectKey(accel, budget, batch, cold), now() - t0).apply();
                 return r;
             }
             crashes.append("\n    ").append(attempt + 1).append(") ").append(r.error.replace("\n", "\n       "));
             status = "NPU-процесс упал при сборке — новый процесс соберёт другим способом (попытка " + (attempt + 2) + ")…";
-            notifyChanged();
+            benchDoing("NPU-процесс упал при сборке — перезапуск " + (attempt + 1) + " из " + MAX_NPU_RESTARTS + ", следующий способ");
         }
     }
 
     private Measure measureOnce(ModelConfig cfg, HfTokenizer tok, HfRepo.Plan plan, int accel, int nThreads, int batch,
-                                int budget, float[] reference) {
+                                int budget, float[] reference, boolean cold) {
         Measure r = new Measure();
         Embedder m = null;
         try {
+            benchDoing(isLiteRt(accel) ? "загружаю модель LiteRT-LM" : isQnn(accel) ? "запускаю NPU-процесс" : "загружаю модель");
             m = createModel(cfg, tok, plan, accel, nThreads, batch);
             if (m instanceof LiteRtEmbedder && ((LiteRtEmbedder) m).budgetFixed()) {
                 // its numbers would be for the bundle's own (smaller) detail, not for the one asked
@@ -1732,8 +1845,10 @@ public final class Engine {
             List<io.github.teoplaydor.semsearch.core.ImagePreprocessor.Source> imgs =
                     new ArrayList<io.github.teoplaydor.semsearch.core.ImagePreprocessor.Source>();
             for (int k = 0; k < batch; k++) imgs.add(new PatternSource(640, 480, 2 + k));
+            benchDoing(cold ? "первый запуск: сборка модели под NPU (минуты)" : isGpu(accel) ? "прогрев: шейдеры видеокарты" : "прогрев");
             m.embedImages(imgs, budget); // warm-up: allocations, GPU shader compilation
             for (int run = 0; run < 2; run++) {
+                benchDoing("замер " + (run + 1) + " из 2");
                 long t0 = System.currentTimeMillis();
                 float[][] e = m.embedImages(imgs, budget);
                 double per = (System.currentTimeMillis() - t0) / (double) batch;
@@ -1964,6 +2079,25 @@ public final class Engine {
                         }
                         plan1.add(new int[]{a, auto, 1});
                     }
+                    // the stages on screen, weighted by their expected time (the last one of the same kind on this phone)
+                    final StageProgress pr = new StageProgress("Подбор ускорения", now());
+                    List<StageProgress.Stage> first = new ArrayList<StageProgress.Stage>();
+                    for (int[] c : plan1) {
+                        first.add(pr.add(ACCEL_NAMES[c[0]], expectMs(c[0], budget, 1, isQnn(c[0]) && qnnCold(cfg, plan, budget))));
+                    }
+                    StageProgress.Stage stThreads = pr.add("Число потоков для лучшего", 45000);
+                    StageProgress.Stage stBatch = pr.add("Пачки по 2 и 4 фото", 30000);
+                    StageProgress.Stage stDuel = pr.add("Перемер двух лучших вперемешку", 48000);
+                    int otherBudget = budget == PHOTO_BUDGETS[0] ? PHOTO_BUDGETS[PHOTO_BUDGETS.length - 1] : PHOTO_BUDGETS[0];
+                    StageProgress.Stage stCool = autoDetail() && otherBudget > budget ? pr.add("Пауза: телефон остывает", 20000) : null;
+                    StageProgress.Stage stOther = pr.add("Замер на " + otherBudget + " токенах", 40000);
+                    StageProgress.Stage stProfile = pr.add("Профиль: где работает ускоритель", 15000);
+                    boolean qnnPlanned = false;
+                    for (int[] c : plan1) qnnPlanned |= isQnn(c[0]);
+                    StageProgress.Stage stNpu = qnnPlanned ? pr.add("NPU изнутри: что он взял и профиль QNN", 25000) : null;
+                    bench = pr;
+                    startTicker();
+                    notifyChanged();
                     float[] reference = null;
                     float[] bestEmb = null, lrtBestEmb = null;
                     int[] best = null, offer = null, lrtBest = null;
@@ -1987,7 +2121,18 @@ public final class Engine {
                         } else if (phase == 2 && best != null) {
                             for (int b : new int[]{2, 4}) cands.add(new int[]{best[0], best[1], b});
                         }
+                        StageProgress.Stage ps = phase == 1 ? stThreads : phase == 2 ? stBatch : null;
+                        if (ps != null) {
+                            if (cands.isEmpty()) {
+                                pr.skip(ps, best == null ? "нет работающего варианта" : "не нужно для этого варианта");
+                            } else {
+                                pr.start(ps, now());
+                                pr.parts(ps, cands.size());
+                            }
+                        }
+                        int idx = -1;
                         for (int[] c : cands) {
+                            idx++;
                             step++;
                             String name = ACCEL_NAMES[c[0]] + ", потоков " + c[1] + (c[2] > 1 ? ", пачка " + c[2] : "");
                             status = "Подбираю ускорение (" + step + "): " + name;
@@ -1997,6 +2142,10 @@ public final class Engine {
                                 status = "NPU Snapdragon: компилирую модель под NPU — в первый раз до нескольких минут, если QNN не справится — до 15 минут поиска";
                                 notifyChanged();
                             }
+                            StageProgress.Stage st = phase == 0 ? first.get(idx) : ps;
+                            if (phase == 0) pr.start(st, now());
+                            else pr.part(st, idx, name.replace(ACCEL_NAMES[c[0]] + ", ", ""), now());
+                            benchAt(st, c[0]);
                             probe(c[0], true);
                             Measure m = measure(cfg, tok, plan, c[0], c[1], c[2], budget, reference);
                             probe(c[0], false);
@@ -2005,6 +2154,11 @@ public final class Engine {
                                 prefs.edit().putBoolean("qnn_broken", true).apply();
                             }
                             if (isQnn(c[0]) && m.error == null && phase == 0) qnnMeasured = true;
+                            if (phase == 0) {
+                                if (m.error != null) pr.failed(st, "не работает", now());
+                                else pr.done(st, shortResult(m, reference != null && reference != m.emb)
+                                        + (reference != null && reference != m.emb && m.cos < 0.98f ? " — расходится" : ""), now());
+                            }
                             if (m.error != null) {
                                 rep.append("• ").append(name).append(": не работает — ").append(m.error).append(m.crashes).append('\n');
                                 continue;
@@ -2045,8 +2199,13 @@ public final class Engine {
                                 offerCos = m.cos;
                             }
                         }
+                        if (ps != null && !cands.isEmpty() && best != null) {
+                            pr.done(ps, phase == 1 ? "лучше всего потоков " + best[1]
+                                    : best[2] > 1 ? "лучше пачкой по " + best[2] : "лучше по одному фото", now());
+                        }
                     }
                     if (best == null) {
+                        pr.finish(now());
                         throw new IllegalStateException(space ? "LiteRT-LM не подходит для этой детализации — «Вернуться на ONNX "
                                 + "Runtime» в настройках" : "ни один вариант не сработал");
                     }
@@ -2064,13 +2223,20 @@ public final class Engine {
                     double firstBestMs = bestMs, againBest = Double.MAX_VALUE, againRunner = Double.MAX_VALUE;
                     Measure lastBest = null, lastRunner = null;
                     boolean duel = runner != null && runnerMs < bestMs * 1.25;
+                    pr.start(stDuel, now());
+                    pr.parts(stDuel, duel ? 4 : 1);
+                    int duelPart = 0;
                     for (int round = 0; round < (duel ? 2 : 1); round++) {
+                        pr.part(stDuel, duelPart++, ACCEL_NAMES[best[0]], now());
+                        benchAt(stDuel, best[0]);
                         Measure a = measureAt(cfg, tok, plan, best, budget, reference);
                         if (a.error == null && a.perPhotoMs < againBest) {
                             againBest = a.perPhotoMs;
                             lastBest = a;
                         }
                         if (duel) {
+                            pr.part(stDuel, duelPart++, ACCEL_NAMES[runner[0]], now());
+                            benchAt(stDuel, runner[0]);
                             Measure b = measureAt(cfg, tok, plan, runner, budget, reference);
                             if (b.error == null && b.perPhotoMs < againRunner) {
                                 againRunner = b.perPhotoMs;
@@ -2078,6 +2244,9 @@ public final class Engine {
                             }
                         }
                     }
+                    pr.done(stDuel, lastBest == null ? "не вышло" : duel && lastRunner != null
+                            ? String.format(java.util.Locale.ROOT, "%.2f с против %.2f с", againBest / 1000.0, againRunner / 1000.0)
+                            : String.format(java.util.Locale.ROOT, "%.2f с", againBest / 1000.0), now());
                     if (duel && lastBest != null && lastRunner != null) {
                         rep.append(String.format(java.util.Locale.ROOT, "\nПеремер двух лучших вперемешку: %s %.2f с, %s %.2f с",
                                 ACCEL_NAMES[best[0]], againBest / 1000.0, ACCEL_NAMES[runner[0]], againRunner / 1000.0));
@@ -2100,19 +2269,53 @@ public final class Engine {
                     boolean weigh = autoDetail() && other > budget;
                     // the fastest LiteRT-LM variant (when not the winner) is measured there as well: its detail is verified
                     int[] rival = lrtBest != null && !isLiteRt(best[0]) ? lrtBest : null;
-                    Measure bestOther = null, rivalOther = null;
+                    // the NPU, when it worked but did not win here, is measured there too: at the other detail it may
+                    // be the fastest (and its compilation for that size is checked on the way)
+                    int[] npuRival = null;
+                    double npuMs = Double.MAX_VALUE;
+                    for (int i = 0; i < okCands.size(); i++) {
+                        if (!isQnn(best[0]) && isQnn(okCands.get(i)[0]) && okMs.get(i) < npuMs) {
+                            npuRival = okCands.get(i);
+                            npuMs = okMs.get(i);
+                        }
+                    }
+                    Measure bestOther = null, rivalOther = null, npuOther = null;
+                    if (stCool != null && !weigh) pr.skip(stCool, "");
                     if (other > 0) {
                         if (weigh) {
                             status = "Даю телефону остыть перед замером скриншотов…";
+                            if (stCool != null) pr.start(stCool, now());
                             notifyChanged();
                             Thread.sleep(20000);
+                            if (stCool != null) pr.done(stCool, "", now());
                         }
+                        pr.expect(stOther, expectMs(best[0], other, best[2], isQnn(best[0]) && qnnCold(cfg, plan, other))
+                                + (rival != null ? expectMs(rival[0], other, 1, false) : 0)
+                                + (npuRival != null ? expectMs(npuRival[0], other, 1, qnnCold(cfg, plan, other)) : 0));
+                        pr.start(stOther, now());
+                        pr.parts(stOther, 1 + (rival != null ? 1 : 0) + (npuRival != null ? 1 : 0));
+                        pr.part(stOther, 0, ACCEL_NAMES[best[0]], now());
+                        benchAt(stOther, best[0]);
                         bestOther = measureAt(cfg, tok, plan, best, other);
+                        if (npuRival != null) {
+                            pr.part(stOther, 1, ACCEL_NAMES[npuRival[0]], now());
+                            benchAt(stOther, npuRival[0]);
+                            npuOther = measureAt(cfg, tok, plan, npuRival, other, bestOther.error == null ? bestOther.emb : null);
+                        }
                         // LiteRT-LM on screenshots, compared with the ONNX model at the same detail
                         if (rival != null) {
+                            pr.part(stOther, npuRival != null ? 2 : 1, ACCEL_NAMES[rival[0]], now());
+                            benchAt(stOther, rival[0]);
                             rivalOther = measureAt(cfg, tok, plan, rival, other,
                                     bestOther.error == null ? bestOther.emb : null);
                         }
+                        String r = ACCEL_NAMES[best[0]].replaceFirst(" \\(.*", "") + ": " + shortResult(bestOther, false)
+                                + (npuOther != null ? "; NPU: " + shortResult(npuOther, false) : "")
+                                + (rivalOther != null ? "; " + ACCEL_NAMES[rival[0]] + ": " + shortResult(rivalOther, false) : "");
+                        if (bestOther.error != null) pr.failed(stOther, r, now());
+                        else pr.done(stOther, r, now());
+                    } else {
+                        pr.skip(stOther, "");
                     }
                     double share = weigh ? screenshotShare() : 0;
                     boolean shareKnown = share >= 0;
@@ -2125,7 +2328,23 @@ public final class Engine {
                         }
                     }
                     int[] onnxWinner = best;
+                    // the variant bestOther was measured with (the winner before any switch below)
+                    final int[] measuredOther = best;
                     boolean switched = false;
+                    // the NPU weighed the same way: with the screenshots on average faster (and its vectors the same)
+                    double npuScore = Double.MAX_VALUE;
+                    boolean npuSame = npuOther != null && npuOther.error == null && (bestOther == null || bestOther.error != null || npuOther.cos >= 0.98f);
+                    if (npuSame && weigh && bestOther != null && bestOther.error == null) {
+                        npuScore = (1 - share) * npuMs + share * npuOther.perPhotoMs;
+                        if (npuScore < bestScore) {
+                            rep.append(String.format(java.util.Locale.ROOT, "\n(%s с учётом скриншотов в среднем %.2f с на снимок против %.2f с у %s)",
+                                    ACCEL_NAMES[npuRival[0]], npuScore / 1000.0, bestScore / 1000.0, ACCEL_NAMES[best[0]]));
+                            best = npuRival;
+                            bestMs = npuMs;
+                            bestScore = npuScore;
+                            onnxWinner = best;
+                        }
+                    }
                     // weighed: both measured on screenshots too — then only the average per snapshot decides
                     boolean weighed = rivalScore < Double.MAX_VALUE;
                     if (weighed) {
@@ -2156,7 +2375,13 @@ public final class Engine {
                         rep.append(weigh ? "\n\nСкриншоты и документы (" + other + " токенов, после паузы на остывание):"
                                 : other < budget ? "\n\nС детализацией «Авто» обычные фото (" + other + " токенов):"
                                 : "\n\nПри " + other + " токенах:");
-                        appendMeasure(rep, onnxWinner, bestOther);
+                        appendMeasure(rep, measuredOther, bestOther);
+                        if (npuOther != null) {
+                            appendMeasure(rep, npuRival, npuOther);
+                            if (npuOther.error == null && bestOther.error == null) {
+                                rep.append(String.format(java.util.Locale.ROOT, ", совпадение %.3f", npuOther.cos));
+                            }
+                        }
                         if (rivalOther != null) {
                             appendMeasure(rep, rival, rivalOther);
                             if (rivalOther.error == null && bestOther.error == null) {
@@ -2164,8 +2389,8 @@ public final class Engine {
                             }
                         }
                         // does LiteRT-LM really change detail? (a bundle without the signature falls back to its own)
-                        float[] lrtAtBudget = isLiteRt(onnxWinner[0]) ? bestEmb : rivalOther != null ? lrtBestEmb : null;
-                        Measure lrtAtOther = isLiteRt(onnxWinner[0]) ? bestOther : rivalOther;
+                        float[] lrtAtBudget = isLiteRt(measuredOther[0]) ? bestEmb : rivalOther != null ? lrtBestEmb : null;
+                        Measure lrtAtOther = isLiteRt(measuredOther[0]) ? bestOther : rivalOther;
                         if (lrtAtBudget != null && lrtAtOther != null && lrtAtOther.error == null) {
                             float same = 0;
                             for (int j = 0; j < lrtAtBudget.length; j++) same += lrtAtBudget[j] * lrtAtOther.emb[j];
@@ -2202,22 +2427,37 @@ public final class Engine {
                     // where the accelerator's graph actually runs
                     if (isGpu(best[0]) || isNpu(best[0])) {
                         status = "Смотрю, какие операции остаются на процессоре…";
+                        pr.start(stProfile, now());
+                        benchAt(stProfile, best[0]);
                         notifyChanged();
                         mark("подбор ускорения: профиль, " + ACCEL_NAMES[best[0]]);
                         if (isNpu(best[0])) prefs.edit().putString("npu_probe", String.valueOf(best[0])).commit();
                         rep.append("\n\n").append(profileVision(cfg, tok, plan, best, budget));
                         prefs.edit().remove("npu_probe").commit();
                         mark("");
+                        pr.done(stProfile, "", now());
+                    } else {
+                        pr.skip(stProfile, isQnn(best[0]) ? "у NPU — следующим этапом" : "на процессоре не нужен");
                     }
                     if (qnnMeasured) {
                         status = "Смотрю, что NPU взял на себя…";
+                        pr.start(stNpu, now());
+                        benchAt(stNpu, ACCEL_NPU_QNN);
+                        if (qnnWrong) {
+                            pr.parts(stNpu, 2);
+                            pr.expect(stNpu, 25000 + 180000);
+                        }
                         notifyChanged();
                         rep.append("\n\nNPU Snapdragon (").append(budget).append(" токенов):\n").append(profileQnn(cfg, plan, budget));
                         if (qnnWrong) {
                             status = "Ищу, где NPU портит результат (сборка с проверками, до нескольких минут)…";
+                            pr.part(stNpu, 1, "ищу, где NPU портит результат", now());
                             notifyChanged();
                             rep.append("\nГде NPU портит результат: ").append(scanQnn(cfg, plan, budget));
                         }
+                        pr.done(stNpu, "", now());
+                    } else if (stNpu != null) {
+                        pr.skip(stNpu, "NPU не сработал");
                     }
                     try {
                         // how the vision encoder computes attention (the cost that grows quadratically with detail)
@@ -2243,10 +2483,12 @@ public final class Engine {
                                 + "энкодера (≈%d МБ) — кнопка «Проверить NPU» в настройках.", gemmaFp32EstimateBytes() >> 20));
                     }
                     prefs.edit().putString("g_report", rep.toString()).apply();
+                    finishBench();
                     post(cb, rep.toString(), null);
                 } catch (Throwable e) {
                     rep.append("\nОшибка: ").append(e.getMessage() != null ? e.getMessage() : e.toString());
                     prefs.edit().putString("g_report", rep.toString()).apply();
+                    finishBench();
                     post(cb, rep.toString(), null);
                 }
                 mark("");

@@ -85,6 +85,8 @@ java -Dfile.encoding=UTF-8 -Dstdout.encoding=UTF-8 -cp "$T/cls:build/deps/ort-cl
   "$T/accel/vit.onnx" "$T/accel"
 javac --release 8 -XDstringConcat=inline -nowarn -encoding UTF-8 -cp "$T/cls" -d "$T/cls" test/accel/TombstoneTest.java
 java -Dfile.encoding=UTF-8 -Dstdout.encoding=UTF-8 -cp "$T/cls" TombstoneTest
+javac --release 8 -XDstringConcat=inline -nowarn -encoding UTF-8 -cp "$T/cls" -d "$T/cls" test/accel/StageProgressTest.java
+java -Dfile.encoding=UTF-8 -Dstdout.encoding=UTF-8 -cp "$T/cls" StageProgressTest
 javac --release 8 -XDstringConcat=inline -nowarn -encoding UTF-8 -cp "$T/cls:$T/ort-desktop.jar" -d "$T/cls" test/accel/QnnLogTest.java
 java -Dfile.encoding=UTF-8 -Dstdout.encoding=UTF-8 -cp "$T/cls:build/deps/ort-classes:$T/ort-desktop.jar" QnnLogTest "$T/accel/vit.qnn.onnx"
 python3 test/accel/check_qnn_fp16.py "$T/accel/vit.onnx" "$T/accel/vit.qnn.onnx" 2>&1 | grep -v "truncated to\|warnings.warn"

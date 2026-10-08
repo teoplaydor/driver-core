@@ -183,13 +183,20 @@ public final class OnnxPatcher {
      *     becomes ±10⁴, enough to mask and far from overflowing when added up; as the bound of a Clip, Min or Max
      *     it becomes ±65504, which bounds nothing in fp16. Tiny nonzero constants (an ε) are raised to fp16's
      *     smallest normal number.</li>
-     * </ul>
      * Everything else is copied as is. Initializers stay in the external data file next to the original.
      * Every node's name gets a token unique in the graph ({@code _N12N}): ONNX Runtime assigns nodes to an
      * execution provider by substrings of their names (session.name_based_layer_assignment), and a token cannot
      * be part of another one, so a node can be kept off the NPU exactly.
      *
-     * @return {attention nodes, normalisation nodes, constants brought into fp16's range} rewritten
+     * <li>a Gather with constant indices (a fixed reordering of channels, e.g. RoPE's halves) becomes Slices of
+     *     the runs of consecutive indices and a Concat — the same values, moved by the NPU as blocks; a gather of
+     *     single elements took a third of its time;</li>
+     * </ul>
+     * Divisions by a per-vector value (the RMS norm's scale and root) are multiplications by its reciprocal,
+     * computed once per vector; attention scores are not multiplied by a scale of 1.
+     *
+     * @return {attention nodes, normalisation nodes, constants brought into fp16's range, gathers turned to slices}
+     *         rewritten
      */
     public static int[] forQnn(File in, File out) throws IOException {
         java.util.Map<String, Long> opsets = new java.util.HashMap<String, Long>();
@@ -222,12 +229,14 @@ public final class OnnxPatcher {
         }
         if (out.exists() && !out.delete()) throw new IOException("cannot replace " + out);
         if (!tmp.renameTo(out)) throw new IOException("cannot write " + out);
-        return new int[]{q.attention, q.norms, q.clamped};
+        return new int[]{q.attention, q.norms, q.clamped, q.gathers};
     }
 
     private static final class QnnRewrite {
         final long opset;
-        int attention, norms, clamped;
+        int attention, norms, clamped, gathers;
+        /** 1-D integer constants of the graph (initializers in the file, Constant nodes): Gather indices. */
+        final java.util.Map<String, long[]> indexConstants = new java.util.HashMap<String, long[]>();
         final java.util.Set<String> constants = new java.util.HashSet<String>();
         ByteArrayOutputStream out;
         int named;
@@ -282,8 +291,76 @@ public final class OnnxPatcher {
             bounds.removeAll(data);
         }
 
+        /** Collects the graph's 1-D integer constants (up to 4096 values). */
+        private void findIndexConstants(byte[] b, int from, int to) throws IOException {
+            Reader r = new Reader(b, from, to);
+            while (r.more()) {
+                long key = r.varint();
+                int field = (int) (key >>> 3), wire = (int) (key & 7);
+                if ((field != 5 && field != 1) || wire != 2) {
+                    r.skip(wire);
+                    continue;
+                }
+                int len = (int) r.varint();
+                byte[] raw = new byte[len];
+                System.arraycopy(b, r.pos, raw, 0, len);
+                r.pos += len;
+                if (field == 5) {
+                    Object[] t = intVector(raw);
+                    if (t != null) indexConstants.put((String) t[0], (long[]) t[1]);
+                    continue;
+                }
+                Node n = parseNode(raw);
+                if (!"Constant".equals(n.opType) || n.outputs.isEmpty()) continue;
+                Reader nr = new Reader(raw, 0, raw.length);
+                while (nr.more()) {
+                    long k = nr.varint();
+                    int f = (int) (k >>> 3), w = (int) (k & 7);
+                    if (f != 5 || w != 2) {
+                        nr.skip(w);
+                        continue;
+                    }
+                    int l = (int) nr.varint();
+                    Reader a = new Reader(raw, nr.pos, nr.pos + l);
+                    nr.pos += l;
+                    String name = "";
+                    byte[] tensor = null;
+                    java.util.List<Long> ints = new java.util.ArrayList<Long>();
+                    while (a.more()) {
+                        long ak = a.varint();
+                        int af = (int) (ak >>> 3), aw = (int) (ak & 7);
+                        if (af == 1 && aw == 2) {
+                            name = a.string();
+                        } else if (af == 5 && aw == 2) {
+                            int tl = (int) a.varint();
+                            tensor = new byte[tl];
+                            System.arraycopy(raw, a.pos, tensor, 0, tl);
+                            a.pos += tl;
+                        } else if (af == 8 && aw == 0) {
+                            ints.add(a.varint());
+                        } else if (af == 8 && aw == 2) {
+                            int il = (int) a.varint(), end = a.pos + il;
+                            while (a.pos < end) ints.add(a.varint());
+                        } else {
+                            a.skip(aw);
+                        }
+                    }
+                    long[] v = null;
+                    if ("value".equals(name) && tensor != null) {
+                        Object[] t = intVector(tensor);
+                        if (t != null) v = (long[]) t[1];
+                    } else if ("value_ints".equals(name) && !ints.isEmpty() && ints.size() <= 4096) {
+                        v = new long[ints.size()];
+                        for (int i = 0; i < v.length; i++) v[i] = ints.get(i);
+                    }
+                    if (v != null) indexConstants.put(n.outputs.get(0), v);
+                }
+            }
+        }
+
         byte[] graph(byte[] b, int from, int to) throws IOException {
             findBounds(b, from, to);
+            findIndexConstants(b, from, to);
             out = new ByteArrayOutputStream(to - from + 65536);
             Reader r = new Reader(b, from, to);
             while (r.more()) {
@@ -316,6 +393,9 @@ public final class OnnxPatcher {
                     attention(n, attributes(raw));
                 } else if ("SimplifiedLayerNormalization".equals(n.opType)) {
                     rmsNorm(n, attributes(raw));
+                } else if ("Gather".equals(n.opType) && n.inputs.size() == 2 && indexConstants.containsKey(n.inputs.get(1))
+                        && gatherAsSlices(n, attributes(raw), indexConstants.get(n.inputs.get(1)))) {
+                    gathers++;
                 } else {
                     writeLenField(out, 1, renamed(raw, n.name));
                 }
@@ -371,7 +451,9 @@ public final class OnnxPatcher {
             emit("MatMul", new String[]{q, k}, new String[]{t + "/qk"}, t + "/qk");
             String scale;
             Float given = (Float) attrs.get("scale");
-            if (given != null && given != 0f) {
+            if (given != null && given == 1f) {
+                scale = null; // Gemma 4: scores as they are
+            } else if (given != null && given != 0f) {
                 scale = constFloat(t + "/scale", given);
             } else {
                 // 1/sqrt(head size) from the shape; with fixed input shapes ONNX Runtime folds this to a constant
@@ -383,8 +465,11 @@ public final class OnnxPatcher {
                 emit("Reciprocal", new String[]{t + "/sqrt"}, new String[]{t + "/scale"}, t + "/scale");
                 scale = t + "/scale";
             }
-            emit("Mul", new String[]{t + "/qk", scale}, new String[]{t + "/scores"}, t + "/scores");
-            String scores = t + "/scores";
+            String scores = t + "/qk";
+            if (scale != null) {
+                emit("Mul", new String[]{t + "/qk", scale}, new String[]{t + "/scores"}, t + "/scores");
+                scores = t + "/scores";
+            }
             if (in.size() > 5 && !in.get(5).isEmpty()) {
                 emit("Max", new String[]{in.get(5), constFloat(FLOOR_NAME, MASK_FLOOR)}, new String[]{t + "/mask"}, t + "/mask");
                 emit("Add", new String[]{scores, t + "/mask"}, new String[]{t + "/masked"}, t + "/masked");
@@ -434,6 +519,33 @@ public final class OnnxPatcher {
             return nb.toByteArray();
         }
 
+        /**
+         * Gather(data, constant indices) as Slices of the runs of consecutive indices joined by a Concat; false (the
+         * node stays) for negative indices or more than 8 runs.
+         */
+        private boolean gatherAsSlices(Node n, java.util.Map<String, Object> attrs, long[] idx) {
+            if (idx.length == 0 || n.outputs.isEmpty()) return false;
+            java.util.List<long[]> runs = new java.util.ArrayList<long[]>();
+            for (int i = 0; i < idx.length; i++) {
+                if (idx[i] < 0) return false;
+                if (!runs.isEmpty() && runs.get(runs.size() - 1)[1] == idx[i]) runs.get(runs.size() - 1)[1]++;
+                else runs.add(new long[]{idx[i], idx[i] + 1});
+            }
+            if (runs.size() > 8) return false;
+            long axis = attrs.containsKey("axis") ? (Long) attrs.get("axis") : 0;
+            String t = "qnng" + gathers + "_" + (n.name.isEmpty() ? "gather" : n.name.replaceAll("[^A-Za-z0-9_./]", "_"));
+            String axes = constInts("qnn_slice_axis_" + (axis < 0 ? "m" + -axis : String.valueOf(axis)), axis);
+            String[] parts = new String[runs.size()];
+            for (int i = 0; i < runs.size(); i++) {
+                long[] run = runs.get(i);
+                parts[i] = runs.size() == 1 ? n.outputs.get(0) : t + "/run" + i;
+                emit("Slice", new String[]{n.inputs.get(0), constInts("qnn_slice_from_" + run[0], run[0]), constInts("qnn_slice_to_" + run[1], run[1]),
+                        axes}, new String[]{parts[i]}, t + "/run" + i);
+            }
+            if (runs.size() > 1) emit("Concat", parts, new String[]{n.outputs.get(0)}, t + "/concat", attrInt("axis", axis));
+            return true;
+        }
+
         private void rmsNorm(Node n, java.util.Map<String, Object> attrs) throws IOException {
             if (n.outputs.size() > 1) {
                 for (int i = 1; i < n.outputs.size(); i++) {
@@ -448,7 +560,9 @@ public final class OnnxPatcher {
             reduce("ReduceMax", t + "/abs", t + "/amax", axis);
             // a zero vector (padding) is divided by this and stays zero
             emit("Max", new String[]{t + "/amax", constFloat("qnn_scale_floor", 1e-4f)}, new String[]{t + "/s"}, t + "/s");
-            emit("Div", new String[]{x, t + "/s"}, new String[]{t + "/y"}, t + "/y");
+            // one reciprocal per vector, then a multiplication: a division of every element was a sixth of the NPU's time
+            emit("Reciprocal", new String[]{t + "/s"}, new String[]{t + "/inv_s"}, t + "/inv_s");
+            emit("Mul", new String[]{x, t + "/inv_s"}, new String[]{t + "/y"}, t + "/y");
             emit("Mul", new String[]{t + "/y", t + "/y"}, new String[]{t + "/sq"}, t + "/sq");
             reduce("ReduceMean", t + "/sq", t + "/ms", axis);
             // ε / s² = (√ε / s)²: √ε is a normal fp16 number, ε is not
@@ -458,8 +572,9 @@ public final class OnnxPatcher {
             emit("Mul", new String[]{t + "/r", t + "/r"}, new String[]{t + "/r2"}, t + "/r2");
             emit("Add", new String[]{t + "/ms", t + "/r2"}, new String[]{t + "/den"}, t + "/den");
             emit("Sqrt", new String[]{t + "/den"}, new String[]{t + "/rms"}, t + "/rms");
+            emit("Reciprocal", new String[]{t + "/rms"}, new String[]{t + "/inv_rms"}, t + "/inv_rms");
             String normed = w.isEmpty() ? n.outputs.get(0) : t + "/normed";
-            emit("Div", new String[]{t + "/y", t + "/rms"}, new String[]{normed}, normed);
+            emit("Mul", new String[]{t + "/y", t + "/inv_rms"}, new String[]{normed}, normed);
             if (!w.isEmpty()) emit("Mul", new String[]{normed, w}, new String[]{n.outputs.get(0)}, t + "/out");
         }
     }
@@ -1025,6 +1140,62 @@ public final class OnnxPatcher {
     }
 
     /** {name, double[] values} of a TensorProto holding up to 16 float or integer values in the file; else null. */
+    /** {name, values} of a 1-D INT64 or INT32 TensorProto stored in the file (≤ 4096 values), else null. */
+    static Object[] intVector(byte[] t) throws IOException {
+        int type = 0, rank = 0;
+        String name = "";
+        byte[] raw = null;
+        java.util.List<Long> loose = new java.util.ArrayList<Long>();
+        Reader r = new Reader(t, 0, t.length);
+        while (r.more()) {
+            long k = r.varint();
+            int f = (int) (k >>> 3), w = (int) (k & 7);
+            if (f == 1 && w == 0) {
+                r.varint();
+                rank++;
+            } else if (f == 1 && w == 2) {
+                int l = (int) r.varint(), end = r.pos + l;
+                while (r.pos < end) {
+                    r.varint();
+                    rank++;
+                }
+            } else if (f == 2 && w == 0) {
+                type = (int) r.varint();
+            } else if (f == 8 && w == 2) {
+                name = r.string();
+            } else if (f == 9 && w == 2) {
+                int l = (int) r.varint();
+                raw = new byte[l];
+                System.arraycopy(t, r.pos, raw, 0, l);
+                r.pos += l;
+            } else if ((f == 5 || f == 7) && w == 2) {
+                int l = (int) r.varint(), end = r.pos + l;
+                while (r.pos < end) loose.add(r.varint());
+            } else if ((f == 5 || f == 7) && w == 0) {
+                loose.add(r.varint());
+            } else if (f == 13) {
+                return null; // external data
+            } else {
+                r.skip(w);
+            }
+        }
+        if (rank != 1 || (type != TYPE_INT64 && type != TYPE_INT32)) return null;
+        long[] v;
+        if (raw != null) {
+            int size = type == TYPE_INT64 ? 8 : 4;
+            if (raw.length / size > 4096) return null;
+            java.nio.ByteBuffer bb = java.nio.ByteBuffer.wrap(raw).order(java.nio.ByteOrder.LITTLE_ENDIAN);
+            v = new long[raw.length / size];
+            for (int i = 0; i < v.length; i++) v[i] = type == TYPE_INT64 ? bb.getLong() : bb.getInt();
+        } else {
+            if (loose.isEmpty() || loose.size() > 4096) return null;
+            v = new long[loose.size()];
+            // int32_data holds them as varints of int32 (sign-extended to 64 bits for negatives)
+            for (int i = 0; i < v.length; i++) v[i] = type == TYPE_INT32 ? (int) (long) loose.get(i) : loose.get(i);
+        }
+        return new Object[]{name, v};
+    }
+
     private static Object[] tensorValues(byte[] t) throws IOException {
         int type = 0;
         String name = "";

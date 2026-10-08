@@ -214,6 +214,16 @@ public final class QnnLog {
      * per run.
      */
     public static String profile(List<String> csv, List<OnnxPatcher.Node> graph, int runs) {
+        return profile(csv, graph, runs, null);
+    }
+
+    /** What a node is (its inputs' and outputs' types and shapes, small constants), for the slowest ones. */
+    public interface Describer {
+        String describe(OnnxPatcher.Node n);
+    }
+
+    /** @param describer describes the 3 slowest nodes on lines of their own (null: names only) */
+    public static String profile(List<String> csv, List<OnnxPatcher.Node> graph, int runs, Describer describer) {
         Map<String, OnnxPatcher.Node> byName = new HashMap<String, OnnxPatcher.Node>();
         for (OnnxPatcher.Node n : graph) {
             if (n.name.isEmpty()) continue;
@@ -254,11 +264,13 @@ public final class QnnLog {
         double all = 0;
         Map<String, Double> byOp = new HashMap<String, Double>();
         Map<String, String> opOf = new HashMap<String, String>();
+        Map<String, OnnxPatcher.Node> nodeOf = new HashMap<String, OnnxPatcher.Node>();
         for (Map.Entry<String, Double> e : perNode.entrySet()) {
             OnnxPatcher.Node n = longestPrefix(byName, e.getKey());
             if (n == null) n = longestPrefix(byName, sanitized(e.getKey()));
             String op = n != null ? n.opType : "?";
             opOf.put(e.getKey(), op);
+            if (n != null) nodeOf.put(e.getKey(), n);
             byOp.put(op, (byOp.containsKey(op) ? byOp.get(op) : 0) + e.getValue());
             all += e.getValue();
         }
@@ -283,6 +295,16 @@ public final class QnnLog {
             String id = nodes.get(i).getKey();
             sb.append(i > 0 ? ", " : "").append(id.length() > 60 ? "…" + id.substring(id.length() - 59) : id).append(" (")
                     .append(opOf.get(id)).append(") ").append(Math.round(100 * nodes.get(i).getValue() / Math.max(1e-9, all))).append('%');
+        }
+        if (describer != null) {
+            // what the slowest nodes are: shapes and constants show what can be computed otherwise
+            java.util.Set<OnnxPatcher.Node> told = new java.util.HashSet<OnnxPatcher.Node>();
+            for (int i = 0; i < nodes.size() && told.size() < 3; i++) {
+                OnnxPatcher.Node n = nodeOf.get(nodes.get(i).getKey());
+                if (n == null || !told.add(n)) continue;
+                String d = describer.describe(n);
+                sb.append("\n  ").append(d.length() > 400 ? d.substring(0, 400) + "…" : d);
+            }
         }
         return sb.toString();
     }

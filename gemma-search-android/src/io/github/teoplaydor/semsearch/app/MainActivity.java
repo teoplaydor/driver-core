@@ -71,6 +71,10 @@ public final class MainActivity extends Activity implements Engine.Listener, Vie
     private Viewer viewer;
     private SettingsPanel settings;
     private Sheet sheet;
+    /** The accelerator check's progress sheet while it is open, and since when the person waits for a check. */
+    private Sheet benchSheet;
+    private BenchView benchView;
+    private long benchAskedMs;
 
     /** What the grid shows: the recent gallery, or results of the last search (label). */
     private String resultsLabel;
@@ -257,6 +261,15 @@ public final class MainActivity extends Activity implements Engine.Listener, Vie
         info.addView(section, new LinearLayout.LayoutParams(-2, -2)); // wrap: the bubble follows the text
         status = Ui.text(this, "", 12.5f, Ui.TEXT2, Ui.REGULAR);
         status.setVisibility(View.GONE);
+        status.setSingleLine(true);
+        status.setEllipsize(android.text.TextUtils.TruncateAt.END);
+        status.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                // a running accelerator check: its stages
+                if (benchRunning()) showBenchProgress(engine.bench.startedMs());
+            }
+        });
         info.addView(status, new LinearLayout.LayoutParams(-2, -2));
         progress = new ProgressLine(this);
         progress.setVisibility(View.GONE);
@@ -779,7 +792,13 @@ public final class MainActivity extends Activity implements Engine.Listener, Vie
         boolean dl = st == Engine.State.DOWNLOADING, loading = st == Engine.State.LOADING;
         // status line: only while something is running
         String line = null;
-        if (engine.indexing) {
+        updateBench();
+        if (benchRunning()) {
+            long now = System.currentTimeMillis();
+            line = "Подбор ускорения · " + engine.bench.line(now);
+            progress.setIndeterminate(false);
+            progress.setProgress((float) engine.bench.fraction(now));
+        } else if (engine.indexing) {
             line = engine.idxTotal > 0 ? String.format(Locale.ROOT, "Индексирую · %d из %d", engine.idxDone, engine.idxTotal)
                     : "Ищу новые фото…";
             progress.setIndeterminate(engine.idxTotal == 0);
@@ -793,7 +812,9 @@ public final class MainActivity extends Activity implements Engine.Listener, Vie
             progress.setIndeterminate(true);
         }
         if (line != null) {
-            Ui.setTextSoft(status, line);
+            // the check's line changes every second: no cross-fade
+            if (benchRunning() && status.getVisibility() == View.VISIBLE) status.setText(line);
+            else Ui.setTextSoft(status, line);
             if (status.getVisibility() != View.VISIBLE) Ui.fadeIn(status, 200);
             if (progress.getVisibility() != View.VISIBLE) Ui.fadeIn(progress, 200);
         } else {
@@ -976,13 +997,47 @@ public final class MainActivity extends Activity implements Engine.Listener, Vie
     }
 
     private void startBenchmark() {
-        toast("Замеряю варианты… телефон может нагреться");
+        long asked = System.currentTimeMillis();
         engine.benchmark(new Engine.Callback<String>() {
             @Override
             public void done(final String report, Exception e) {
+                if (benchSheet != null && !benchSheet.isClosing()) benchSheet.dismiss();
                 showReport("Скорость индексации", report != null ? report : String.valueOf(e));
             }
         });
+        showBenchProgress(asked);
+    }
+
+    private boolean benchRunning() {
+        io.github.teoplaydor.semsearch.core.StageProgress p = engine.bench;
+        return p != null && !p.finished();
+    }
+
+    /** The check's stages in a sheet, live; {@code since}: a check started before it is an earlier one. */
+    void showBenchProgress(long since) {
+        if (benchSheet != null && benchSheet.getParent() != null && !benchSheet.isClosing()) return;
+        benchAskedMs = since;
+        Sheet s = new Sheet(this, "Подбор ускорения");
+        benchView = new BenchView(this);
+        s.body().addView(benchView);
+        s.setOnClosed(new Runnable() {
+            @Override
+            public void run() {
+                benchSheet = null;
+                benchView = null;
+            }
+        });
+        benchSheet = s.show(root);
+        updateBench();
+    }
+
+    private void updateBench() {
+        if (benchView == null) return;
+        io.github.teoplaydor.semsearch.core.StageProgress p = engine.bench;
+        boolean current = p != null && p.startedMs() >= benchAskedMs - 1000;
+        benchView.update(current ? p : null);
+        // the report replaces it (a check the app started by itself has no callback here)
+        if (current && p.finished() && benchSheet != null && !benchSheet.isClosing()) benchSheet.dismiss();
     }
 
     void runDiagnostics() {

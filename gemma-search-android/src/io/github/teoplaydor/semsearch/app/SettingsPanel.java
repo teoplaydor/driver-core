@@ -254,6 +254,13 @@ final class SettingsPanel extends FrameLayout implements Engine.Listener {
         modelValue = row(card, "Состояние", null, null);
         modelProgress = progress(card);
         modelHint = note(card);
+        modelHint.setOnClickListener(new OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                io.github.teoplaydor.semsearch.core.StageProgress b = e.bench;
+                if (b != null && !b.finished()) a.showBenchProgress(b.startedMs());
+            }
+        });
         modelButton = action(card, "Скачать", true, new Runnable() {
             @Override
             public void run() {
@@ -836,17 +843,23 @@ final class SettingsPanel extends FrameLayout implements Engine.Listener {
         }
         modelValue.setText(mv);
         modelValue.setTextColor(st == Engine.State.ERROR ? Ui.DANGER : st == Engine.State.READY ? Ui.ACCENT : Ui.TEXT2);
-        modelProgress.setVisibility(busy ? VISIBLE : GONE);
-        modelProgress.setIndeterminate(st == Engine.State.LOADING || e.dlTotal <= 0);
-        if (e.dlTotal > 0) modelProgress.setProgress((float) e.dlDone / e.dlTotal);
+        io.github.teoplaydor.semsearch.core.StageProgress bench = e.bench;
+        boolean checking = bench != null && !bench.finished();
+        long now = System.currentTimeMillis();
+        modelProgress.setVisibility(busy || checking ? VISIBLE : GONE);
+        modelProgress.setIndeterminate(!checking && (st == Engine.State.LOADING || e.dlTotal <= 0));
+        if (checking) modelProgress.setProgress((float) bench.fraction(now));
+        else if (e.dlTotal > 0) modelProgress.setProgress((float) e.dlDone / e.dlTotal);
         boolean fast = e.photoModel() != FastModel.GEMMA;
-        String hint = e.dlError != null && !busy ? e.dlError
+        String hint = checking ? "Подбор ускорения · " + bench.line(now) + " — подробнее"
+                : e.dlError != null && !busy ? e.dlError
                 : st == Engine.State.READY ? (fast ? e.accelLabel : Engine.ACCEL_NAMES[e.loadedAccel] + ", потоков " + e.threads)
                 : st == Engine.State.DOWNLOADING && e.dlTotal > 0
                 ? String.format(Locale.ROOT, "%.0f из %.0f МБ", e.dlDone / 1048576.0, e.dlTotal / 1048576.0)
                 : st == Engine.State.ERROR ? e.status : "";
         modelHint.setText(hint);
         modelHint.setVisibility(hint.isEmpty() ? GONE : VISIBLE);
+        modelHint.setTextColor(checking ? Ui.ACCENT : Ui.TEXT2);
         modelButton.setText(st == Engine.State.DOWNLOADING ? "Остановить загрузку"
                 : st == Engine.State.READY ? "Скачать заново" : st == Engine.State.ERROR && e.hasModelFiles() ? "Повторить" : "Скачать");
         modelButton.setVisibility(st == Engine.State.LOADING ? GONE : VISIBLE);

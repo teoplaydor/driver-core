@@ -364,6 +364,21 @@ public class QnnBuildTest {
         float[] g4ref = run(g4, gfin, glin, gshapes), g4moved = run(g4cpu, gfin, glin, gshapes);
         double g4max = 0;
         for (float v : g4ref) g4max = Math.max(g4max, Math.abs(v));
+        // the rewrite itself against the export (fused attention and norms, the Gathers of rotate_half): the same
+        // output; no Gather of activations with constant indices is left, Slices stand in for them, divisions of
+        // whole tensors are multiplications by a reciprocal, scores are not multiplied by a scale of 1
+        float[] g4orig = run(new File(new File(args[3]).getParentFile(), "g4.onnx"), gfin, glin, gshapes);
+        int constGathers = 0, slices = 0, divs = 0, recips = 0, scoreMuls = 0;
+        for (OnnxPatcher.Node nd : gn) {
+            if (nd.opType.equals("Gather") && nd.inputs.get(1).equals("rot_perm")) constGathers++;
+            if (nd.opType.equals("Slice") && nd.name.startsWith("qnng")) slices++;
+            if (nd.opType.equals("Div") && nd.name.contains("layernorm")) divs++;
+            if (nd.opType.equals("Reciprocal")) recips++;
+            if (nd.opType.equals("Mul") && nd.name.contains("/scores")) scoreMuls++;
+        }
+        check(maxDiff(g4orig, g4ref) / g4max < 1e-5 && constGathers == 0 && slices == 4 && recips > 0 && scoreMuls == 0,
+                "rewritten block = export: relative difference " + maxDiff(g4orig, g4ref) / g4max + "; constant Gathers left " + constGathers
+                        + ", Slices " + slices + ", Reciprocal " + recips + ", score scaling by 1: " + scoreMuls);
         check(maxDiff(g4ref, g4moved) / g4max < 1e-5, "same output with the position logic on the CPU: relative difference "
                 + maxDiff(g4ref, g4moved) / g4max);
         // what the NPU would get: no node outside the CPU part takes a boolean or a position-made integer
