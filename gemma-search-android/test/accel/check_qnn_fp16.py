@@ -2,6 +2,7 @@
 # run by ONNX's reference evaluator in numpy fp16), against the original graph in fp32 (ONNX Runtime):
 #  - padding: zero rows (their RMS norm was 0/0 = NaN once ε underflowed) under a −3.4e38 key mask (−∞ in fp16);
 #  - large activations (×3000: their squares overflow fp16 in a plain RMS norm);
+#  - GELU alone over fp16's whole range (its x² overflows beyond 256);
 # every output must be finite and every row must match. Also: all float constants are 0 or normal fp16 numbers.
 # usage: check_qnn_fp16.py <original vit.onnx> <rewritten vit.qnn.onnx>
 import sys
@@ -76,6 +77,30 @@ for name, (xi, mi, rows) in cases.items():
     if not ok:
         bad += 1
     print(("ok   " if ok else "FAIL ") + f"fp16 {name}: output and {len(norms)} RMS norms finite {finite}, worst row cos {worst:.5f}")
+# GELU alone over fp16's whole range: x·σ(x·(a + b·x²)) as the rewrite spells it, computed in fp16, against the
+# tanh form in float64 — beyond |x| = 256 x² overflows fp16 to ∞ and σ must give the function's own limits
+gm = onnx.load(sys.argv[2])
+part = [nd for nd in gm.graph.node if nd.name.startswith("qnngelu0_")]
+gconst = [nd for nd in gm.graph.node if nd.op_type == "Constant" and nd.output[0] in ("qnn_gelu_cube", "qnn_gelu_lin")]
+for nd in gconst:
+    v = nd.attribute[0].f
+    del nd.attribute[:]
+    nd.attribute.append(onnx.helper.make_attribute("value", numpy_helper.from_array(np.array(v, np.float16))))
+gx, gy = part[0].input[0], part[-1].output[0]
+gg = onnx.helper.make_graph(gconst + part, "gelu", [onnx.helper.make_tensor_value_info(gx, onnx.TensorProto.FLOAT16, ["n"])],
+                            [onnx.helper.make_tensor_value_info(gy, onnx.TensorProto.FLOAT16, ["n"])])
+gev = ReferenceEvaluator(onnx.helper.make_model(gg, opset_imports=[onnx.helper.make_opsetid("", 20)]))
+xs = np.concatenate([np.linspace(-12, 12, 4801), [0.0, 1e-3, -1e-3, 50, -50, 255, -255, 256, -256, 300, -300, 1000, -1000,
+                                                     30000, -30000, 65504, -65504]]).astype(np.float16)
+with np.errstate(all="ignore"):
+    gy16 = gev.run(None, {gx: xs})[0].astype(np.float64)
+x64 = xs.astype(np.float64)
+gwant = 0.5 * x64 * (1 + np.tanh(np.sqrt(2 / np.pi) * (x64 + 0.044715 * x64 ** 3)))
+gerr = np.abs(gy16 - gwant) / (np.abs(gwant) + 1e-2)
+gok = len(part) == 6 and bool(np.isfinite(gy16).all()) and float(gerr.max()) < 4e-3
+bad += not gok
+print(("ok   " if gok else "FAIL ") + f"fp16 GELU as x·sigmoid(x·(a + b·x²)), {len(part)} ops, x from -65504 to 65504: finite "
+      f"{bool(np.isfinite(gy16).all())}, worst error {float(gerr.max()):.1e} (relative, +0.01 near zero) at x = {float(x64[int(np.argmax(gerr))]):g}")
 if bad:
     print(bad, "FAILED")
     sys.exit(1)

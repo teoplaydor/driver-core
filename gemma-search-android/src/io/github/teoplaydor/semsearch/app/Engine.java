@@ -1582,10 +1582,11 @@ public final class Engine {
      * RMS norm and constants safe in fp16; r4: sentinels used as data — the mask carried in the keys — become
      * ±10⁴, bounds ±65504; r5: Gathers with constant indices as Slices, divisions by a per-vector value as
      * multiplications by its reciprocal, no scaling of scores by 1; r6: the reciprocal as Div(1, x), not Reciprocal,
-     * which QNN's provider took although kept on the CPU).
+     * which QNN's provider took although kept on the CPU; r7: GELU as x·σ(x·(a + b·x²)), QNN's Gelu was 40% of the
+     * NPU's time, and √ε / s as a multiplication).
      */
     private static File qnnGraph(File fp32) {
-        return new File(fp32.getParentFile(), fp32.getName().replace(".onnx", ".qnn.r6.onnx"));
+        return new File(fp32.getParentFile(), fp32.getName().replace(".onnx", ".qnn.r7.onnx"));
     }
 
     /** Where the NPU's result differs from the CPU's (NpuService.scan), for the last image it ran. */

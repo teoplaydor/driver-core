@@ -51,6 +51,8 @@ public final class OnnxPatcher {
     /** Additive masks use huge negatives (−3.4e38, −inf); fp16 tops out at 65504, so they are floored first. */
     static final float MASK_FLOOR = -60000f;
     static final String FLOOR_NAME = "fp16attn_mask_floor";
+    /** GELU's tanh form as x·σ(x·(LIN + CUBE·x²)): 2·√(2/π) and 2·√(2/π)·0.044715. */
+    static final float GELU_LIN = (float) (2 * Math.sqrt(2 / Math.PI)), GELU_CUBE = (float) (2 * Math.sqrt(2 / Math.PI) * 0.044715);
 
     /**
      * Copies a graph so that every {@code com.microsoft:MultiHeadAttention} computes in fp16 while the rest
@@ -193,10 +195,12 @@ public final class OnnxPatcher {
      *     single elements took a third of its time;</li>
      * </ul>
      * Divisions by a per-vector value (the RMS norm's scale and root) are multiplications by its reciprocal,
-     * computed once per vector; attention scores are not multiplied by a scale of 1.
+     * computed once per vector; attention scores are not multiplied by a scale of 1. GELU in its tanh form
+     * (Gelu with approximate="tanh", FastGelu) is x·σ(x·(1.5958 + 0.0714·x²)) — the same function; QNN's own
+     * Gelu was the slowest op on the NPU.
      *
-     * @return {attention nodes, normalisation nodes, constants brought into fp16's range, gathers turned to slices}
-     *         rewritten
+     * @return {attention nodes, normalisation nodes, constants brought into fp16's range, gathers turned to slices,
+     *         GELUs} rewritten
      */
     public static int[] forQnn(File in, File out) throws IOException {
         java.util.Map<String, Long> opsets = new java.util.HashMap<String, Long>();
@@ -229,12 +233,12 @@ public final class OnnxPatcher {
         }
         if (out.exists() && !out.delete()) throw new IOException("cannot replace " + out);
         if (!tmp.renameTo(out)) throw new IOException("cannot write " + out);
-        return new int[]{q.attention, q.norms, q.clamped, q.gathers};
+        return new int[]{q.attention, q.norms, q.clamped, q.gathers, q.gelus};
     }
 
     private static final class QnnRewrite {
         final long opset;
-        int attention, norms, clamped, gathers;
+        int attention, norms, clamped, gathers, gelus;
         /** 1-D integer constants of the graph (initializers in the file, Constant nodes): Gather indices. */
         final java.util.Map<String, long[]> indexConstants = new java.util.HashMap<String, long[]>();
         final java.util.Set<String> constants = new java.util.HashSet<String>();
@@ -393,6 +397,8 @@ public final class OnnxPatcher {
                     attention(n, attributes(raw));
                 } else if ("SimplifiedLayerNormalization".equals(n.opType)) {
                     rmsNorm(n, attributes(raw));
+                } else if (tanhGelu(n, attributes(raw))) {
+                    gelu(n);
                 } else if ("Gather".equals(n.opType) && n.inputs.size() == 2 && indexConstants.containsKey(n.inputs.get(1))
                         && gatherAsSlices(n, attributes(raw), indexConstants.get(n.inputs.get(1)))) {
                     gathers++;
@@ -546,6 +552,32 @@ public final class OnnxPatcher {
             return true;
         }
 
+        /** GELU in its tanh form (the model's gelu_pytorch_tanh): ONNX's Gelu(approximate="tanh"), or FastGelu without a bias. */
+        private boolean tanhGelu(Node n, java.util.Map<String, Object> attrs) {
+            if (n.inputs.isEmpty() || n.outputs.isEmpty()) return false;
+            if ("Gelu".equals(n.opType) && (n.domain == null || n.domain.isEmpty() || "ai.onnx".equals(n.domain))) {
+                return "tanh".equals(attrs.get("approximate"));
+            }
+            return "FastGelu".equals(n.opType) && "com.microsoft".equals(n.domain) && (n.inputs.size() < 2 || n.inputs.get(1).isEmpty());
+        }
+
+        /**
+         * 0.5·x·(1 + tanh(√(2/π)·(x + 0.044715·x³))) = x·σ(x·(2√(2/π) + 2√(2/π)·0.044715·x²)), since 1 + tanh(z) = 2σ(2z):
+         * the same function, in a multiplication, an addition and a sigmoid. QNN's own Gelu was 40% of the NPU's time
+         * at 280 tokens (and it computes the erf form, not the model's tanh one). In fp16 x² beyond 256 overflows to
+         * ∞ (or saturates): the sigmoid's argument goes to ±∞ with x's sign, σ to 1 or 0 — the function's own limits.
+         */
+        private void gelu(Node n) {
+            String t = "qnngelu" + gelus++ + "_" + (n.name.isEmpty() ? "gelu" : n.name.replaceAll("[^A-Za-z0-9_./]", "_"));
+            String x = n.inputs.get(0);
+            emit("Mul", new String[]{x, x}, new String[]{t + "/x2"}, t + "/x2");
+            emit("Mul", new String[]{t + "/x2", constFloat("qnn_gelu_cube", GELU_CUBE)}, new String[]{t + "/c"}, t + "/c");
+            emit("Add", new String[]{t + "/c", constFloat("qnn_gelu_lin", GELU_LIN)}, new String[]{t + "/k"}, t + "/k");
+            emit("Mul", new String[]{x, t + "/k"}, new String[]{t + "/z"}, t + "/z");
+            emit("Sigmoid", new String[]{t + "/z"}, new String[]{t + "/s"}, t + "/s");
+            emit("Mul", new String[]{x, t + "/s"}, new String[]{n.outputs.get(0)}, t + "/out");
+        }
+
         private void rmsNorm(Node n, java.util.Map<String, Object> attrs) throws IOException {
             if (n.outputs.size() > 1) {
                 for (int i = 1; i < n.outputs.size(); i++) {
@@ -569,7 +601,7 @@ public final class OnnxPatcher {
             reduce("ReduceMean", t + "/sq", t + "/ms", axis);
             // ε / s² = (√ε / s)²: √ε is a normal fp16 number, ε is not
             float rootEps = (float) Math.sqrt(eps);
-            emit("Div", new String[]{constFloat("qnn_sqrt_eps_" + Float.floatToIntBits(rootEps), rootEps), t + "/s"},
+            emit("Mul", new String[]{constFloat("qnn_sqrt_eps_" + Float.floatToIntBits(rootEps), rootEps), t + "/inv_s"},
                     new String[]{t + "/r"}, t + "/r");
             emit("Mul", new String[]{t + "/r", t + "/r"}, new String[]{t + "/r2"}, t + "/r2");
             emit("Add", new String[]{t + "/ms", t + "/r2"}, new String[]{t + "/den"}, t + "/den");
@@ -1512,6 +1544,8 @@ public final class OnnxPatcher {
                     value = Float.intBitsToFloat(bits);
                 } else if (af == 3 && aw == 0) {
                     value = a.varint();
+                } else if (af == 4 && aw == 2) {
+                    value = a.string();
                 } else if (af == 8 && aw == 0) {
                     ints.add(a.varint());
                 } else if (af == 8 && aw == 2) {

@@ -301,7 +301,7 @@ public class QnnBuildTest {
                 "the first NaN tensor, its node and inputs");
         String traced = QnnBuild.compareRanges(watch, cpuR, npuR, nodes, vt, OnnxPatcher.smallConstants(vit));
         check(traced.contains("откуда (вверх по графу; процессор / NPU):") && traced.contains("← Mul qnn3_/encoder/layers.1/post_layernorm/r2")
-                        && traced.contains("Div qnn3_/encoder/layers.1/post_layernorm/r_N"),
+                        && traced.contains("Mul qnn3_/encoder/layers.1/post_layernorm/r_N"),
                 "the way up the graph from the first bad tensor");
         String same = QnnBuild.compareRanges(watch, cpuR, cpuR, nodes, vt);
         check(same.startsWith("NPU и процессор совпадают на всех " + watch.size()), "no difference: says so");
@@ -368,8 +368,10 @@ public class QnnBuildTest {
         // output; no Gather of activations with constant indices is left, Slices stand in for them, divisions of
         // whole tensors are multiplications by a reciprocal, scores are not multiplied by a scale of 1
         float[] g4orig = run(new File(new File(args[3]).getParentFile(), "g4.onnx"), gfin, glin, gshapes);
-        int constGathers = 0, slices = 0, divs = 0, recips = 0, scoreMuls = 0;
+        int constGathers = 0, slices = 0, divs = 0, recips = 0, scoreMuls = 0, gelus = 0, sigmoids = 0;
         for (OnnxPatcher.Node nd : gn) {
+            if (nd.opType.equals("Gelu")) gelus++;
+            if (nd.opType.equals("Sigmoid") && nd.name.startsWith("qnngelu")) sigmoids++;
             if (nd.opType.equals("Gather") && nd.inputs.get(1).equals("rot_perm")) constGathers++;
             if (nd.opType.equals("Slice") && nd.name.startsWith("qnng")) slices++;
             if (nd.opType.equals("Div") && nd.name.contains("layernorm")) divs++;
@@ -382,6 +384,8 @@ public class QnnBuildTest {
         check(maxDiff(g4orig, g4ref) / g4max < 1e-5 && constGathers == 0 && slices == 4 && recips > 0 && scoreMuls == 0,
                 "rewritten block = export: relative difference " + maxDiff(g4orig, g4ref) / g4max + "; constant Gathers left " + constGathers
                         + ", Slices " + slices + ", 1 / x " + recips + ", score scaling by 1: " + scoreMuls);
+        // QNN's Gelu was 40% of the NPU's time at 280 tokens: the MLP's GELU (tanh form) is x·σ(x·(a + b·x²)), the same
+        check(gelus == 0 && sigmoids == 1, "GELU as x·sigmoid(x·(a + b·x²)): Gelu left " + gelus + ", sigmoids " + sigmoids);
         check(maxDiff(g4ref, g4moved) / g4max < 1e-5, "same output with the position logic on the CPU: relative difference "
                 + maxDiff(g4ref, g4moved) / g4max);
         // what the NPU would get: no node outside the CPU part takes a boolean or a position-made integer

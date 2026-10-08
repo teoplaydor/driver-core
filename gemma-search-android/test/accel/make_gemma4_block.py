@@ -7,6 +7,7 @@
 #  - the padding mask carried inside attention: q padded with ones (Pad, value 1), k with a mask channel block
 #    (Concat of Where(valid, 0, -3.4e38)), so q·k already holds the mask (q/k heads 4 wider than v);
 #  - RoPE's rotate_half as a Gather of the activations with constant indices (the export's index_select);
+#  - the MLP with GELU in its tanh form (Gelu, approximate="tanh") between the feed-forward norms;
 #  - the pooler's sqrt(hidden) scaling at the end.
 # usage: make_gemma4_block.py <out.onnx>
 import sys
@@ -81,13 +82,22 @@ att = n("MultiHeadAttention", [n("Reshape", [qp, flat], "qf"), n("Reshape", [kp,
         num_heads=H, scale=1.0)
 o = n("Clip", [n("MatMul", [att, c("wo", (rnd.randn(D, D) * 0.3).astype(np.float32))], "o"), "neg_inf", "pos_inf"], "clip_out")
 res0 = n("Add", [h, o], "res0")
+# the MLP: down(gelu_tanh(gate(x)) * up(x)) between the feed-forward norms (gelu_pytorch_tanh: Gelu, approximate="tanh")
+F = 2 * D
+f = n("SimplifiedLayerNormalization", [res0, c("pre_ff_w", (rnd.randn(D) * 0.1 + 1).astype(np.float32))], "pre_ff", axis=-1, epsilon=1e-6)
+gate = n("MatMul", [f, c("w_gate", (rnd.randn(D, F) * 0.3).astype(np.float32))], "gate")
+up = n("MatMul", [f, c("w_up", (rnd.randn(D, F) * 0.3).astype(np.float32))], "up")
+act = n("Gelu", [gate], "node_gelu", approximate="tanh")
+down = n("MatMul", [n("Mul", [act, up], "gated"), c("w_down", (rnd.randn(F, D) * 0.3).astype(np.float32))], "down")
+post = n("SimplifiedLayerNormalization", [down, c("post_ff_w", (rnd.randn(D) * 0.1 + 1).astype(np.float32))], "post_ff", axis=-1, epsilon=1e-6)
+res1 = n("Add", [res0, post], "res1")
 # pooling-like indices: integer division of the clamped positions (truncating), combined, used as a Gather index
 kidx = n("Div", [clamped, c("k2", np.array(2, np.int64))], "kidx")
 kx = n("Gather", [kidx, "idx0"], "kx", axis=2)
 ky = n("Gather", [kidx, "idx1"], "ky", axis=2)
 lin = n("Add", [kx, n("Mul", [ky, c("three", np.array(3, np.int64))], "ky3")], "lin")
 pool = n("Gather", [c("table_pool", (rnd.randn(MAXPOS, D) * 0.2).astype(np.float32)), lin], "pool_emb", axis=0)
-res = n("Add", [res0, pool], "res")
+res = n("Add", [res1, pool], "res")
 # the count of valid patches through NonZero (no double kernel on the CPU: it must stay as it is), used as n/n = 1
 nz = n("NonZero", [valid], "nz")
 cnt = n("Cast", [n("Slice", [n("Shape", [nz], "nz_shape"), c("one_i", np.array([1], np.int64)), c("two_i", np.array([2], np.int64))], "nz_n")],

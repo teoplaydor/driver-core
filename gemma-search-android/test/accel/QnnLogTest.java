@@ -137,7 +137,7 @@ public class QnnLogTest {
         String prof = QnnLog.profile(csv, nodes, 2);
         System.out.println("  " + prof.replace("\n", "\n  "));
         check(prof.contains("EXECUTE 3100 us; Accelerator (execute) time 2800 us") && prof.contains("по операциям (3 операций QNN, всего 10000 cycles): MatMul 60%, Softmax 30%, ? 10%")
-                        && prof.contains("дольше всего: ") && prof.contains("(MatMul) 60%"),
+                        && prof.contains("дольше всего: ") && prof.contains("(MatMul) 60%") && prof.contains("\nбез узла графа (?): input_0_cast 10.0%"),
                 "QNN's profile: ops by type (named after the graph's nodes), slowest nodes, per run");
         check(QnnLog.profile(Arrays.asList("Msg Timestamp,Message,Time,Unit of Measurement,Timing Source,Event Level,Event Identifier"),
                 nodes, 1).equals("QNN не дал профиля по операциям"), "an empty profile says so");

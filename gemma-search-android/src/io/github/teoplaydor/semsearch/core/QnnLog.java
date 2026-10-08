@@ -292,7 +292,7 @@ public final class QnnLog {
         java.util.Collections.sort(nodes, desc);
         sb.append(sb.length() > 0 ? "\n" : "").append("по операциям (").append(perNode.size()).append(" операций QNN, всего ")
                 .append(Math.round(all / r)).append(' ').append(nodeUnit.toLowerCase(java.util.Locale.ROOT)).append("): ");
-        for (int i = 0; i < ops.size() && i < 8; i++) {
+        for (int i = 0; i < ops.size() && i < 12; i++) {
             sb.append(i > 0 ? ", " : "").append(ops.get(i).getKey()).append(' ')
                     .append(Math.round(100 * ops.get(i).getValue() / Math.max(1e-9, all))).append('%');
         }
@@ -302,6 +302,17 @@ public final class QnnLog {
             sb.append(i > 0 ? ", " : "").append(id.length() > 60 ? "…" + id.substring(id.length() - 59) : id).append(" (")
                     .append(opOf.get(id)).append(") ").append(Math.round(100 * nodes.get(i).getValue() / Math.max(1e-9, all))).append('%');
         }
+        // QNN's own ops that carry no node's name (layout conversions, ops it split a node into): the largest by name
+        StringBuilder unnamed = new StringBuilder();
+        int u = 0;
+        for (Map.Entry<String, Double> e : nodes) {
+            if (!"?".equals(opOf.get(e.getKey()))) continue;
+            if (u++ >= 6) break;
+            String id = e.getKey();
+            unnamed.append(u > 1 ? ", " : "").append(id.length() > 60 ? "…" + id.substring(id.length() - 59) : id).append(' ')
+                    .append(String.format(java.util.Locale.ROOT, "%.1f", 100 * e.getValue() / Math.max(1e-9, all))).append('%');
+        }
+        if (u > 0) sb.append("\nбез узла графа (?): ").append(unnamed);
         if (describer != null) {
             // what the slowest nodes are: shapes and constants show what can be computed otherwise
             java.util.Set<OnnxPatcher.Node> told = new java.util.HashSet<OnnxPatcher.Node>();

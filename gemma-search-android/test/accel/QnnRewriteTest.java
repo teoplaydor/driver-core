@@ -47,16 +47,16 @@ public class QnnRewriteTest {
     public static void main(String[] args) throws Exception {
         File src = new File(args[0]), dst = new File(args[1], "vit.qnn.onnx");
         int[] n = OnnxPatcher.forQnn(src, dst);
-        check(n[0] == 2 && n[1] == 4, "rewritten: attention " + n[0] + ", RMS norm " + n[1]);
+        check(n[0] == 2 && n[1] == 4 && n[4] == 2, "rewritten: attention " + n[0] + ", RMS norm " + n[1] + ", GELU " + n[4]);
         Map<String, Long> opsets = new TreeMap<String, Long>();
         List<OnnxPatcher.Node> nodes = OnnxPatcher.nodes(dst, opsets);
         int fused = 0, softmax = 0, reduce = 0;
         for (OnnxPatcher.Node x : nodes) {
-            if (x.opType.equals("MultiHeadAttention") || x.opType.equals("SimplifiedLayerNormalization")) fused++;
+            if (x.opType.equals("MultiHeadAttention") || x.opType.equals("SimplifiedLayerNormalization") || x.opType.equals("Gelu")) fused++;
             if (x.opType.equals("Softmax")) softmax++;
             if (x.opType.equals("ReduceMean")) reduce++;
         }
-        check(fused == 0 && softmax == 2 && reduce == 4, "no fused nodes left; Softmax ×" + softmax + ", ReduceMean ×" + reduce);
+        check(fused == 0 && softmax == 2 && reduce == 4, "no fused nodes (nor Gelu) left; Softmax ×" + softmax + ", ReduceMean ×" + reduce);
         String summary = OnnxPatcher.graphSummary(dst);
         check(summary.contains("по частям — MatMul → Softmax ×2 → MatMul"), "attention now spelled out");
 
