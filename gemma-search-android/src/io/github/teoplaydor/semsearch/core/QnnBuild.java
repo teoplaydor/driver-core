@@ -199,7 +199,7 @@ public final class QnnBuild {
     }
 
     /**
-     * As above, and how the first bad tensor is made: the nodes up the graph from it (up to six steps, eighteen
+     * As above, and how the first bad tensor is made: the nodes up the graph from it (up to six steps, thirty
      * nodes), with the values of small constants and the magnitudes on the CPU ({@code cpu} may watch more
      * tensors than {@code order}) and the NPU.
      */
@@ -290,6 +290,35 @@ public final class QnnBuild {
     }
 
     /**
+     * Nodes whose values depend on the graph's integer inputs (the patch positions) and not on its float ones (the
+     * pixels): padding, the attention mask, RoPE angles, position embeddings, pooling indices. They are integer
+     * and boolean logic the NPU gets wrong (seen: the mask in the keys came out empty) and cheap — once per image
+     * on the CPU, in fp32. A Shape of a tensor depends on its shape only (fixed here), not its values.
+     */
+    public static Set<String> positionOnlyNodes(List<OnnxPatcher.Node> nodes, Map<String, OnnxPatcher.TensorType> types,
+                                                java.util.Collection<String> graphInputs) {
+        Set<String> pixels = new HashSet<String>(), positions = new HashSet<String>();
+        for (String in : graphInputs) {
+            OnnxPatcher.TensorType t = types.get(in);
+            if (t != null && (t.elem == OnnxPatcher.TYPE_FLOAT || t.elem == OnnxPatcher.TYPE_FLOAT16)) pixels.add(in);
+            else positions.add(in);
+        }
+        Set<String> out = new LinkedHashSet<String>();
+        for (OnnxPatcher.Node n : nodes) {
+            if ("Shape".equals(n.opType) || "Size".equals(n.opType) || "Constant".equals(n.opType)) continue;
+            boolean px = false, pos = false;
+            for (String in : n.inputs) {
+                px |= pixels.contains(in);
+                pos |= positions.contains(in);
+            }
+            if (px) pixels.addAll(n.outputs);
+            if (pos) positions.addAll(n.outputs);
+            if (pos && !px) out.add(n.name);
+        }
+        return out;
+    }
+
+    /**
      * Nodes that make or take a tensor whose values, in fp32 on the CPU, go beyond {@code limit}: in fp16 (65504
      * at most) they would overflow or come close, so they are better kept on the CPU.
      */
@@ -327,7 +356,7 @@ public final class QnnBuild {
         if (depth > 6) return;
         for (String in : n.inputs) {
             OnnxPatcher.Node p = producer.get(in);
-            if (p == null || "Constant".equals(p.opType) || seen.size() >= 18 || !seen.add(p)) continue;
+            if (p == null || "Constant".equals(p.opType) || seen.size() >= 30 || !seen.add(p)) continue;
             sb.append("\n  ");
             for (int i = 0; i < depth; i++) sb.append("  ");
             sb.append("← ").append(describe(p, types, consts)).append(" | ").append(cpu.containsKey(in) ? range(cpu.get(in)) : "—")

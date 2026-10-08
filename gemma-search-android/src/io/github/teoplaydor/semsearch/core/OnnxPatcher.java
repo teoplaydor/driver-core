@@ -996,6 +996,11 @@ public final class OnnxPatcher {
         return out;
     }
 
+    /** The node's own name with a suffix, before its unique token (keeps names of moved nodes recognisable). */
+    private static String unique(String name, String suffix) {
+        return name.replaceFirst("(_N\\d+N)?$", suffix + "$1");
+    }
+
     /** Inputs that carry the data (others are indices, shapes, axes, pads: they keep their types). */
     private static int[] dataInputs(String op, int n) {
         if (op.startsWith("Reduce") || op.equals("Gather") || op.equals("GatherElements") || op.equals("GatherND")
@@ -1013,8 +1018,37 @@ public final class OnnxPatcher {
         return all;
     }
 
-    /** Ops ONNX Runtime's CPU has no double kernel for (checked against the op zoo in tests): they cannot move. */
-    private static final java.util.Set<String> NO_DOUBLE = new java.util.HashSet<String>(java.util.Arrays.asList("Erf"));
+    /**
+     * Ops that cannot move this way: no double kernel on ONNX Runtime's CPU (Erf; checked against the op zoo in
+     * tests), a different meaning in double (Mod: fmod for floats), or inputs that must stay integers (OneHot,
+     * ConstantOfShape).
+     */
+    private static final java.util.Set<String> NO_DOUBLE = new java.util.HashSet<String>(java.util.Arrays.asList(
+            "Erf", "Mod", "OneHot", "ConstantOfShape"));
+
+    /** Logical ops have no double kernels: they are computed as arithmetic on 0/1 in double and compared. */
+    private static final java.util.Set<String> LOGICAL = new java.util.HashSet<String>(java.util.Arrays.asList("Not", "And", "Or", "Xor"));
+
+    /** A Constant node with a double scalar. */
+    private static byte[] doubleConstant(String output, double v) {
+        ByteArrayOutputStream t = new ByteArrayOutputStream();
+        writeVarint(t, 2L << 3);
+        writeVarint(t, TYPE_DOUBLE);
+        java.nio.ByteBuffer raw = java.nio.ByteBuffer.allocate(8).order(java.nio.ByteOrder.LITTLE_ENDIAN);
+        raw.putDouble(v);
+        writeLenField(t, 9, raw.array());
+        ByteArrayOutputStream a = new ByteArrayOutputStream();
+        writeLenField(a, 1, "value".getBytes(UTF8));
+        writeLenField(a, 5, t.toByteArray());
+        writeVarint(a, 20L << 3);
+        writeVarint(a, 4); // TENSOR
+        ByteArrayOutputStream nb = new ByteArrayOutputStream();
+        writeLenField(nb, 2, output.getBytes(UTF8));
+        writeLenField(nb, 3, output.getBytes(UTF8));
+        writeLenField(nb, 4, "Constant".getBytes(UTF8));
+        writeLenField(nb, 5, a.toByteArray());
+        return nb.toByteArray();
+    }
 
     /** Ops whose output type does not follow their inputs'. */
     private static final java.util.Set<String> OWN_OUTPUT_TYPE = new java.util.HashSet<String>(java.util.Arrays.asList(
@@ -1036,6 +1070,7 @@ public final class OnnxPatcher {
             public byte[] apply(byte[] b, int from, int to) throws IOException {
                 ByteArrayOutputStream g = new ByteArrayOutputStream(to - from + 65536);
                 java.util.Map<String, String> asDouble = new java.util.HashMap<String, String>();
+                java.util.Set<String> doubles = new java.util.HashSet<String>();
                 Reader r = new Reader(b, from, to);
                 while (r.more()) {
                     int start = r.pos;
@@ -1060,12 +1095,38 @@ public final class OnnxPatcher {
                         writeLenField(g, 1, raw);
                         continue;
                     }
+                    if (LOGICAL.contains(n.opType) && !n.outputs.isEmpty()) {
+                        // on 0/1 in double: Not a = (a == 0), a And b = (a·b == 1), a Or b = (a+b > ½), a Xor b = (a+b == 1)
+                        String[] d = new String[n.inputs.size()];
+                        for (int i = 0; i < d.length; i++) {
+                            d[i] = asDouble.get(n.inputs.get(i));
+                            if (d[i] == null) {
+                                d[i] = n.inputs.get(i) + "_to_double";
+                                asDouble.put(n.inputs.get(i), d[i]);
+                                writeLenField(g, 1, node("Cast", "", new String[]{n.inputs.get(i)}, new String[]{d[i]}, d[i], "to", TYPE_DOUBLE));
+                            }
+                        }
+                        for (String[] c : new String[][]{{"cpu_double_0", "0"}, {"cpu_double_1", "1"}, {"cpu_double_half", "0.5"}}) {
+                            if (doubles.add(c[0])) writeLenField(g, 1, doubleConstant(c[0], Double.parseDouble(c[1])));
+                        }
+                        String o = n.outputs.get(0), mid = o + "_logic";
+                        if ("Not".equals(n.opType)) {
+                            writeLenField(g, 1, node("Equal", "", new String[]{d[0], "cpu_double_0"}, new String[]{o}, unique(n.name, "_eq"), null, 0));
+                        } else {
+                            String op = "And".equals(n.opType) ? "Mul" : "Add", cmp = "Or".equals(n.opType) ? "Greater" : "Equal";
+                            writeLenField(g, 1, node(op, "", new String[]{d[0], d[1]}, new String[]{mid}, mid, null, 0));
+                            writeLenField(g, 1, node(cmp, "", new String[]{mid, "Or".equals(n.opType) ? "cpu_double_half" : "cpu_double_1"},
+                                    new String[]{o}, unique(n.name, "_cmp"), null, 0));
+                        }
+                        continue;
+                    }
                     java.util.List<String> ins = new java.util.ArrayList<String>(n.inputs);
                     int cast = 0, firstType = 0;
                     for (int i : dataInputs(n.opType, ins.size())) {
                         if (i >= ins.size() || ins.get(i).isEmpty()) continue;
                         TensorType t = types.get(ins.get(i));
-                        if (t == null || !(t.elem == TYPE_FLOAT || t.elem == TYPE_FLOAT16 || t.elem == TYPE_INT64 || t.elem == TYPE_INT32)) continue;
+                        if (t == null || !(t.elem == TYPE_FLOAT || t.elem == TYPE_FLOAT16 || t.elem == TYPE_INT64 || t.elem == TYPE_INT32
+                                || t.elem == TYPE_BOOL)) continue;
                         if (firstType == 0) firstType = t.elem;
                         // a node moved before may already give it in double
                         String d = asDouble.get(ins.get(i));

@@ -1,7 +1,7 @@
-# The masked-keys block (make_masked_keys.py) after the rewrite for the NPU, computed in fp16 as the NPU does,
-# against the original in fp32: the mask carried in the keys (-3.4e38 → a sentinel of -1e4, so 0 × it is 0 and
-# q·k cannot overflow) and the clipped linears (±inf bounds → ±65504) must give finite, matching rows.
-# usage: check_masked_keys.py <original> <rewritten>
+# The Gemma 4 vision block (make_gemma4_block.py) after the rewrite for the NPU, computed in fp16 as the NPU does,
+# against the original in fp32: the mask carried in the keys (-3.4e38 → a sentinel of -1e4, so q·k cannot
+# overflow) and the clipped linears (±inf bounds → ±65504) must give finite, matching rows (valid patches).
+# usage: check_gemma4_block.py <original> <rewritten>
 import sys
 import numpy as np
 import onnx
@@ -40,20 +40,20 @@ for nd in m16.graph.node:
 ev = ReferenceEvaluator(m16)
 ref = ort.InferenceSession(orig, providers=["CPUExecutionProvider"])
 rnd = np.random.RandomState(2)
+pos = np.stack(np.meshgrid(np.arange(6), np.arange(4)), -1).reshape(1, 24, 2).astype(np.int64)
+pos[0, 20:] = -1
 for name, scale in (("normal", 1.0), ("×100", 100.0)):
-    x = (rnd.randn(1, 24, 32) * scale).astype(np.float32)
-    x[0, 20:] = 0
-    valid = np.ones((1, 24), np.float32)
-    valid[0, 20:] = 0
-    w = ref.run(None, {"x": x, "valid": valid})[0][0]
+    px = (rnd.rand(1, 24, 12) * scale).astype(np.float32)
+    px[0, 20:] = 0
+    w = ref.run(None, {"pixel_values": px, "pixel_position_ids": pos})[0][0]
     with np.errstate(all="ignore"):
-        g = ev.run(None, {"x": x.astype(np.float16), "valid": valid.astype(np.float16)})[0][0].astype(np.float32)
+        g = ev.run(None, {"pixel_values": px.astype(np.float16), "pixel_position_ids": pos})[0][0].astype(np.float32)
     finite = bool(np.isfinite(g).all())
     worst = min(float(np.dot(g[i], w[i]) / (np.linalg.norm(g[i]) * np.linalg.norm(w[i]) + 1e-30)) for i in range(20))
     ok = finite and worst > 0.995
     bad += not ok
-    print(("ok   " if ok else "FAIL ") + f"fp16 masked keys {name}: finite {finite}, worst row cos {worst:.5f}")
+    print(("ok   " if ok else "FAIL ") + f"fp16 Gemma 4 block {name}: finite {finite}, worst row cos {worst:.5f}")
 if bad:
     print(bad, "FAILED")
     sys.exit(1)
-print("masked keys in fp16: all ok")
+print("Gemma 4 block in fp16: all ok")

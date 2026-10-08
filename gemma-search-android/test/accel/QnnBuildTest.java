@@ -34,9 +34,12 @@ import io.github.teoplaydor.semsearch.core.QnnLog;
  * <li>a later compilation starts with the nodes kept on the CPU (also with a list from an older rewrite of the
  *     graph); the time budget ends the search;</li>
  * <li>where the NPU's result goes wrong: the first tensor that turns NaN, its node and inputs; values beyond
- *     fp16 even in fp32 are listed.</li>
+ *     fp16 even in fp32 are listed;</li>
+ * <li>the position logic of a Gemma 4 vision block (padding, the mask in the keys, RoPE angles, position
+ *     embeddings, integer Gathers) is found and kept on the CPU without changing the result, and the NPU is
+ *     left no boolean or position-made integer.</li>
  * </ul>
- * usage: QnnBuildTest <vit graph rewritten for QNN> <op zoo graph> <work dir>
+ * usage: QnnBuildTest <vit graph rewritten for QNN> <op zoo graph> <work dir> <Gemma 4 block rewritten for QNN>
  */
 public class QnnBuildTest {
     static int bad;
@@ -312,10 +315,67 @@ public class QnnBuildTest {
         for (String t : nw) if (t.matches("qnn\\d+_.*/(qk|probs|ctx)(_N\\d+N)?")) cores++;
         check(cores == 6 && nw.size() <= 40 + 20, "NPU watch: attention cores of both layers (" + cores + ") among " + nw.size());
         // small constants with their values, for the report
-        Map<String, double[]> mk = OnnxPatcher.smallConstants(new File(args[0]).getParentFile().toPath().resolve("mk.qnn.onnx").toFile());
-        check(mk.containsKey("fmin") && mk.get("fmin")[0] == -10000 && mk.get("pos_inf")[0] == 65504 && mk.get("heads").length == 4,
+        Map<String, double[]> mk = OnnxPatcher.smallConstants(new File(args[3]));
+        check(mk.containsKey("fmin") && mk.get("fmin")[0] == -10000 && mk.get("pos_inf")[0] == 65504 && mk.get("heads").length == 4
+                        && mk.get("minus1")[0] == -1,
                 "small constants: fmin " + Arrays.toString(mk.get("fmin")) + ", pos_inf " + Arrays.toString(mk.get("pos_inf"))
                         + ", heads " + Arrays.toString(mk.get("heads")));
+
+        // the position logic of a Gemma 4 vision block (padding, mask in the keys, RoPE angles, position embeddings,
+        // the integer Gathers) is found and kept on the CPU; the NPU is left float activations only
+        File g4 = new File(dir, "g4.qnn.r4.onnx");
+        Files.copy(new File(args[3]).toPath(), g4.toPath(), StandardCopyOption.REPLACE_EXISTING);
+        Map<String, OnnxPatcher.TensorType> gt = QnnBuild.tensorTypes(env, g4, dims());
+        List<OnnxPatcher.Node> gn = OnnxPatcher.nodes(g4, new HashMap<String, Long>());
+        Set<String> posOnly = QnnBuild.positionOnlyNodes(gn, gt, OnnxPatcher.inputDims(g4).keySet());
+        Set<String> bareOnly = new java.util.TreeSet<String>();
+        for (String nm : posOnly) bareOnly.add(nm.replaceFirst("^/block/", "").replaceFirst("_N\\d+N$", ""));
+        Set<String> wantOnly = new java.util.TreeSet<String>(Arrays.asList("eq", "eqi", "alli", "padding", "valid", "valid2", "clamped",
+                "node_select", "node_select_1", "x_emb", "y_emb", "pos_emb", "pad3", "pos_emb0", "posf", "possum", "ang", "cos0", "sin0",
+                "cos", "sin", "valid4", "mcol", "mh"));
+        check(bareOnly.equals(wantOnly), "position-only nodes: " + bareOnly + (bareOnly.equals(wantOnly) ? "" : " — want " + wantOnly));
+        File g4cpu = new File(dir, "g4.qnn.r4.cpu.onnx");
+        List<String> g4unmoved = OnnxPatcher.keepOnCpu(g4, g4cpu, posOnly, gt);
+        check(g4unmoved.isEmpty(), "all of them move to the CPU (Not and And as arithmetic on 0/1): " + g4unmoved);
+        float[] gpx = new float[24 * 12];
+        long[] gpos = new long[24 * 2];
+        for (int i = 0; i < 24; i++) {
+            gpos[2 * i] = i < 20 ? i % 6 : -1;
+            gpos[2 * i + 1] = i < 20 ? i / 6 : -1;
+            for (int j = 0; j < 12; j++) gpx[i * 12 + j] = i < 20 ? (float) ((Math.sin(i * 1.3 + j) + 1) / 2) : 0;
+        }
+        Map<String, float[]> gfin = new HashMap<String, float[]>();
+        gfin.put("pixel_values", gpx);
+        Map<String, long[]> glin = new HashMap<String, long[]>();
+        glin.put("pixel_position_ids", gpos);
+        Map<String, long[]> gshapes = new HashMap<String, long[]>();
+        gshapes.put("pixel_values", new long[]{1, 24, 12});
+        gshapes.put("pixel_position_ids", new long[]{1, 24, 2});
+        float[] g4ref = run(g4, gfin, glin, gshapes), g4moved = run(g4cpu, gfin, glin, gshapes);
+        double g4max = 0;
+        for (float v : g4ref) g4max = Math.max(g4max, Math.abs(v));
+        check(maxDiff(g4ref, g4moved) / g4max < 1e-5, "same output with the position logic on the CPU: relative difference "
+                + maxDiff(g4ref, g4moved) / g4max);
+        // what the NPU would get: no node outside the CPU part takes a boolean or a position-made integer
+        Set<String> posDep = new HashSet<String>(Arrays.asList("pixel_position_ids"));
+        for (OnnxPatcher.Node nd : gn) {
+            if (nd.opType.equals("Shape")) continue;
+            for (String in : nd.inputs) if (posDep.contains(in)) posDep.addAll(nd.outputs);
+        }
+        List<String> leaks = new ArrayList<String>();
+        for (OnnxPatcher.Node nd : OnnxPatcher.nodes(g4cpu, new HashMap<String, Long>())) {
+            boolean onCpu = nd.opType.equals("Constant") || nd.name.contains("_to_double") || nd.name.contains("_from_double");
+            for (String in : nd.inputs) onCpu |= in.endsWith("_double");
+            for (String o : nd.outputs) onCpu |= o.endsWith("_double");
+            if (onCpu) continue;
+            for (String in : nd.inputs) {
+                OnnxPatcher.TensorType t = gt.get(in);
+                if (t != null && (t.elem == OnnxPatcher.TYPE_BOOL || (t.elem != OnnxPatcher.TYPE_FLOAT && posDep.contains(in)))) {
+                    leaks.add(nd.opType + " " + nd.name + " ← " + in + " " + t);
+                }
+            }
+        }
+        check(leaks.isEmpty(), "the NPU gets no boolean or position integer: " + (leaks.isEmpty() ? "none" : leaks.toString()));
 
         if (bad > 0) {
             System.out.println(bad + " FAILED");

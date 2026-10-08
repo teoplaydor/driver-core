@@ -266,6 +266,15 @@ public final class NpuService extends Service {
         for (String l : readText(note(patches, "cpu")).split("\n")) if (!l.trim().isEmpty()) start.add(l.trim());
         Map<String, OnnxPatcher.TensorType> types = QnnBuild.tensorTypes(env, graph, dims(graph, patches));
         List<OnnxPatcher.Node> nodes = OnnxPatcher.nodes(graph, new HashMap<String, Long>());
+        // the patch positions' integer and boolean logic (padding, the attention mask, RoPE angles, position
+        // embeddings) is computed on the CPU: the NPU got the mask wrong
+        Set<String> positional = QnnBuild.positionOnlyNodes(nodes, types, OnnxPatcher.inputDims(graph).keySet());
+        positional.removeAll(start);
+        if (!positional.isEmpty()) {
+            start.addAll(positional);
+            rep.append("на процессоре счёт по позициям фрагментов (маска, RoPE, позиционные эмбеддинги): ")
+                    .append(opCounts(nodes, positional)).append('\n');
+        }
         Map<String, float[]> onCpu = ranges(graph, cpuOptions(patches), QnnBuild.watchList(nodes, types, Integer.MAX_VALUE),
                 patches, patchDim, pixels, positions);
         Set<String> big = QnnBuild.overflowNodes(nodes, onCpu, SAFE_FP16);
