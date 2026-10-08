@@ -222,6 +222,9 @@ public final class NpuService extends Service {
         // next to the graph, so whatever stays on the CPU still finds its weights in the external data file
         File ctx = context(patches);
         if (ctx.exists() && ctx.lastModified() < graph.lastModified()) ctx.delete(); // made from an older graph
+        // only a context that passed the check against the CPU is used (the precision note is written then): a
+        // failed compilation may have left one behind
+        if (ctx.exists() && !note(patches, "precision").exists()) ctx.delete();
         if (ctx.exists()) {
             bf16 = "bf16".equals(readText(note(patches, "precision")).trim());
             try {
@@ -261,6 +264,7 @@ public final class NpuService extends Service {
      */
     private OrtSession compile(final int patches, float[] pixels, long[] positions, int patchDim) throws Exception {
         final File ctx = context(patches);
+        note(patches, "precision").delete();
         StringBuilder rep = new StringBuilder();
         Set<String> start = new LinkedHashSet<String>();
         for (String l : readText(note(patches, "cpu")).split("\n")) if (!l.trim().isEmpty()) start.add(l.trim());
@@ -352,6 +356,7 @@ public final class NpuService extends Service {
                     return null;
                 } catch (Exception e) {
                     QnnLog log = QnnLog.parse(tail != null ? tail.finish() : Collections.<String>emptyList());
+                    if (save) ctx.delete(); // written before the session failed
                     return new QnnBuild.Failure(e.getMessage() != null ? e.getMessage() : e.toString(), log);
                 } finally {
                     so.close();

@@ -75,8 +75,20 @@ flat = c("flat", np.array([0, 0, -1], np.int64))
 att = n("MultiHeadAttention", [n("Reshape", [qp, flat], "qf"), n("Reshape", [kp, flat], "kf"), v], "att", domain="com.microsoft",
         num_heads=H, scale=1.0)
 o = n("Clip", [n("MatMul", [att, c("wo", (rnd.randn(D, D) * 0.3).astype(np.float32))], "o"), "neg_inf", "pos_inf"], "clip_out")
-res = n("Add", [h, o], "res")
-n("Mul", [res, c("root_hidden", np.array(np.sqrt(768), np.float32))], "y")
+res0 = n("Add", [h, o], "res0")
+# pooling-like indices: integer division of the clamped positions (truncating), combined, used as a Gather index
+kidx = n("Div", [clamped, c("k2", np.array(2, np.int64))], "kidx")
+kx = n("Gather", [kidx, "idx0"], "kx", axis=2)
+ky = n("Gather", [kidx, "idx1"], "ky", axis=2)
+lin = n("Add", [kx, n("Mul", [ky, c("three", np.array(3, np.int64))], "ky3")], "lin")
+pool = n("Gather", [c("table_pool", (rnd.randn(MAXPOS, D) * 0.2).astype(np.float32)), lin], "pool_emb", axis=0)
+res = n("Add", [res0, pool], "res")
+# the count of valid patches through NonZero (no double kernel on the CPU: it must stay as it is), used as n/n = 1
+nz = n("NonZero", [valid], "nz")
+cnt = n("Cast", [n("Slice", [n("Shape", [nz], "nz_shape"), c("one_i", np.array([1], np.int64)), c("two_i", np.array([2], np.int64))], "nz_n")],
+        "nz_f", to=TensorProto.FLOAT)
+unit = n("Div", [cnt, cnt], "unit")
+n("Mul", [n("Mul", [res, c("root_hidden", np.array(np.sqrt(768), np.float32))], "pooled"), unit], "y")
 g = helper.make_graph(nodes, "gemma4_block",
                       [helper.make_tensor_value_info("pixel_values", TensorProto.FLOAT, ["batch", "patches", P]),
                        helper.make_tensor_value_info(pos, TensorProto.INT64, ["batch", "patches", 2])],

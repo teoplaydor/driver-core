@@ -1019,12 +1019,12 @@ public final class OnnxPatcher {
     }
 
     /**
-     * Ops that cannot move this way: no double kernel on ONNX Runtime's CPU (Erf; checked against the op zoo in
-     * tests), a different meaning in double (Mod: fmod for floats), or inputs that must stay integers (OneHot,
-     * ConstantOfShape).
+     * Ops that cannot move this way: no double kernel on ONNX Runtime 1.29's CPU (Erf, NonZero, Resize, OneHot;
+     * every op of the model was checked), a different meaning in double (Mod: fmod for floats), or an input that
+     * must stay an integer (ConstantOfShape). QNN takes none of NonZero, Resize, OneHot here anyway.
      */
     private static final java.util.Set<String> NO_DOUBLE = new java.util.HashSet<String>(java.util.Arrays.asList(
-            "Erf", "Mod", "OneHot", "ConstantOfShape"));
+            "Erf", "NonZero", "Resize", "OneHot", "Mod", "ConstantOfShape"));
 
     /** Logical ops have no double kernels: they are computed as arithmetic on 0/1 in double and compared. */
     private static final java.util.Set<String> LOGICAL = new java.util.HashSet<String>(java.util.Arrays.asList("Not", "And", "Or", "Xor"));
@@ -1151,7 +1151,9 @@ public final class OnnxPatcher {
                         TensorType t = types.get(o);
                         int elem = t != null ? t.elem : firstType;
                         outs.set(j, o + "_as_double");
-                        asDouble.put(o, o + "_as_double");
+                        // a later moved node may take the double as it is only where it is the value: an integer
+                        // result (a Div of positions) must go through its cast back, which truncates
+                        if (elem == TYPE_FLOAT || elem == TYPE_FLOAT16 || elem == TYPE_DOUBLE) asDouble.put(o, o + "_as_double");
                         back.add(new String[]{o + "_as_double", o, String.valueOf(elem)});
                     }
                     ByteArrayOutputStream nb = new ByteArrayOutputStream(raw.length + 64);

@@ -103,6 +103,8 @@ public final class QnnBuild {
                         culprits.append("\n  оставить процессору нельзя (нет вычисления в double): ").append(unmoved);
                     }
                     current = variant;
+                } else {
+                    current = graph;
                 }
                 long t0 = npu.nowMs();
                 Failure f = npu.compile(current, true, deep);
@@ -118,6 +120,16 @@ public final class QnnBuild {
                     break;
                 }
                 steps.append(" — ").append(f.message.length() > 100 ? f.message.substring(0, 100) + "…" : f.message);
+                // a node moved to the CPU in double for which the CPU has no double kernel: it goes back
+                String[] missing = missingKernel(f.message);
+                if (missing != null && !out.cpu.isEmpty()) {
+                    int before = out.cpu.size();
+                    for (OnnxPatcher.Node n : nodes) if (n.opType.equals(missing[0])) out.cpu.remove(n.name);
+                    if (out.cpu.size() < before) {
+                        culprits.append("\n  нет вычисления в double на процессоре: ").append(missing[0]).append(" — остаётся как был");
+                        continue;
+                    }
+                }
                 if (first == null) first = f;
                 last = f;
                 if (!f.graphFailed() || npu.nowMs() > deadline) break;
@@ -172,6 +184,19 @@ public final class QnnBuild {
         rep.append(rep.length() > 0 ? "\n  " : "").append("сборка: ").append(steps);
         out.report = rep.toString();
         return out;
+    }
+
+    private static final java.util.regex.Pattern MISSING_KERNEL =
+            java.util.regex.Pattern.compile("Could not find an implementation for (\\w+)\\(\\d+\\) node with name '([^']*)'");
+
+    /** {op type, node name} when ONNX Runtime found no kernel for a node (a double one, after keepOnCpu); else null. */
+    static String[] missingKernel(String message) {
+        java.util.regex.Matcher m = MISSING_KERNEL.matcher(message);
+        return m.find() ? new String[]{m.group(1), m.group(2)} : null;
+    }
+
+    public static String[] missingKernelForTest(String message) {
+        return missingKernel(message);
     }
 
     /** A node's name without its unique token (OnnxPatcher.forQnn). */

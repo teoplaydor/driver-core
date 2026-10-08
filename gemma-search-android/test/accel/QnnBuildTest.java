@@ -332,11 +332,15 @@ public class QnnBuildTest {
         for (String nm : posOnly) bareOnly.add(nm.replaceFirst("^/block/", "").replaceFirst("_N\\d+N$", ""));
         Set<String> wantOnly = new java.util.TreeSet<String>(Arrays.asList("eq", "eqi", "alli", "padding", "valid", "valid2", "clamped",
                 "node_select", "node_select_1", "x_emb", "y_emb", "pos_emb", "pad3", "pos_emb0", "posf", "possum", "ang", "cos0", "sin0",
-                "cos", "sin", "valid4", "mcol", "mh"));
+                "cos", "sin", "valid4", "mcol", "mh", "nz", "kidx", "kx", "ky", "ky3", "lin", "pool_emb"));
         check(bareOnly.equals(wantOnly), "position-only nodes: " + bareOnly + (bareOnly.equals(wantOnly) ? "" : " — want " + wantOnly));
         File g4cpu = new File(dir, "g4.qnn.r4.cpu.onnx");
         List<String> g4unmoved = OnnxPatcher.keepOnCpu(g4, g4cpu, posOnly, gt);
-        check(g4unmoved.isEmpty(), "all of them move to the CPU (Not and And as arithmetic on 0/1): " + g4unmoved);
+        check(g4unmoved.size() == 1 && g4unmoved.get(0).startsWith("/block/nz_N"),
+                "all of them move to the CPU (Not and And as arithmetic on 0/1) but NonZero, which has no double kernel: " + g4unmoved);
+        check(Arrays.equals(QnnBuild.missingKernelForTest("Error code - ORT_NOT_IMPLEMENTED - message: Could not find an implementation for "
+                + "NonZero(13) node with name 'node_NonZero_1929_N97N'"), new String[]{"NonZero", "node_NonZero_1929_N97N"}),
+                "a missing CPU kernel in ONNX Runtime's error is recognised (the node goes back)");
         float[] gpx = new float[24 * 12];
         long[] gpos = new long[24 * 2];
         for (int i = 0; i < 24; i++) {
@@ -364,7 +368,9 @@ public class QnnBuildTest {
         }
         List<String> leaks = new ArrayList<String>();
         for (OnnxPatcher.Node nd : OnnxPatcher.nodes(g4cpu, new HashMap<String, Long>())) {
-            boolean onCpu = nd.opType.equals("Constant") || nd.name.contains("_to_double") || nd.name.contains("_from_double");
+            // QNN takes neither NonZero (it says so) nor Shape
+            boolean onCpu = nd.opType.equals("Constant") || nd.opType.equals("NonZero") || nd.opType.equals("Shape")
+                    || nd.name.contains("_to_double") || nd.name.contains("_from_double");
             for (String in : nd.inputs) onCpu |= in.endsWith("_double");
             for (String o : nd.outputs) onCpu |= o.endsWith("_double");
             if (onCpu) continue;
