@@ -1878,7 +1878,7 @@ public final class Engine {
                             notifyChanged();
                             mark("подбор ускорения: " + name);
                             if (isQnn(c[0]) && phase == 0) {
-                                status = "NPU Snapdragon: компилирую модель под NPU — в первый раз до нескольких минут";
+                                status = "NPU Snapdragon: компилирую модель под NPU — в первый раз до нескольких минут (если QNN не справится, ещё попытки)";
                                 notifyChanged();
                             }
                             probe(c[0], true);

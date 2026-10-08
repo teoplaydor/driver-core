@@ -147,8 +147,8 @@ final class NpuVision implements VisionRunner {
         map.slice().order(ByteOrder.nativeOrder()).asFloatBuffer().put(pixels);
         map.position(4 * pixels.length);
         map.slice().order(ByteOrder.nativeOrder()).asLongBuffer().put(positions);
-        // the first run of a budget compiles the graph for the NPU
-        long timeout = compiled.contains(patches) ? 120 : 1200;
+        // the first run of a budget compiles the graph for the NPU (when QNN fails, up to four times)
+        long timeout = compiled.contains(patches) ? 120 : 2400;
         final String path = io.getAbsolutePath();
         Parcel reply = call(NpuService.RUN, timeout, new Writer() {
             @Override
@@ -171,7 +171,7 @@ final class NpuVision implements VisionRunner {
 
     /** Where the NPU graph's nodes run (ONNX Runtime profile in the NPU process). */
     String profile(final int patches, final int patchDim) throws IOException {
-        Parcel reply = call(NpuService.PROFILE, 1200, new Writer() {
+        Parcel reply = call(NpuService.PROFILE, 2400, new Writer() {
             @Override
             public void write(Parcel p) {
                 p.writeInt(patches);

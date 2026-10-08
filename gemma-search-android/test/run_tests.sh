@@ -59,7 +59,7 @@ cp test/siglip/reference_siglip.mjs "$T/reference_siglip.mjs"
 javac --release 8 -XDstringConcat=inline -nowarn -encoding UTF-8 -cp "$T/cls:$T/ort-desktop.jar" -d "$T/cls" test/siglip/SigLipParityTest.java
 java -Dfile.encoding=UTF-8 -cp "$T/cls:$T/ort-desktop.jar" SigLipParityTest "$T/models/siglip-dummy" "$T/reference_siglip.json"
 
-echo "== 2c. int8 compute (accuracy_level), GPU fallback, NPU shapes, profile of CPU fallbacks"
+echo "== 2c. int8 compute (accuracy_level), GPU fallback, NPU shapes, profile of CPU fallbacks, QNN log"
 python3 -m pip install -q onnxruntime onnx_ir
 python3 test/accel/make_q4_model.py "$T/accel" >/dev/null 2>&1
 javac --release 8 -XDstringConcat=inline -nowarn -encoding UTF-8 -cp "$T/cls:$T/ort-desktop.jar" -d "$T/cls" \
@@ -83,6 +83,8 @@ python3 test/accel/make_vit_block.py "$T/accel/vit.onnx"
 javac --release 8 -XDstringConcat=inline -nowarn -encoding UTF-8 -cp "$T/cls:$T/ort-desktop.jar" -d "$T/cls" test/accel/QnnRewriteTest.java
 java -Dfile.encoding=UTF-8 -Dstdout.encoding=UTF-8 -cp "$T/cls:build/deps/ort-classes:$T/ort-desktop.jar" QnnRewriteTest \
   "$T/accel/vit.onnx" "$T/accel"
+javac --release 8 -XDstringConcat=inline -nowarn -encoding UTF-8 -cp "$T/cls:$T/ort-desktop.jar" -d "$T/cls" test/accel/QnnLogTest.java
+java -Dfile.encoding=UTF-8 -Dstdout.encoding=UTF-8 -cp "$T/cls:build/deps/ort-classes:$T/ort-desktop.jar" QnnLogTest "$T/accel/vit.qnn.onnx"
 python3 test/accel/make_attention_graph.py "$T/accel/attention.onnx"
 java -Dfile.encoding=UTF-8 -Dstdout.encoding=UTF-8 -cp "$T/cls:build/deps/ort-classes:$T/ort-desktop.jar" ProfileTest "$T/models/dummy" \
   "$T/accel/attention.onnx"
