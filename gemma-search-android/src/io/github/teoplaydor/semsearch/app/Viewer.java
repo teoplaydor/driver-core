@@ -63,6 +63,15 @@ final class Viewer extends FrameLayout {
         boolean isHidden(IndexStore.Item it);
 
         void setHidden(IndexStore.Item it, boolean hide);
+
+        /** Who (and which pet) is on the photo: the faces, named or to name. */
+        void whoIsThis(IndexStore.Item it);
+
+        /** Every album the picture is in (Engine.albumsOf). */
+        void albumsOf(IndexStore.Item it, Engine.Callback<List<Engine.Album>> cb);
+
+        /** Closes the viewer and shows the album. */
+        void openAlbum(Engine.Album a);
     }
 
     private final Host host;
@@ -70,8 +79,9 @@ final class Viewer extends FrameLayout {
     private int index;
     private final View scrim;
     private final Pager pager;
-    private final LinearLayout top, bottom, actions, tagsBox, tagsRow;
-    private final TextView tagsNote;
+    private final LinearLayout top, bottom, actions, tagsBox, tagsRow, albumsRow;
+    private final TextView tagsNote, albumsTitle;
+    private final View albumsScroll;
     /** "Что на фото" is open: it follows the photo when swiping to the next one. */
     private boolean tagsShown;
     private final TextView title, subtitle;
@@ -145,6 +155,21 @@ final class Viewer extends FrameLayout {
         tagsNote.setPadding(0, Ui.dp(c, 8), 0, 0);
         tagsNote.setVisibility(GONE);
         tagsBox.addView(tagsNote);
+        // the albums it is in (a photo may be in several: by meaning, people, pets), each one opens
+        albumsTitle = Ui.text(c, "В альбомах", 12, Ui.TEXT2, Ui.MEDIUM);
+        albumsTitle.setPadding(0, Ui.dp(c, 14), 0, 0);
+        albumsTitle.setVisibility(GONE);
+        tagsBox.addView(albumsTitle);
+        android.widget.HorizontalScrollView ascroll = new android.widget.HorizontalScrollView(c);
+        ascroll.setHorizontalScrollBarEnabled(false);
+        ascroll.setPadding(0, Ui.dp(c, 8), 0, 0);
+        ascroll.setClipToPadding(false);
+        ascroll.setVisibility(GONE);
+        albumsRow = new LinearLayout(c);
+        albumsRow.setOrientation(LinearLayout.HORIZONTAL);
+        ascroll.addView(albumsRow);
+        albumsScroll = ascroll;
+        tagsBox.addView(ascroll, new LinearLayout.LayoutParams(-1, -2));
         bottom.addView(tagsBox, new LinearLayout.LayoutParams(-1, -2));
         actions = new LinearLayout(c);
         actions.setOrientation(LinearLayout.HORIZONTAL);
@@ -333,6 +358,14 @@ final class Viewer extends FrameLayout {
                     else tagsBox.setVisibility(GONE);
                 }
             });
+            if (it.kind == IndexStore.KIND_PHOTO) {
+                action(Icon.PERSON, "Кто это", new Runnable() {
+                    @Override
+                    public void run() {
+                        host.whoIsThis(it);
+                    }
+                });
+            }
             if (host.hidingOn()) {
                 final boolean hidden = host.isHidden(it);
                 action(hidden ? Icon.SHOW : Icon.HIDE, hidden ? "Вернуть" : "Скрыть", new Runnable() {
@@ -342,7 +375,7 @@ final class Viewer extends FrameLayout {
                     }
                 });
             }
-            action(Icon.OPEN, "Открыть в…", new Runnable() {
+            action(Icon.OPEN, "Открыть", new Runnable() {
                 @Override
                 public void run() {
                     host.openWith(it);
@@ -374,6 +407,28 @@ final class Viewer extends FrameLayout {
                 }
                 tagsNote.setText("Слова, которые модель видит в этом кадре сильнее, чем в остальной галерее; нажмите — найдутся похожие");
                 for (final String w : words) tagsRow.addView(chip(w));
+            }
+        });
+        albumsRow.removeAllViews();
+        albumsTitle.setVisibility(GONE);
+        albumsScroll.setVisibility(GONE);
+        host.albumsOf(it, new Engine.Callback<List<Engine.Album>>() {
+            @Override
+            public void done(List<Engine.Album> albums, Exception e) {
+                if (items.get(index) != it || !tagsShown || albums == null || albums.isEmpty()) return;
+                albumsRow.removeAllViews();
+                for (final Engine.Album a : albums) {
+                    View chip = chip(a.name);
+                    chip.setOnClickListener(new OnClickListener() {
+                        @Override
+                        public void onClick(View v) {
+                            host.openAlbum(a);
+                        }
+                    });
+                    albumsRow.addView(chip);
+                }
+                albumsTitle.setVisibility(VISIBLE);
+                albumsScroll.setVisibility(VISIBLE);
             }
         });
     }

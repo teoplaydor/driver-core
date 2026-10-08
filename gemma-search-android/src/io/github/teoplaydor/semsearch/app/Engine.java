@@ -32,6 +32,7 @@ import io.github.teoplaydor.semsearch.core.ModelConfig;
 import io.github.teoplaydor.semsearch.core.OnnxPatcher;
 import io.github.teoplaydor.semsearch.core.OrtProfile;
 import io.github.teoplaydor.semsearch.core.PatternSource;
+import io.github.teoplaydor.semsearch.core.People;
 import io.github.teoplaydor.semsearch.core.PhotoTags;
 import io.github.teoplaydor.semsearch.core.QnnRuntime;
 import io.github.teoplaydor.semsearch.core.QueryBridge;
@@ -213,6 +214,8 @@ public final class Engine {
                 // what is hidden is hidden from the first frame on, before any model is loaded
                 applyHidden(s);
                 store = s;
+                faceStore = new FaceStore(Engine.this.ctx);
+                scanFaces();
                 try {
                     bridge = QueryBridge.load(Engine.this.ctx.getAssets().open("ru_en_lexicon.txt"));
                 } catch (Exception e) {
@@ -1256,14 +1259,37 @@ public final class Engine {
         });
     }
 
-    /** An album by meaning (core.Albums): its name and pictures, best first. */
+    /** An album — by meaning (core.Albums), a person, someone unnamed or a pet/thing — and its pictures, best first. */
     public static final class Album {
+        public static final int MEANING = 0, PERSON = 1, UNNAMED = 2, THING = 3;
         public final String name;
         public final List<IndexStore.Item> items;
+        public int kind = MEANING;
+        /** A person's or a thing's id (FaceStore). */
+        public long id;
+        /** Someone unnamed: their faces (FaceStore ids), clearest first. */
+        long[] faces = new long[0];
+        /** A thing: the less sure photos. */
+        public List<IndexStore.Item> more = new ArrayList<IndexStore.Item>();
+        /** People: the photo of the face shown, and the face's box in it (fractions of the photo). */
+        public IndexStore.Item face;
+        public float[] box;
 
         Album(String name, List<IndexStore.Item> items) {
             this.name = name;
             this.items = items;
+        }
+
+        /** The same album with only these pictures. */
+        Album with(List<IndexStore.Item> items, List<IndexStore.Item> more) {
+            Album a = new Album(name, items);
+            a.kind = kind;
+            a.id = id;
+            a.faces = faces;
+            a.more = more;
+            a.face = face;
+            a.box = box;
+            return a;
         }
     }
 
@@ -1280,44 +1306,56 @@ public final class Engine {
             @Override
             public void run() {
                 try {
-                    requireModel();
-                    List<IndexStore.Item> media = store.media();
-                    if (albums == null || albumsModel != photo || Math.abs(media.size() - albumsAt) > Math.max(10, albumsAt / 10)) {
-                        PhotoTags t = photoTags();
-                        int dim = t.vecs.length > 0 ? t.vecs[0].length : 0;
-                        List<IndexStore.Item> usable = new ArrayList<IndexStore.Item>();
-                        List<float[]> vecs = new ArrayList<float[]>();
-                        for (IndexStore.Item it : media) {
-                            if (it.emb == null || it.emb.length != dim) continue;
-                            usable.add(it);
-                            vecs.add(it.emb);
-                        }
-                        if (usable.isEmpty() && !media.isEmpty()) throw new IllegalStateException("индекс построен другой моделью — переиндексируйте галерею");
-                        List<io.github.teoplaydor.semsearch.core.Albums.Def> defs =
-                                io.github.teoplaydor.semsearch.core.Albums.parse(ctx.getAssets().open("albums.txt"));
-                        List<Album> out = new ArrayList<Album>();
-                        for (io.github.teoplaydor.semsearch.core.Albums.Album a : io.github.teoplaydor.semsearch.core.Albums.build(defs, t, vecs)) {
-                            List<IndexStore.Item> items = new ArrayList<IndexStore.Item>(a.pictures.size());
-                            for (int i : a.pictures) items.add(usable.get(i));
-                            out.add(new Album(a.name, items));
-                        }
-                        albums = out;
-                        albumsAt = media.size();
-                        albumsModel = photo;
-                    }
-                    // what is hidden (18+) is in no album
-                    List<Album> visible = new ArrayList<Album>();
-                    for (Album a : albums) {
-                        List<IndexStore.Item> items = new ArrayList<IndexStore.Item>(a.items.size());
-                        for (IndexStore.Item it : a.items) if (!store.isHidden(it)) items.add(it);
-                        if (items.size() >= io.github.teoplaydor.semsearch.core.Albums.MIN_SIZE) visible.add(new Album(a.name, items));
-                    }
-                    post(cb, visible, null);
+                    post(cb, visible(albumsNow()), null);
                 } catch (Exception e) {
                     post(cb, null, e);
                 }
             }
         });
+    }
+
+    /** The albums by meaning, made again when needed (on the ml thread). */
+    private List<Album> albumsNow() throws Exception {
+        requireModel();
+        List<IndexStore.Item> media = store.media();
+        if (albums == null || albumsModel != photo || Math.abs(media.size() - albumsAt) > Math.max(10, albumsAt / 10)) {
+            PhotoTags t = photoTags();
+            int dim = t.vecs.length > 0 ? t.vecs[0].length : 0;
+            List<IndexStore.Item> usable = new ArrayList<IndexStore.Item>();
+            List<float[]> vecs = new ArrayList<float[]>();
+            for (IndexStore.Item it : media) {
+                if (it.emb == null || it.emb.length != dim) continue;
+                usable.add(it);
+                vecs.add(it.emb);
+            }
+            if (usable.isEmpty() && !media.isEmpty()) throw new IllegalStateException("индекс построен другой моделью — переиндексируйте галерею");
+            List<io.github.teoplaydor.semsearch.core.Albums.Def> defs =
+                    io.github.teoplaydor.semsearch.core.Albums.parse(ctx.getAssets().open("albums.txt"));
+            List<Album> out = new ArrayList<Album>();
+            for (io.github.teoplaydor.semsearch.core.Albums.Album a : io.github.teoplaydor.semsearch.core.Albums.build(defs, t, vecs)) {
+                List<IndexStore.Item> items = new ArrayList<IndexStore.Item>(a.pictures.size());
+                for (int i : a.pictures) items.add(usable.get(i));
+                out.add(new Album(a.name, items));
+            }
+            albums = out;
+            albumsAt = media.size();
+            albumsModel = photo;
+        }
+        return albums;
+    }
+
+    /** What is hidden (18+) is in no album; an album by meaning left with too few pictures goes. */
+    private List<Album> visible(List<Album> all) {
+        List<Album> out = new ArrayList<Album>();
+        for (Album a : all) {
+            List<IndexStore.Item> items = new ArrayList<IndexStore.Item>(a.items.size()), more = new ArrayList<IndexStore.Item>();
+            for (IndexStore.Item it : a.items) if (!store.isHidden(it)) items.add(it);
+            for (IndexStore.Item it : a.more) if (!store.isHidden(it)) more.add(it);
+            if (a.kind == Album.MEANING ? items.size() >= io.github.teoplaydor.semsearch.core.Albums.MIN_SIZE : !items.isEmpty()) {
+                out.add(a.with(items, more));
+            }
+        }
+        return out;
     }
 
     private PhotoTags photoTags() throws Exception {
@@ -1353,6 +1391,521 @@ public final class Engine {
             tagsCalibratedAt = media.size();
         }
         return tags;
+    }
+
+    // ------------------------------------------------------------------ people and pets
+
+    /** Test hook: a stand-in for the face models (Robolectric runs no ONNX Runtime). */
+    public static volatile io.github.teoplaydor.semsearch.core.FaceFinder facesForTest;
+    static final String YUNET = "face_detection_yunet_2023mar.onnx", SFACE = "face_recognition_sface_2021dec.onnx";
+    /** The face models (opencv_zoo: YuNet, MIT; SFace, Apache 2.0): GitHub first, OpenCV's copies on the Hub next. */
+    static final String[][] FACE_FILES = {
+            {YUNET, "https://github.com/opencv/opencv_zoo/raw/main/models/face_detection_yunet/" + YUNET,
+                    "https://huggingface.co/opencv/face_detection_yunet/resolve/main/" + YUNET},
+            {SFACE, "https://github.com/opencv/opencv_zoo/raw/main/models/face_recognition_sface/" + SFACE,
+                    "https://huggingface.co/opencv/face_recognition_sface/resolve/main/" + SFACE}};
+    /** Faces kept from this many pixels (the shorter side, in the photo as scanned); unnamed groups start from bigger ones. */
+    static final int MIN_FACE = 24, GROUP_FACE = 40;
+    /** About this many pixels of a photo are looked at for faces. */
+    static final long FACE_PIXELS = 700_000L;
+    /** Unnamed people offered, at most. */
+    static final int UNNAMED_MAX = 30;
+
+    private final ExecutorService faceScan = Executors.newSingleThreadExecutor();
+    private volatile FaceStore faceStore;
+    private io.github.teoplaydor.semsearch.core.FaceFinder finder;
+    public volatile boolean faceScanning, faceDownloading;
+    public volatile int faceDone, faceTotal;
+    public volatile long faceDlDone, faceDlTotal;
+    public volatile String faceDlError;
+    private volatile boolean stopFaces;
+
+    File facesDir() {
+        return new File(ctx.getFilesDir(), "faces");
+    }
+
+    /** Whether a file is an ONNX graph (a protobuf starting with ir_version), not an error page or a Git LFS pointer. */
+    private static boolean onnxFile(File f) {
+        if (f.length() < 50_000) return false;
+        try {
+            java.io.InputStream in = new java.io.FileInputStream(f);
+            try {
+                return in.read() == 0x08;
+            } finally {
+                in.close();
+            }
+        } catch (java.io.IOException e) {
+            return false;
+        }
+    }
+
+    public boolean facesInstalled() {
+        return facesForTest != null || (onnxFile(new File(facesDir(), YUNET)) && onnxFile(new File(facesDir(), SFACE)));
+    }
+
+    public long facesBytes() {
+        return new File(facesDir(), YUNET).length() + new File(facesDir(), SFACE).length();
+    }
+
+    public int facesFound() {
+        FaceStore fs = faceStore;
+        return fs == null ? 0 : fs.faceCount();
+    }
+
+    public int photosScanned() {
+        FaceStore fs = faceStore;
+        return fs == null ? 0 : fs.scannedCount();
+    }
+
+    /** Downloads the face models (≈40 MB), then looks for faces in the photos. */
+    public void downloadFaces() {
+        if (faceDownloading || facesInstalled()) return;
+        faceDownloading = true;
+        faceDlError = null;
+        faceDlDone = 0;
+        faceDlTotal = 0;
+        notifyChanged();
+        net.submit(new Runnable() {
+            @Override
+            public void run() {
+                HfRepo.Progress progress = new HfRepo.Progress() {
+                    @Override
+                    public boolean onProgress(String file, long fd, long ft, long all, long allTotal) {
+                        faceDlDone = fd;
+                        faceDlTotal = ft;
+                        notifyChanged();
+                        return true;
+                    }
+                };
+                try {
+                    File dir = facesDir();
+                    if (!dir.exists() && !dir.mkdirs()) throw new java.io.IOException("не создаётся папка " + dir);
+                    for (String[] f : FACE_FILES) {
+                        File dst = new File(dir, f[0]);
+                        if (onnxFile(dst)) continue;
+                        String errors = "";
+                        for (int u = 1; u < f.length && !onnxFile(dst); u++) {
+                            try {
+                                HfRepo.fetch(f[u], null, f[0], -1, dst, 0, -1, progress);
+                                if (!onnxFile(dst)) throw new java.io.IOException("пришёл не файл модели (" + dst.length() + " байт)");
+                            } catch (java.io.IOException e) {
+                                dst.delete();
+                                new File(dst.getPath() + ".part").delete(); // the next source starts over
+                                errors += (errors.isEmpty() ? "" : "; ") + Uri.parse(f[u]).getHost() + ": " + e.getMessage();
+                            }
+                        }
+                        if (!onnxFile(dst)) throw new java.io.IOException(f[0] + " — " + errors);
+                    }
+                    // the graphs as expected (YuNet 2023mar's outputs): else the files go
+                    io.github.teoplaydor.semsearch.core.FaceModel m = new io.github.teoplaydor.semsearch.core.FaceModel(
+                            new File(dir, YUNET), new File(dir, SFACE), 1);
+                    Journal.add(ctx, "app", "лица: модели скачаны — " + m.describe());
+                    m.close();
+                } catch (Throwable e) {
+                    faceDlError = "Модели лиц не скачались: " + e.getMessage();
+                    Journal.add(ctx, "app", faceDlError);
+                    new File(facesDir(), YUNET).delete();
+                    new File(facesDir(), SFACE).delete();
+                } finally {
+                    faceDownloading = false;
+                    notifyChanged();
+                }
+                scanFaces();
+            }
+        });
+    }
+
+    /** Deletes the face models; the faces found and the names given stay. */
+    public void deleteFaces() {
+        stopFaces = true;
+        faceScan.submit(new Runnable() {
+            @Override
+            public void run() {
+                synchronized (Engine.this) {
+                    if (finder != null) finder.close();
+                    finder = null;
+                }
+                deleteTree(facesDir());
+                notifyChanged();
+            }
+        });
+    }
+
+    private synchronized io.github.teoplaydor.semsearch.core.FaceFinder finder() throws Exception {
+        if (facesForTest != null) return facesForTest;
+        if (finder == null) {
+            finder = new io.github.teoplaydor.semsearch.core.FaceModel(new File(facesDir(), YUNET), new File(facesDir(), SFACE), 2);
+        }
+        return finder;
+    }
+
+    /** The faces of one photo, looked for now (decoded at about FACE_PIXELS, upright). */
+    private List<io.github.teoplaydor.semsearch.core.FaceModel.Face> findFaces(IndexStore.Item it, int[] size) throws Exception {
+        ContentResolver cr = ctx.getContentResolver();
+        Bitmap b = Media.decode(cr, Uri.parse(it.uri), Media.orientation(cr, it.mediaId), FACE_PIXELS);
+        try {
+            if ((long) b.getWidth() * b.getHeight() > 2 * FACE_PIXELS) {
+                double k = Math.sqrt((double) FACE_PIXELS / ((long) b.getWidth() * b.getHeight()));
+                Bitmap s = Bitmap.createScaledBitmap(b, Math.max(1, (int) (b.getWidth() * k)), Math.max(1, (int) (b.getHeight() * k)), true);
+                b.recycle();
+                b = s;
+            }
+            int w = b.getWidth(), h = b.getHeight();
+            int[] px = new int[w * h];
+            b.getPixels(px, 0, w, 0, 0, w, h);
+            size[0] = w;
+            size[1] = h;
+            return finder().faces(px, w, h, MIN_FACE);
+        } finally {
+            b.recycle();
+        }
+    }
+
+    /** Looks for faces in the photos not looked at yet (newest first), in the background; waits while indexing runs. */
+    public void scanFaces() {
+        if (!facesInstalled() || faceStore == null || store == null) return;
+        synchronized (this) {
+            if (faceScanning) return;
+            faceScanning = true;
+        }
+        stopFaces = false;
+        faceScan.submit(new Runnable() {
+            @Override
+            public void run() {
+                int found = 0, read = 0, failed = 0;
+                long t0 = System.currentTimeMillis(), last = 0;
+                try {
+                    List<IndexStore.Item> todo = new ArrayList<IndexStore.Item>();
+                    for (IndexStore.Item it : store.media()) {
+                        if (it.kind == IndexStore.KIND_PHOTO && !faceStore.scanned(IndexStore.key(it))) todo.add(it);
+                    }
+                    java.util.Collections.sort(todo, new java.util.Comparator<IndexStore.Item>() {
+                        @Override
+                        public int compare(IndexStore.Item a, IndexStore.Item b) {
+                            return Long.compare(b.date, a.date);
+                        }
+                    });
+                    faceTotal = todo.size();
+                    faceDone = 0;
+                    if (todo.isEmpty()) return;
+                    notifyChanged();
+                    for (IndexStore.Item it : todo) {
+                        if (stopFaces || indexing) break; // indexing first: the scan goes on after it
+                        if (faceStore.scanned(IndexStore.key(it))) continue;
+                        int[] size = new int[2];
+                        List<io.github.teoplaydor.semsearch.core.FaceModel.Face> fs = null;
+                        try {
+                            fs = findFaces(it, size);
+                            found += fs.size();
+                            read++;
+                        } catch (Throwable e) {
+                            if (failed++ == 0) Journal.add(ctx, "app", "лица: " + it.title + " не прочитан — " + e);
+                        }
+                        faceStore.addScan(IndexStore.key(it), fs, size[0], size[1]);
+                        faceDone++;
+                        long now = System.currentTimeMillis();
+                        if (now - last > 1000) {
+                            last = now;
+                            notifyChanged();
+                        }
+                    }
+                } finally {
+                    faceScanning = false;
+                    if (read > 0 || failed > 0) {
+                        Journal.add(ctx, "app", "лица: просмотрено " + read + " фото, найдено " + found + " лиц за "
+                                + (System.currentTimeMillis() - t0) / 1000 + " с" + (read > 0 ? " (" + (System.currentTimeMillis() - t0) / read
+                                + " мс на фото)" : "") + (failed > 0 ? ", не прочитано " + failed : ""));
+                    }
+                    notifyChanged();
+                }
+            }
+        });
+    }
+
+    /** A face of a photo, for the screen: its box (fractions), and who it is (0 and null: nobody named). */
+    public static final class FaceTag {
+        public final long faceId, personId;
+        public final float x, y, w, h;
+        public final String name;
+
+        FaceTag(People.Face f, long personId, String name) {
+            faceId = f.id;
+            x = f.x;
+            y = f.y;
+            w = f.w;
+            h = f.h;
+            this.personId = personId;
+            this.name = name;
+        }
+    }
+
+    /** People and pets as they stand: the faces, who each is, the albums. */
+    private static final class PeopleView {
+        int version, mediaSize;
+        List<People.Face> faces;
+        int[] who;
+        List<FaceStore.Group> persons = new ArrayList<FaceStore.Group>();
+        List<Album> albums = new ArrayList<Album>();
+    }
+
+    private final Object peopleLock = new Object();
+    private PeopleView peopleCache;
+
+    /** Made again when faces, names or marks, or the index changed (any thread but faceScan, which it would wait for). */
+    private PeopleView people() {
+        synchronized (peopleLock) {
+            List<IndexStore.Item> media = store.media();
+            int v = faceStore.version();
+            if (peopleCache != null && peopleCache.version == v && peopleCache.mediaSize == media.size()) return peopleCache;
+            PeopleView pv = new PeopleView();
+            pv.version = v;
+            pv.mediaSize = media.size();
+            java.util.Map<Long, IndexStore.Item> byKey = new java.util.HashMap<Long, IndexStore.Item>();
+            for (IndexStore.Item it : media) byKey.put(IndexStore.key(it), it);
+            pv.faces = new ArrayList<People.Face>();
+            for (People.Face f : faceStore.faces()) if (byKey.containsKey(f.photo)) pv.faces.add(f);
+            List<People.Person> persons = new ArrayList<People.Person>();
+            List<FaceStore.Group> things = new ArrayList<FaceStore.Group>();
+            for (FaceStore.Group g : faceStore.groups()) {
+                if (g.kind == FaceStore.PERSON) {
+                    People.Person p = new People.Person();
+                    p.yes.addAll(g.yesFaces.values());
+                    p.no.addAll(g.noFaces.values());
+                    persons.add(p);
+                    pv.persons.add(g);
+                } else {
+                    things.add(g);
+                }
+            }
+            pv.who = People.assign(pv.faces, persons);
+            for (int p = 0; p < pv.persons.size(); p++) {
+                List<Integer> idx = new ArrayList<Integer>();
+                for (int i = 0; i < pv.who.length; i++) if (pv.who[i] == p) idx.add(i);
+                Album a = personAlbum(pv.persons.get(p).name, idx, pv.faces, byKey);
+                a.kind = Album.PERSON;
+                a.id = pv.persons.get(p).id;
+                pv.albums.add(a);
+            }
+            List<People.Cluster> clusters = People.clusters(pv.faces, pv.who, GROUP_FACE);
+            for (int c = 0; c < Math.min(UNNAMED_MAX, clusters.size()); c++) {
+                Album a = personAlbum("Кто это?", clusters.get(c).faces, pv.faces, byKey);
+                a.kind = Album.UNNAMED;
+                a.faces = new long[clusters.get(c).faces.size()];
+                for (int k = 0; k < a.faces.length; k++) a.faces[k] = pv.faces.get(clusters.get(c).faces.get(k)).id;
+                pv.albums.add(a);
+            }
+            if (!things.isEmpty()) {
+                // the photos with the model's vectors of one length (another model's leftovers left out)
+                int dim = photo != null ? photo.embeddingDim() : 0;
+                List<IndexStore.Item> usable = new ArrayList<IndexStore.Item>();
+                List<float[]> vecs = new ArrayList<float[]>();
+                for (IndexStore.Item it : media) {
+                    if (it.emb == null || it.emb.length == 0 || (dim > 0 && it.emb.length != dim)) continue;
+                    usable.add(it);
+                    vecs.add(it.emb);
+                }
+                java.util.Map<Long, Integer> at = new java.util.HashMap<Long, Integer>();
+                for (int i = 0; i < usable.size(); i++) at.put(IndexStore.key(usable.get(i)), i);
+                for (FaceStore.Group g : things) {
+                    java.util.Set<Integer> yes = new java.util.HashSet<Integer>(), no = new java.util.HashSet<Integer>();
+                    for (long k : g.yesPhotos) if (at.containsKey(k)) yes.add(at.get(k));
+                    for (long k : g.noPhotos) if (at.containsKey(k)) no.add(at.get(k));
+                    People.Members m = People.byExamples(vecs, yes, no);
+                    List<IndexStore.Item> items = new ArrayList<IndexStore.Item>(), more = new ArrayList<IndexStore.Item>();
+                    for (int i : m.sure) items.add(usable.get(i));
+                    for (int i : m.more) more.add(usable.get(i));
+                    Album a = new Album(g.name, items);
+                    a.kind = Album.THING;
+                    a.id = g.id;
+                    a.more = more;
+                    pv.albums.add(a);
+                }
+            }
+            peopleCache = pv;
+            return pv;
+        }
+    }
+
+    /** A person's photos (newest first) from their faces, and the clearest face shown. */
+    private static Album personAlbum(String name, List<Integer> idx, List<People.Face> faces, java.util.Map<Long, IndexStore.Item> byKey) {
+        java.util.LinkedHashSet<IndexStore.Item> items = new java.util.LinkedHashSet<IndexStore.Item>();
+        People.Face best = null;
+        for (int i : idx) {
+            People.Face f = faces.get(i);
+            items.add(byKey.get(f.photo));
+            if (best == null || f.size * (double) f.score > best.size * (double) best.score) best = f;
+        }
+        List<IndexStore.Item> list = new ArrayList<IndexStore.Item>(items);
+        java.util.Collections.sort(list, new java.util.Comparator<IndexStore.Item>() {
+            @Override
+            public int compare(IndexStore.Item a, IndexStore.Item b) {
+                return Long.compare(b.date, a.date);
+            }
+        });
+        Album a = new Album(name, list);
+        if (best != null) {
+            a.face = byKey.get(best.photo);
+            a.box = new float[]{best.x, best.y, best.w, best.h};
+        }
+        return a;
+    }
+
+    /** People (named, then unnamed) and pets/things, for the albums sheet; what is hidden (18+) left out. */
+    public void people(final Callback<List<Album>> cb) {
+        ml.submit(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    if (faceStore == null) throw new IllegalStateException("индекс ещё открывается");
+                    post(cb, visible(people().albums), null);
+                } catch (Exception e) {
+                    post(cb, null, e);
+                }
+            }
+        });
+    }
+
+    /** The faces of a photo and who they are; the photo is looked at now when the scan has not reached it. */
+    public void facesOf(final IndexStore.Item it, final Callback<List<FaceTag>> cb) {
+        ml.submit(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    long key = IndexStore.key(it);
+                    if (!faceStore.scanned(key)) {
+                        if (!facesInstalled()) throw new IllegalStateException("модели лиц не скачаны");
+                        int[] size = new int[2];
+                        faceStore.addScan(key, findFaces(it, size), size[0], size[1]);
+                    }
+                    PeopleView pv = people();
+                    List<FaceTag> out = new ArrayList<FaceTag>();
+                    for (int i = 0; i < pv.faces.size(); i++) {
+                        People.Face f = pv.faces.get(i);
+                        if (f.photo != key) continue;
+                        FaceStore.Group g = pv.who[i] >= 0 ? pv.persons.get(pv.who[i]) : null;
+                        out.add(new FaceTag(f, g == null ? 0 : g.id, g == null ? null : g.name));
+                    }
+                    java.util.Collections.sort(out, new java.util.Comparator<FaceTag>() {
+                        @Override
+                        public int compare(FaceTag a, FaceTag b) {
+                            return Float.compare(a.x, b.x); // left to right, as they stand
+                        }
+                    });
+                    post(cb, out, null);
+                } catch (Exception e) {
+                    post(cb, null, e);
+                }
+            }
+        });
+    }
+
+    /** Every album this photo is in: by meaning (when made already, or now), people, pets and things. */
+    public void albumsOf(final IndexStore.Item it, final Callback<List<Album>> cb) {
+        ml.submit(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    List<Album> out = new ArrayList<Album>();
+                    if (faceStore != null) for (Album a : visible(people().albums)) if (a.kind != Album.UNNAMED && a.items.contains(it)) out.add(a);
+                    try {
+                        for (Album a : visible(albumsNow())) if (a.items.contains(it)) out.add(a);
+                    } catch (Exception e) {
+                        // no albums by meaning yet (no model): the rest
+                    }
+                    post(cb, out, null);
+                } catch (Exception e) {
+                    post(cb, null, e);
+                }
+            }
+        });
+    }
+
+    /** Names of the people (PERSON) or the pets/things (THING) there are, in the order made. */
+    public List<String> groupNames(boolean persons) {
+        List<String> out = new ArrayList<String>();
+        FaceStore fs = faceStore;
+        if (fs == null) return out;
+        for (FaceStore.Group g : fs.groups()) if ((g.kind == FaceStore.PERSON) == persons) out.add(g.name);
+        return out;
+    }
+
+    private void changed(final Runnable done, final String journal) {
+        if (journal != null) Journal.add(ctx, "app", journal);
+        notifyChanged();
+        if (done != null) main.post(done);
+    }
+
+    /** This face is the person of this name (made when new). */
+    public void nameFace(final long faceId, final String name, final Runnable done) {
+        ml.submit(new Runnable() {
+            @Override
+            public void run() {
+                People.Face f = faceStore.face(faceId);
+                if (f != null && !name.trim().isEmpty()) faceStore.markFace(faceStore.named(name, FaceStore.PERSON), f, true);
+                changed(done, "люди: лицо отмечено как «" + name.trim() + "»");
+            }
+        });
+    }
+
+    /** This face is not this person. */
+    public void notPerson(final long faceId, final long personId, final Runnable done) {
+        ml.submit(new Runnable() {
+            @Override
+            public void run() {
+                People.Face f = faceStore.face(faceId);
+                FaceStore.Group g = faceStore.group(personId);
+                if (f != null && g != null) faceStore.markFace(g, f, false);
+                changed(done, g == null ? null : "люди: лицо отмечено как не «" + g.name + "»");
+            }
+        });
+    }
+
+    /** Someone unnamed gets a name: their clearest faces (up to 20) become the person's. */
+    public void nameUnnamed(final Album a, final String name, final Runnable done) {
+        ml.submit(new Runnable() {
+            @Override
+            public void run() {
+                if (name.trim().isEmpty()) return;
+                FaceStore.Group g = faceStore.named(name, FaceStore.PERSON);
+                for (int k = 0; k < Math.min(20, a.faces.length); k++) {
+                    People.Face f = faceStore.face(a.faces[k]);
+                    if (f != null) faceStore.markFace(g, f, true);
+                }
+                changed(done, "люди: «" + name.trim() + "» — " + a.items.size() + " фото");
+            }
+        });
+    }
+
+    /** This photo is (or, {@code yes} false, is not) the pet or thing of this name (made when new). */
+    public void markThing(final IndexStore.Item it, final String name, final boolean yes, final Runnable done) {
+        ml.submit(new Runnable() {
+            @Override
+            public void run() {
+                if (name.trim().isEmpty()) return;
+                faceStore.markPhoto(faceStore.named(name, FaceStore.THING), IndexStore.key(it), yes);
+                changed(done, "питомцы и другое: фото " + (yes ? "отмечено как" : "убрано из") + " «" + name.trim() + "»");
+            }
+        });
+    }
+
+    public void renameGroup(final long id, final String name, final Runnable done) {
+        ml.submit(new Runnable() {
+            @Override
+            public void run() {
+                if (!name.trim().isEmpty()) faceStore.rename(id, name);
+                changed(done, null);
+            }
+        });
+    }
+
+    public void deleteGroup(final long id, final Runnable done) {
+        ml.submit(new Runnable() {
+            @Override
+            public void run() {
+                faceStore.delete(id);
+                changed(done, null);
+            }
+        });
     }
 
     // ------------------------------------------------------------------ 18+
@@ -4036,6 +4589,7 @@ public final class Engine {
         idxStatus = msg;
         notifyChanged();
         refreshAdult();
+        scanFaces();
     }
 
     public void stopIndex() {

@@ -36,6 +36,8 @@ final class SettingsPanel extends FrameLayout implements Engine.Listener {
     private ProgressLine modelProgress, indexProgress;
     private Toggle autoToggle, idleToggle, batteryToggle, adultToggle;
     private TextView adultLevelValue, hiddenValue, adultNote;
+    private TextView facesValue, facesNote, facesButton, facesDelete;
+    private ProgressLine facesProgress;
     private View batteryRow;
     private TextView unrestrictedValue;
 
@@ -80,6 +82,7 @@ final class SettingsPanel extends FrameLayout implements Engine.Listener {
         buildIndex();
         buildSpeed();
         buildSearch();
+        buildPeople();
         buildAdult();
         buildLook();
         TextView about = Ui.text(c, "EmbeddingGemma 2 (Google DeepMind, Apache 2.0) · версия " + BuildInfo.version(c)
@@ -814,6 +817,36 @@ final class SettingsPanel extends FrameLayout implements Engine.Listener {
         });
     }
 
+    private void buildPeople() {
+        LinearLayout card = section("Люди и питомцы");
+        facesValue = row(card, "Узнавание людей по лицам", "лица находит YuNet, сравнивает SFace (модели OpenCV); всё на телефоне", null);
+        facesProgress = progress(card);
+        facesNote = note(card);
+        facesButton = action(card, "Скачать модели лиц (≈40 МБ)", true, new Runnable() {
+            @Override
+            public void run() {
+                a.downloadFaces();
+                onEngineChanged();
+            }
+        });
+        facesDelete = quiet(card, "Удалить модели лиц", Ui.TEXT2, new Runnable() {
+            @Override
+            public void run() {
+                Sheet.confirm(root(), "Удалить модели лиц?", "Найденные лица и имена останутся; новые фото не будут "
+                        + "проверяться на лица, пока модели не скачаны снова.", "Удалить", new Runnable() {
+                    @Override
+                    public void run() {
+                        e.deleteFaces();
+                    }
+                });
+            }
+        });
+        TextView how = Ui.text(getContext(), "Назвать человека или отметить питомца: откройте фото → «Кто это». Люди и питомцы — в "
+                + "«Альбомах» на боковой панели.", 12.5f, Ui.TEXT3, Ui.REGULAR);
+        how.setPadding(Ui.dp(getContext(), 18), Ui.dp(getContext(), 4), Ui.dp(getContext(), 18), Ui.dp(getContext(), 10));
+        card.addView(how);
+    }
+
     private void buildAdult() {
         Context c = getContext();
         LinearLayout card = section("18+");
@@ -959,6 +992,28 @@ final class SettingsPanel extends FrameLayout implements Engine.Listener {
         rowOf(threadsValue).setVisibility(fast ? GONE : VISIBLE);
         rowOf(dimsValue).setVisibility(fast ? GONE : VISIBLE);
         sideValue.setText(a.railSide() == 0 ? "справа" : "слева");
+        boolean faces = e.facesInstalled();
+        facesValue.setText(e.faceDownloading ? "скачиваю" : faces ? "включено" : "не скачано");
+        facesValue.setTextColor(faces ? Ui.ACCENT : Ui.TEXT2);
+        facesProgress.setVisibility(e.faceDownloading || e.faceScanning ? VISIBLE : GONE);
+        if (e.faceDownloading) {
+            facesProgress.setIndeterminate(e.faceDlTotal <= 0);
+            if (e.faceDlTotal > 0) facesProgress.setProgress((float) e.faceDlDone / e.faceDlTotal);
+        } else if (e.faceScanning) {
+            facesProgress.setIndeterminate(e.faceTotal <= 0);
+            if (e.faceTotal > 0) facesProgress.setProgress((float) e.faceDone / e.faceTotal);
+        }
+        String fn = e.faceDlError != null && !faces ? e.faceDlError
+                : e.faceDownloading ? (e.faceDlTotal > 0 ? String.format(Locale.ROOT, "%.0f из %.0f МБ", e.faceDlDone / 1048576.0,
+                e.faceDlTotal / 1048576.0) : "начинаю…")
+                : e.faceScanning && e.faceTotal > 0 ? String.format(Locale.ROOT, "Ищу лица · %d из %d фото", e.faceDone, e.faceTotal)
+                : faces ? String.format(Locale.ROOT, "Найдено лиц: %d на %d фото", e.facesFound(), e.photosScanned()) : "";
+        facesNote.setText(fn);
+        facesNote.setVisibility(fn.isEmpty() ? GONE : VISIBLE);
+        facesNote.setTextColor(e.faceDlError != null && !faces ? Ui.DANGER : Ui.TEXT2);
+        facesButton.setVisibility(!faces && !e.faceDownloading ? VISIBLE : GONE);
+        facesDelete.setVisibility(faces && !e.faceDownloading && Engine.facesForTest == null ? VISIBLE : GONE);
+        if (facesDelete.getVisibility() == VISIBLE) facesDelete.setText(String.format(Locale.ROOT, "Удалить модели лиц (%d МБ)", e.facesBytes() >> 20));
         boolean adult = e.hideAdult();
         if (adultToggle.isOn() != adult) adultToggle.setOn(adult, false);
         rowOf(adultLevelValue).setVisibility(adult ? VISIBLE : GONE);

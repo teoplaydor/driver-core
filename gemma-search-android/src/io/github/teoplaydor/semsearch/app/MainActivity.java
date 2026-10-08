@@ -263,7 +263,8 @@ public final class MainActivity extends Activity implements Engine.Listener, Vie
         section.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {
-                showMoreResults();
+                if (shownAlbum != null && shownAlbum.kind == Engine.Album.UNNAMED) nameUnnamed(shownAlbum);
+                else showMoreResults();
             }
         });
         info.addView(section, new LinearLayout.LayoutParams(-2, -2)); // wrap: the bubble follows the text
@@ -526,6 +527,7 @@ public final class MainActivity extends Activity implements Engine.Listener, Vie
 
     private void showRecent(boolean animate) {
         resultsLabel = null;
+        shownAlbum = null;
         if (aspects == null) {
             // lay the gallery out once picture proportions are known, so nothing jumps
             recentWaits = true;
@@ -653,6 +655,7 @@ public final class MainActivity extends Activity implements Engine.Listener, Vie
         List<IndexStore.Item> more = new ArrayList<IndexStore.Item>();
         for (IndexStore.Hit h : r.more) more.add(h.item);
         resultsLabel = label;
+        shownAlbum = null;
         shownResults = list;
         moreResults = more.isEmpty() ? null : more;
         setItems(list, true);
@@ -665,36 +668,156 @@ public final class MainActivity extends Activity implements Engine.Listener, Vie
         updateEmpty();
     }
 
-    /** Albums by meaning (Engine.albums) in a sheet; one opens as results. */
+    /**
+     * The albums in a sheet: the hidden folder, people (named, then unnamed), pets and things, then by meaning; one
+     * opens as results. A photo may be in several.
+     */
+    @SuppressWarnings("unchecked")
     void showAlbums() {
         if (!engine.ready()) {
             toast(engine.hasModelFiles() ? "Модель ещё загружается" : "Сначала скачайте модель");
             return;
         }
-        final Sheet s = new Sheet(this, "Альбомы по смыслу");
+        final Sheet s = new Sheet(this, "Альбомы");
         final TextView note = Ui.text(this, "Собираю альбомы… (в первый раз — до полуминуты: словарь переводится в векторы)", 13,
                 Ui.TEXT2, Ui.REGULAR);
         note.setLineSpacing(0, 1.25f);
         note.setPadding(0, 0, 0, dp(12));
         s.body().addView(note);
         s.show(root);
-        engine.albums(new Engine.Callback<List<Engine.Album>>() {
+        final List<Engine.Album>[] parts = new List[2];
+        final Exception[] failed = new Exception[1];
+        final Runnable fill = new Runnable() {
             @Override
-            public void done(List<Engine.Album> albums, Exception e) {
-                if (s.isClosing()) return;
-                if (e != null) {
-                    note.setText("Не получилось: " + e.getMessage());
-                    return;
-                }
-                if (engine.hideAdult() && !engine.hiddenItems().isEmpty()) s.body().addView(hiddenRow(s));
-                if (albums.isEmpty()) {
-                    note.setText("Пока не из чего собрать альбомы — проиндексируйте больше фото");
-                    return;
-                }
-                note.setText("Фото, которые модель явно относит к теме; одно фото может быть в нескольких альбомах");
-                for (final Engine.Album a : albums) s.body().addView(albumRow(s, a));
+            public void run() {
+                if (parts[0] == null || parts[1] == null || s.isClosing()) return;
+                fillAlbums(s, note, parts[0], parts[1], failed[0]);
+            }
+        };
+        engine.people(new Engine.Callback<List<Engine.Album>>() {
+            @Override
+            public void done(List<Engine.Album> r, Exception e) {
+                parts[0] = r != null ? r : new ArrayList<Engine.Album>();
+                fill.run();
             }
         });
+        engine.albums(new Engine.Callback<List<Engine.Album>>() {
+            @Override
+            public void done(List<Engine.Album> r, Exception e) {
+                parts[1] = r != null ? r : new ArrayList<Engine.Album>();
+                failed[0] = e;
+                fill.run();
+            }
+        });
+    }
+
+    private void fillAlbums(final Sheet s, TextView note, List<Engine.Album> people, List<Engine.Album> meaning, Exception failed) {
+        note.setText("Одно фото может быть сразу в нескольких альбомах: в людях, в питомцах и в темах");
+        if (engine.hideAdult() && !engine.hiddenItems().isEmpty()) s.body().addView(hiddenRow(s));
+        List<Engine.Album> persons = new ArrayList<Engine.Album>(), things = new ArrayList<Engine.Album>();
+        for (Engine.Album a : people) (a.kind == Engine.Album.THING ? things : persons).add(a);
+        s.body().addView(header("Люди"));
+        for (Engine.Album a : persons) s.body().addView(personRow(s, a));
+        if (!engine.facesInstalled()) {
+            s.body().addView(actionRow(Icon.PERSON, engine.faceDownloading ? "Модели лиц скачиваются…" : "Узнавать людей по лицам",
+                    "модели лиц OpenCV, ≈40 МБ, один раз; всё считается на телефоне", new Runnable() {
+                        @Override
+                        public void run() {
+                            s.dismiss();
+                            downloadFaces();
+                        }
+                    }));
+        } else if (persons.isEmpty()) {
+            s.body().addView(hint(engine.faceScanning ? String.format(Locale.ROOT, "Ищу лица на фото · %d из %d", engine.faceDone,
+                    engine.faceTotal) : "Лиц пока не нашлось — они появятся, когда лица найдутся на нескольких фото"));
+        }
+        s.body().addView(header("Питомцы и другое"));
+        for (Engine.Album a : things) s.body().addView(albumRow(s, a));
+        if (things.isEmpty()) {
+            s.body().addView(hint("Откройте фото → «Кто это» → «Питомец или что-то ещё»: похожие фото соберутся здесь"));
+        }
+        s.body().addView(header("По смыслу"));
+        if (failed != null) s.body().addView(hint("Не получилось: " + failed.getMessage()));
+        else if (meaning.isEmpty()) s.body().addView(hint("Пока не из чего собрать — проиндексируйте больше фото"));
+        for (Engine.Album a : meaning) s.body().addView(albumRow(s, a));
+    }
+
+    private TextView header(String text) {
+        TextView t = Ui.text(this, text, 13, Ui.TEXT3, Ui.MEDIUM);
+        t.setPadding(0, dp(16), 0, dp(6));
+        return t;
+    }
+
+    private TextView hint(String text) {
+        TextView t = Ui.text(this, text, 13, Ui.TEXT2, Ui.REGULAR);
+        t.setLineSpacing(0, 1.2f);
+        t.setPadding(0, dp(4), 0, dp(8));
+        return t;
+    }
+
+    /** A row with an icon in a round box: an action rather than an album. */
+    private View actionRow(int icon, String title, String sub, final Runnable r) {
+        LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        row.setPadding(0, dp(6), 0, dp(6));
+        FrameLayout box = new FrameLayout(this);
+        box.setBackground(Ui.round(this, Ui.SURFACE3, 26));
+        FrameLayout.LayoutParams ip = new FrameLayout.LayoutParams(dp(26), dp(26));
+        ip.gravity = Gravity.CENTER;
+        box.addView(Ui.icon(this, icon, Ui.TEXT2, 26), ip);
+        row.addView(box, new LinearLayout.LayoutParams(dp(52), dp(52)));
+        LinearLayout text = new LinearLayout(this);
+        text.setOrientation(LinearLayout.VERTICAL);
+        text.setPadding(dp(14), 0, 0, 0);
+        text.addView(Ui.text(this, title, 15, Ui.TEXT, Ui.MEDIUM));
+        if (sub != null) text.addView(Ui.text(this, sub, 12.5f, Ui.TEXT2, Ui.REGULAR));
+        row.addView(text, new LinearLayout.LayoutParams(0, -2, 1));
+        row.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                r.run();
+            }
+        });
+        Ui.pressable(row);
+        return row;
+    }
+
+    /** A person (or someone unnamed): their face in a circle, the name, how many photos; held — rename or delete. */
+    private View personRow(final Sheet s, final Engine.Album a) {
+        LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        row.setPadding(0, dp(6), 0, dp(6));
+        ImageView face = avatar(52);
+        if (a.face != null) faceInto(face, a.face, a.box);
+        row.addView(face, new LinearLayout.LayoutParams(dp(52), dp(52)));
+        LinearLayout text = new LinearLayout(this);
+        text.setOrientation(LinearLayout.VERTICAL);
+        text.setPadding(dp(14), 0, 0, 0);
+        boolean unnamed = a.kind == Engine.Album.UNNAMED;
+        text.addView(Ui.text(this, a.name, 15, unnamed ? Ui.TEXT2 : Ui.TEXT, Ui.MEDIUM));
+        text.addView(Ui.text(this, a.items.size() + " фото" + (unnamed ? " · нажмите, чтобы назвать" : ""), 12.5f, Ui.TEXT2,
+                Ui.REGULAR));
+        row.addView(text, new LinearLayout.LayoutParams(0, -2, 1));
+        row.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                s.dismiss();
+                showAlbum(a);
+            }
+        });
+        if (!unnamed) {
+            row.setOnLongClickListener(new View.OnLongClickListener() {
+                @Override
+                public boolean onLongClick(View v) {
+                    manageGroup(s, a);
+                    return true;
+                }
+            });
+        }
+        Ui.pressable(row);
+        return row;
     }
 
     private View albumRow(final Sheet s, final Engine.Album a) {
@@ -722,6 +845,15 @@ public final class MainActivity extends Activity implements Engine.Listener, Vie
                 showAlbum(a);
             }
         });
+        if (a.kind == Engine.Album.THING) {
+            row.setOnLongClickListener(new View.OnLongClickListener() {
+                @Override
+                public boolean onLongClick(View v) {
+                    manageGroup(s, a);
+                    return true;
+                }
+            });
+        }
         Ui.pressable(row);
         return row;
     }
@@ -763,15 +895,46 @@ public final class MainActivity extends Activity implements Engine.Listener, Vie
         return many;
     }
 
-    /** An album's pictures in the grid, as results. */
+    /** The album shown in the grid (null: something else is). */
+    private Engine.Album shownAlbum;
+
+    /** An album's pictures in the grid, as results; someone unnamed — a tap on the line names them. */
     private void showAlbum(Engine.Album a) {
+        showAlbum(a, true);
+    }
+
+    private void showAlbum(Engine.Album a, boolean animate) {
         hideKeyboard();
-        resultsLabel = "Альбом «" + a.name + "»";
+        resultsLabel = a.kind == Engine.Album.MEANING ? "Альбом «" + a.name + "»" : a.name;
+        shownAlbum = a;
         shownResults = a.items;
-        moreResults = null;
-        setItems(a.items, true);
-        sectionText(resultsLabel + " · " + a.items.size());
+        moreResults = a.more.isEmpty() ? null : a.more;
+        setItems(a.items, animate);
+        String text = resultsLabel + " · " + a.items.size();
+        if (a.kind == Engine.Album.UNNAMED) text += " · назвать ›";
+        else if (moreResults != null) text += " · ещё " + a.more.size() + " похожих ›";
+        sectionText(text);
         updateEmpty();
+    }
+
+    /** People or pets changed: the person or pet in the grid is shown again as it is now. */
+    private void refreshShownAlbum(final String renamed) {
+        final Engine.Album was = shownAlbum;
+        if (was == null || was.kind == Engine.Album.MEANING) return;
+        engine.people(new Engine.Callback<List<Engine.Album>>() {
+            @Override
+            public void done(List<Engine.Album> all, Exception e) {
+                if (all == null || shownAlbum != was) return;
+                for (Engine.Album a : all) {
+                    boolean same = was.kind == Engine.Album.UNNAMED ? a.kind == Engine.Album.PERSON && a.name.equals(renamed)
+                            : a.kind == was.kind && a.id == was.id;
+                    if (same) {
+                        showAlbum(a, false);
+                        return;
+                    }
+                }
+            }
+        });
     }
 
     static final String HIDDEN = "Скрытое";
@@ -781,6 +944,7 @@ public final class MainActivity extends Activity implements Engine.Listener, Vie
         hideKeyboard();
         List<IndexStore.Item> items = engine.hiddenItems();
         resultsLabel = HIDDEN;
+        shownAlbum = null;
         shownResults = items;
         moreResults = null;
         setItems(items, true);
@@ -993,6 +1157,14 @@ public final class MainActivity extends Activity implements Engine.Listener, Vie
                     : "Ищу новые фото…";
             progress.setIndeterminate(engine.idxTotal == 0);
             if (engine.idxTotal > 0) progress.setProgress((float) engine.idxDone / engine.idxTotal);
+        } else if (engine.faceDownloading) {
+            line = "Скачиваю модели лиц";
+            progress.setIndeterminate(engine.faceDlTotal <= 0);
+            if (engine.faceDlTotal > 0) progress.setProgress((float) engine.faceDlDone / engine.faceDlTotal);
+        } else if (engine.faceScanning && engine.faceTotal > 0) {
+            line = String.format(Locale.ROOT, "Ищу лица · %d из %d", engine.faceDone, engine.faceTotal);
+            progress.setIndeterminate(false);
+            progress.setProgress((float) engine.faceDone / engine.faceTotal);
         } else if (dl && gallery.items().size() > 0) {
             line = "Скачиваю модель";
             progress.setIndeterminate(engine.dlTotal <= 0);
@@ -1476,6 +1648,348 @@ public final class MainActivity extends Activity implements Engine.Listener, Vie
         if (viewer != null) viewer.close();
         engine.setHidden(it, hide);
         toast(hide ? "Скрыто — оно в папке «Скрытое» (кнопка альбомов)" : "Возвращено в галерею");
+    }
+
+    @Override
+    public void albumsOf(IndexStore.Item it, Engine.Callback<List<Engine.Album>> cb) {
+        engine.albumsOf(it, cb);
+    }
+
+    @Override
+    public void openAlbum(Engine.Album a) {
+        if (viewer != null) viewer.close();
+        showAlbum(a);
+    }
+
+    void downloadFaces() {
+        engine.downloadFaces();
+        toast("Скачиваю модели лиц (≈40 МБ) — потом найду лица на всех фото");
+    }
+
+    /** Who is on the photo: its faces (each one named or corrected with a tap), and the pets or things it is in. */
+    @Override
+    public void whoIsThis(final IndexStore.Item it) {
+        final Sheet s = new Sheet(this, "Кто на фото");
+        final TextView note = hint("");
+        note.setPadding(0, 0, 0, dp(8));
+        s.body().addView(note);
+        final LinearLayout facesBox = new LinearLayout(this);
+        facesBox.setOrientation(LinearLayout.VERTICAL);
+        s.body().addView(facesBox);
+        if (!engine.facesInstalled()) {
+            note.setText(engine.faceDownloading ? "Модели лиц скачиваются — когда закончат, лица найдутся на всех фото"
+                    : "Чтобы узнавать людей, нужны модели лиц OpenCV (≈40 МБ, один раз; всё считается на телефоне)");
+            if (!engine.faceDownloading) {
+                facesBox.addView(actionRow(Icon.DOWNLOAD, "Скачать модели лиц", null, new Runnable() {
+                    @Override
+                    public void run() {
+                        s.dismiss();
+                        downloadFaces();
+                    }
+                }));
+            }
+        } else {
+            note.setText("Ищу лица…");
+            engine.facesOf(it, new Engine.Callback<List<Engine.FaceTag>>() {
+                @Override
+                public void done(List<Engine.FaceTag> faces, Exception e) {
+                    if (s.isClosing()) return;
+                    if (e != null) {
+                        note.setText("Не получилось: " + e.getMessage());
+                        return;
+                    }
+                    note.setText(faces.isEmpty() ? "Лиц на этом фото не нашлось" : "Нажмите на лицо, чтобы назвать человека или поправить");
+                    for (final Engine.FaceTag f : faces) facesBox.addView(faceRow(s, it, f));
+                }
+            });
+        }
+        s.body().addView(header("Питомец или что-то ещё"));
+        final LinearLayout thingsBox = new LinearLayout(this);
+        thingsBox.setOrientation(LinearLayout.VERTICAL);
+        s.body().addView(thingsBox);
+        thingsBox.addView(actionRow(Icon.PLUS, "Отметить питомца или что-то ещё", "кошку, собаку, машину, дом — похожие фото соберутся "
+                + "в альбом", new Runnable() {
+            @Override
+            public void run() {
+                thingChooser(s, it);
+            }
+        }));
+        engine.albumsOf(it, new Engine.Callback<List<Engine.Album>>() {
+            @Override
+            public void done(List<Engine.Album> albums, Exception e) {
+                if (albums == null || s.isClosing()) return;
+                for (final Engine.Album a : albums) {
+                    if (a.kind != Engine.Album.THING) continue;
+                    thingsBox.addView(actionRow(Icon.CLOSE, "Убрать из «" + a.name + "»", "это фото не про «" + a.name + "»", new Runnable() {
+                        @Override
+                        public void run() {
+                            s.dismiss();
+                            engine.markThing(it, a.name, false, new Runnable() {
+                                @Override
+                                public void run() {
+                                    toast("Убрано из «" + a.name + "»");
+                                    refreshShownAlbum(null);
+                                }
+                            });
+                        }
+                    }), 0);
+                }
+            }
+        });
+        s.show(root);
+    }
+
+    private View faceRow(final Sheet who, final IndexStore.Item it, final Engine.FaceTag f) {
+        LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        row.setPadding(0, dp(6), 0, dp(6));
+        ImageView face = avatar(52);
+        faceInto(face, it, new float[]{f.x, f.y, f.w, f.h});
+        row.addView(face, new LinearLayout.LayoutParams(dp(52), dp(52)));
+        LinearLayout text = new LinearLayout(this);
+        text.setOrientation(LinearLayout.VERTICAL);
+        text.setPadding(dp(14), 0, 0, 0);
+        text.addView(Ui.text(this, f.name != null ? f.name : "Кто это?", 15, f.name != null ? Ui.TEXT : Ui.TEXT2, Ui.MEDIUM));
+        text.addView(Ui.text(this, f.name != null ? "узнан по лицу · нажмите, чтобы поправить" : "нажмите, чтобы назвать", 12.5f,
+                Ui.TEXT2, Ui.REGULAR));
+        row.addView(text, new LinearLayout.LayoutParams(0, -2, 1));
+        row.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                personChooser(who, it, f);
+            }
+        });
+        Ui.pressable(row);
+        return row;
+    }
+
+    /** Who this face is: one of the people there are, someone new, or not the one it was taken for. */
+    private void personChooser(final Sheet who, final IndexStore.Item it, final Engine.FaceTag f) {
+        final Sheet s = new Sheet(this, f.name != null ? "Это " + f.name + "?" : "Кто это?");
+        final Runnable after = new Runnable() {
+            @Override
+            public void run() {
+                refreshShownAlbum(null);
+                if (!who.isClosing()) {
+                    who.dismiss();
+                    whoIsThis(it);
+                }
+            }
+        };
+        if (f.name != null) {
+            s.body().addView(actionRow(Icon.CLOSE, "Это не " + f.name, "лица, похожие на это, к «" + f.name + "» не попадут", new Runnable() {
+                @Override
+                public void run() {
+                    s.dismiss();
+                    engine.notPerson(f.faceId, f.personId, after);
+                }
+            }));
+        }
+        for (final String name : engine.groupNames(true)) {
+            if (name.equals(f.name)) continue;
+            s.body().addView(actionRow(Icon.PERSON, name, null, new Runnable() {
+                @Override
+                public void run() {
+                    s.dismiss();
+                    engine.nameFace(f.faceId, name, after);
+                }
+            }));
+        }
+        s.body().addView(actionRow(Icon.PLUS, "Новый человек…", null, new Runnable() {
+            @Override
+            public void run() {
+                s.dismiss();
+                askName("Как зовут?", "Например: Маша", "", new Engine.Callback<String>() {
+                    @Override
+                    public void done(String name, Exception e) {
+                        engine.nameFace(f.faceId, name, after);
+                    }
+                });
+            }
+        }));
+        s.show(root);
+    }
+
+    /** Which pet or thing the photo is: one there is or a new one. */
+    private void thingChooser(final Sheet who, final IndexStore.Item it) {
+        final Sheet s = new Sheet(this, "Что на фото?");
+        final Engine.Callback<String> mark = new Engine.Callback<String>() {
+            @Override
+            public void done(final String name, Exception e) {
+                if (!who.isClosing()) who.dismiss();
+                engine.markThing(it, name, true, new Runnable() {
+                    @Override
+                    public void run() {
+                        toast("Отмечено: «" + name.trim() + "» — похожие фото в «Альбомах»");
+                        refreshShownAlbum(null);
+                    }
+                });
+            }
+        };
+        for (final String name : engine.groupNames(false)) {
+            s.body().addView(actionRow(Icon.TAG, name, null, new Runnable() {
+                @Override
+                public void run() {
+                    s.dismiss();
+                    mark.done(name, null);
+                }
+            }));
+        }
+        s.body().addView(actionRow(Icon.PLUS, "Новое…", "питомец, машина, дом, место", new Runnable() {
+            @Override
+            public void run() {
+                s.dismiss();
+                askName("Как назвать?", "Например: Барсик", "", mark);
+            }
+        }));
+        s.show(root);
+    }
+
+    /** Someone unnamed gets a name (from the line above the grid). */
+    private void nameUnnamed(final Engine.Album a) {
+        askName("Как зовут?", "Например: Маша", "", new Engine.Callback<String>() {
+            @Override
+            public void done(final String name, Exception e) {
+                engine.nameUnnamed(a, name, new Runnable() {
+                    @Override
+                    public void run() {
+                        toast("«" + name.trim() + "» — в «Альбомах», в людях");
+                        refreshShownAlbum(name.trim());
+                    }
+                });
+            }
+        });
+    }
+
+    /** A person's or pet's album held in the sheet: rename or delete. */
+    private void manageGroup(final Sheet albums, final Engine.Album a) {
+        final Sheet s = new Sheet(this, a.name);
+        s.body().addView(actionRow(Icon.NOTE, "Переименовать", null, new Runnable() {
+            @Override
+            public void run() {
+                s.dismiss();
+                askName("Новое имя", a.name, a.name, new Engine.Callback<String>() {
+                    @Override
+                    public void done(String name, Exception e) {
+                        albums.dismiss();
+                        engine.renameGroup(a.id, name, null);
+                    }
+                });
+            }
+        }));
+        s.body().addView(actionRow(Icon.TRASH, "Удалить", "фото останутся на месте, пропадут только отметки", new Runnable() {
+            @Override
+            public void run() {
+                s.dismiss();
+                albums.dismiss();
+                engine.deleteGroup(a.id, null);
+            }
+        }));
+        s.show(root);
+    }
+
+    /** A line to type a name in; {@code cb} gets it (not empty). */
+    private void askName(String title, String hint, String value, final Engine.Callback<String> cb) {
+        final Sheet s = new Sheet(this, title);
+        final EditText t = new EditText(this);
+        t.setHint(hint);
+        t.setText(value);
+        t.setSelection(value.length());
+        t.setSingleLine(true);
+        t.setTextColor(Ui.TEXT);
+        t.setHintTextColor(Ui.TEXT3);
+        t.setTextSize(16);
+        t.setTypeface(Ui.font(this, Ui.REGULAR));
+        t.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_CAP_WORDS);
+        t.setImeOptions(EditorInfo.IME_ACTION_DONE);
+        t.setBackground(Ui.round(this, Ui.SURFACE2, 18));
+        t.setPadding(dp(16), dp(14), dp(16), dp(14));
+        s.body().addView(t, new LinearLayout.LayoutParams(-1, -2));
+        final Runnable done = new Runnable() {
+            @Override
+            public void run() {
+                String name = t.getText().toString().trim();
+                if (name.isEmpty()) return;
+                hideKeyboard();
+                s.dismiss();
+                cb.done(name, null);
+            }
+        };
+        t.setOnEditorActionListener(new TextView.OnEditorActionListener() {
+            @Override
+            public boolean onEditorAction(TextView v, int action, KeyEvent ev) {
+                done.run();
+                return true;
+            }
+        });
+        TextView ok = Sheet.button(this, "Готово", true);
+        ok.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                done.run();
+            }
+        });
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-1, dp(50));
+        lp.topMargin = dp(14);
+        s.body().addView(ok, lp);
+        s.show(root);
+        t.requestFocus();
+    }
+
+    /** A round place for a face (the picture comes round: faceInto). */
+    private ImageView avatar(int sizeDp) {
+        ImageView v = new ImageView(this);
+        v.setScaleType(ImageView.ScaleType.FIT_CENTER);
+        v.setBackground(Ui.round(this, Ui.SURFACE3, sizeDp / 2f));
+        return v;
+    }
+
+    private final LruCache<String, Bitmap> faceCrops = new LruCache<String, Bitmap>(64);
+
+    /** The face (a box in fractions of the photo, widened a little) cut out of the photo, into the view. */
+    private void faceInto(final ImageView v, final IndexStore.Item it, final float[] box) {
+        final String key = it.id + ":" + box[0] + ":" + box[1];
+        Bitmap cached = faceCrops.get(key);
+        if (cached != null) {
+            v.setImageBitmap(cached);
+            return;
+        }
+        v.setTag(key);
+        thumbPool.submit(new Runnable() {
+            @Override
+            public void run() {
+                Bitmap b = null;
+                try {
+                    BitmapLoader t = testLoader;
+                    b = t != null ? t.load(it, 512) : Media.full(getContentResolver(), it, 1_500_000L);
+                } catch (Throwable ignored) {
+                    // no picture: the empty circle stays
+                }
+                if (b == null) return;
+                float cx = (box[0] + box[2] / 2) * b.getWidth(), cy = (box[1] + box[3] / 2) * b.getHeight();
+                float side = Math.max(box[2] * b.getWidth(), box[3] * b.getHeight()) * 1.4f;
+                int x0 = Math.max(0, Math.round(cx - side / 2)), y0 = Math.max(0, Math.round(cy - side / 2));
+                int x1 = Math.min(b.getWidth(), Math.round(cx + side / 2)), y1 = Math.min(b.getHeight(), Math.round(cy + side / 2));
+                if (x1 - x0 < 2 || y1 - y0 < 2) return;
+                // a square around the face, scaled, in a circle
+                int side2 = Math.min(x1 - x0, y1 - y0);
+                int sx = x0 + (x1 - x0 - side2) / 2, sy = y0 + (y1 - y0 - side2) / 2;
+                Bitmap square = Bitmap.createScaledBitmap(Bitmap.createBitmap(b, sx, sy, side2, side2), 160, 160, true);
+                final Bitmap small = Bitmap.createBitmap(160, 160, Bitmap.Config.ARGB_8888);
+                android.graphics.Paint paint = new android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG);
+                paint.setShader(new android.graphics.BitmapShader(square, android.graphics.Shader.TileMode.CLAMP,
+                        android.graphics.Shader.TileMode.CLAMP));
+                new android.graphics.Canvas(small).drawCircle(80, 80, 80, paint);
+                faceCrops.put(key, small);
+                ui.post(new Runnable() {
+                    @Override
+                    public void run() {
+                        if (key.equals(v.getTag())) v.setImageBitmap(small);
+                    }
+                });
+            }
+        });
     }
 
     @Override

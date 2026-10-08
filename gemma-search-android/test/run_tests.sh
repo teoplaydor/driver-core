@@ -54,6 +54,14 @@ java -Dfile.encoding=UTF-8 -cp "$T/cls" QueryBridgeTest assets/ru_en_lexicon.txt
 java -Dfile.encoding=UTF-8 -Dstdout.encoding=UTF-8 -cp "$T/cls" PhotoTagsTest assets/photo_tags.txt "$T"
 java -Dfile.encoding=UTF-8 -Dstdout.encoding=UTF-8 -cp "$T/cls" AlbumsTest assets/photo_tags.txt assets/albums.txt
 java -Dfile.encoding=UTF-8 -Dstdout.encoding=UTF-8 -cp "$T/cls" AdultFilterTest assets/photo_tags.txt assets/adult.txt
+java -Dfile.encoding=UTF-8 -Dstdout.encoding=UTF-8 -cp "$T/cls:$T/ort-desktop.jar" PeopleTest
+
+echo "== 2e. faces (YuNet + SFace) vs OpenCV's FaceDetectorYN / FaceRecognizerSF on stand-in graphs"
+python3 -m pip install -q "opencv-python-headless==4.12.0.88" pillow
+python3 test/faces/make_face_models.py "$T/faces/models" "$T/faces/img" > "$T/faces/imgs.txt"
+python3 test/faces/reference_faces.py "$T/faces/models" "$T/faces/ref" $(cat "$T/faces/imgs.txt") > "$T/faces/reference.json"
+javac --release 8 -XDstringConcat=inline -nowarn -encoding UTF-8 -cp "$T/cls:$T/ort-desktop.jar" -d "$T/cls" test/faces/FaceModelTest.java
+java -Dfile.encoding=UTF-8 -Dstdout.encoding=UTF-8 -cp "$T/cls:$T/ort-desktop.jar" FaceModelTest "$T/faces/models" "$T/faces/reference.json"
 
 echo "== 2b'. SigLIP 2 (fast photo model) vs transformers.js"
 python3 test/siglip/make_dummy_siglip.py "$T/gemma3/tokenizer.json" "$T/models/siglip-dummy" >/dev/null
