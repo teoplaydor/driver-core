@@ -48,6 +48,8 @@ public final class IndexStore {
     private final SQLiteDatabase db;
     private final List<Item> items = new ArrayList<Item>();
     private final HashSet<Long> photoIds = new HashSet<Long>(), videoIds = new HashSet<Long>();
+    /** Photos and videos kept out of the gallery, search and albums ({@link #key}s): 18+ (Engine). */
+    private HashSet<Long> hidden = new HashSet<Long>();
 
     public IndexStore(Context ctx) {
         SQLiteOpenHelper helper = new SQLiteOpenHelper(ctx, "index.db", null, 1) {
@@ -138,6 +140,45 @@ public final class IndexStore {
         videoIds.clear();
     }
 
+    /** A photo's or video's lasting name: its kind and MediaStore id (the row id changes when the index is rebuilt). */
+    public static long key(int kind, long mediaId) {
+        return ((long) kind << 48) ^ mediaId;
+    }
+
+    public static long key(Item it) {
+        return key(it.kind, it.mediaId);
+    }
+
+    private int hiddenVersion;
+
+    public synchronized void setHidden(java.util.Set<Long> keys) {
+        if (keys.equals(hidden)) return;
+        hidden = new HashSet<Long>(keys);
+        hiddenVersion++;
+    }
+
+    /** Changes whenever what is hidden changes (screens showing the gallery refresh then). */
+    public synchronized int hiddenVersion() {
+        return hiddenVersion;
+    }
+
+    public synchronized boolean isHidden(Item it) {
+        return it.kind != KIND_NOTE && !hidden.isEmpty() && hidden.contains(key(it));
+    }
+
+    /** The hidden photos and videos, newest first. */
+    public synchronized List<Item> hiddenItems() {
+        List<Item> out = new ArrayList<Item>();
+        for (Item it : items) if (isHidden(it)) out.add(it);
+        Collections.sort(out, new Comparator<Item>() {
+            @Override
+            public int compare(Item a, Item b) {
+                return Long.compare(b.date, a.date);
+            }
+        });
+        return out;
+    }
+
     public synchronized boolean hasMedia(int kind, long mediaId) {
         return (kind == KIND_PHOTO ? photoIds : videoIds).contains(mediaId);
     }
@@ -152,6 +193,7 @@ public final class IndexStore {
     public synchronized List<Item> recent(boolean photos, boolean videos, boolean notes, int limit) {
         List<Item> out = new ArrayList<Item>();
         for (Item it : items) {
+            if (isHidden(it)) continue;
             if ((it.kind == KIND_PHOTO && photos) || (it.kind == KIND_VIDEO && videos) || (it.kind == KIND_NOTE && notes)) out.add(it);
         }
         Collections.sort(out, new Comparator<Item>() {
@@ -163,6 +205,7 @@ public final class IndexStore {
         return out.size() > limit ? new ArrayList<Item>(out.subList(0, limit)) : out;
     }
 
+    /** Every photo and video, hidden ones too (what the gallery's statistics are taken over). */
     public synchronized List<Item> media() {
         List<Item> out = new ArrayList<Item>();
         for (Item it : items) if (it.kind != KIND_NOTE) out.add(it);
@@ -327,7 +370,7 @@ public final class IndexStore {
         float qn = VectorMath.prefixNorm(q, 0, d);
         List<Hit> hits = new ArrayList<Hit>();
         for (Item it : items) {
-            if (it.id == excludeId || it.emb.length < d) continue;
+            if (it.id == excludeId || it.emb.length < d || isHidden(it)) continue;
             if ((it.kind == KIND_PHOTO && !photos) || (it.kind == KIND_VIDEO && !videos) || (it.kind == KIND_NOTE && !notes)) {
                 continue;
             }
@@ -347,7 +390,7 @@ public final class IndexStore {
         float qmn = VectorMath.prefixNorm(qMedia, 0, d), qnn = VectorMath.prefixNorm(qNotes, 0, d);
         List<Hit> hits = new ArrayList<Hit>();
         for (Item it : items) {
-            if (it.id == excludeId || it.emb.length < d) continue;
+            if (it.id == excludeId || it.emb.length < d || isHidden(it)) continue;
             if ((it.kind == KIND_PHOTO && !photos) || (it.kind == KIND_VIDEO && !videos) || (it.kind == KIND_NOTE && !notes)) {
                 continue;
             }

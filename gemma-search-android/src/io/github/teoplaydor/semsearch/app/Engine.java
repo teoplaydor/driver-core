@@ -20,6 +20,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 
+import io.github.teoplaydor.semsearch.core.AdultFilter;
 import io.github.teoplaydor.semsearch.core.Embedder;
 import io.github.teoplaydor.semsearch.core.EmbeddingGemma2;
 import io.github.teoplaydor.semsearch.core.HfRepo;
@@ -208,7 +209,10 @@ public final class Engine {
         ml.submit(new Runnable() {
             @Override
             public void run() {
-                store = new IndexStore(Engine.this.ctx);
+                IndexStore s = new IndexStore(Engine.this.ctx);
+                // what is hidden is hidden from the first frame on, before any model is loaded
+                applyHidden(s);
+                store = s;
                 try {
                     bridge = QueryBridge.load(Engine.this.ctx.getAssets().open("ru_en_lexicon.txt"));
                 } catch (Exception e) {
@@ -289,6 +293,7 @@ public final class Engine {
                 state = State.READY;
                 status = "test model";
                 notifyChanged();
+                refreshAdult();
             }
         });
     }
@@ -581,6 +586,7 @@ public final class Engine {
         }
         notifyChanged();
         if (indexing) return; // reloaded within a run of indexing: what follows a load waits for its end
+        refreshAdult();
         if (autoCheck) checkFast(null); // first start of a fast model: find its best accelerator once
         if (state == State.READY && full && photoModel() == FastModel.GEMMA) {
             boolean npuCheck = prefs.getBoolean("npu_check_pending", false) && gemmaFp32Vision() != null;
@@ -1299,7 +1305,14 @@ public final class Engine {
                         albumsAt = media.size();
                         albumsModel = photo;
                     }
-                    post(cb, albums, null);
+                    // what is hidden (18+) is in no album
+                    List<Album> visible = new ArrayList<Album>();
+                    for (Album a : albums) {
+                        List<IndexStore.Item> items = new ArrayList<IndexStore.Item>(a.items.size());
+                        for (IndexStore.Item it : a.items) if (!store.isHidden(it)) items.add(it);
+                        if (items.size() >= io.github.teoplaydor.semsearch.core.Albums.MIN_SIZE) visible.add(new Album(a.name, items));
+                    }
+                    post(cb, visible, null);
                 } catch (Exception e) {
                     post(cb, null, e);
                 }
@@ -1340,6 +1353,218 @@ public final class Engine {
             tagsCalibratedAt = media.size();
         }
         return tags;
+    }
+
+    // ------------------------------------------------------------------ 18+
+
+    public static final String[] ADULT_LEVELS = {"мягко", "обычно", "строго"};
+    /** The phrases of assets/adult.txt embedded by the photo model (AdultFilter), and for which model and gallery size. */
+    private AdultFilter adult;
+    private Embedder adultModel;
+    private int adultCalibratedAt = -1;
+    /** IndexStore.key's: what the filter found, what was hidden by hand and what was shown by hand (it wins over the filter). */
+    private final Object hideLock = new Object();
+    private java.util.Set<Long> adultAuto, adultManual, adultShown;
+
+    public boolean hideAdult() {
+        return prefs.getBoolean("hide_adult", false);
+    }
+
+    public int adultLevel() {
+        return Math.max(0, Math.min(ADULT_LEVELS.length - 1, prefs.getInt("adult_level", AdultFilter.NORMAL)));
+    }
+
+    private java.util.Set<Long> keys(String name) {
+        java.util.Set<Long> out = new java.util.HashSet<Long>();
+        for (String k : prefs.getStringSet(name, new java.util.HashSet<String>())) {
+            try {
+                out.add(Long.parseLong(k));
+            } catch (NumberFormatException ignored) {
+                // not ours
+            }
+        }
+        return out;
+    }
+
+    private void saveKeys(String name, java.util.Set<Long> keys) {
+        java.util.Set<String> out = new java.util.HashSet<String>();
+        for (long k : keys) out.add(String.valueOf(k));
+        prefs.edit().putStringSet(name, out).apply();
+    }
+
+    /** What the store keeps out of sight: the filter's finds and the ones hidden by hand, not those shown by hand. */
+    private void applyHidden(IndexStore s) {
+        java.util.Set<Long> h = new java.util.HashSet<Long>();
+        synchronized (hideLock) {
+            if (adultAuto == null) {
+                adultAuto = keys("adult_auto");
+                adultManual = keys("adult_manual");
+                adultShown = keys("adult_shown");
+            }
+            if (hideAdult()) {
+                h.addAll(adultAuto);
+                h.addAll(adultManual);
+                h.removeAll(adultShown);
+            }
+        }
+        s.setHidden(h);
+    }
+
+    /**
+     * Turns hiding of 18+ on or off. On: what was found before is hidden at once, then the index is checked (with the
+     * model loaded; else once it is); {@code cb} gets the number hidden.
+     */
+    public void setHideAdult(boolean on, final Callback<Integer> cb) {
+        prefs.edit().putBoolean("hide_adult", on).apply();
+        if (store != null) applyHidden(store);
+        notifyChanged();
+        ml.submit(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    if (state == State.READY) classifyAdult(false);
+                    post(cb, hiddenItems().size(), null);
+                } catch (Exception e) {
+                    post(cb, null, e);
+                }
+                notifyChanged();
+            }
+        });
+    }
+
+    /** How strict the filter is (AdultFilter levels); the index is checked again. */
+    public void setAdultLevel(int level, final Callback<Integer> cb) {
+        prefs.edit().putInt("adult_level", level).apply();
+        ml.submit(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    if (state == State.READY) classifyAdult(true);
+                    post(cb, hiddenItems().size(), null);
+                } catch (Exception e) {
+                    post(cb, null, e);
+                }
+                notifyChanged();
+            }
+        });
+    }
+
+    /** Hides or shows one photo or video by hand; it stays so whatever the filter finds later. */
+    public void setHidden(IndexStore.Item it, boolean hide) {
+        long k = IndexStore.key(it);
+        synchronized (hideLock) {
+            if (adultAuto == null) applyHidden(store);
+            if (hide) {
+                adultManual.add(k);
+                adultShown.remove(k);
+            } else {
+                adultManual.remove(k);
+                if (adultAuto.contains(k)) adultShown.add(k);
+            }
+            saveKeys("adult_manual", adultManual);
+            saveKeys("adult_shown", adultShown);
+        }
+        applyHidden(store);
+        Journal.add(ctx, "app", "18+: " + (it.title != null ? it.title : "файл") + (hide ? " скрыт вручную" : " возвращён вручную"));
+        notifyChanged();
+    }
+
+    public boolean isHidden(IndexStore.Item it) {
+        IndexStore s = store;
+        return s != null && s.isHidden(it);
+    }
+
+    public List<IndexStore.Item> hiddenItems() {
+        IndexStore s = store;
+        return s == null ? new ArrayList<IndexStore.Item>() : s.hiddenItems();
+    }
+
+    private AdultFilter adultFilter() throws Exception {
+        if (adult == null || adultModel != photo) {
+            List<String> words = AdultFilter.parse(ctx.getAssets().open("adult.txt"));
+            float[][] vecs = new float[words.size()][];
+            for (int i = 0; i < vecs.length; i++) vecs[i] = photo.embedQuery(words.get(i));
+            adult = new AdultFilter(words, vecs);
+            adultModel = photo;
+            adultCalibratedAt = -1;
+        }
+        List<IndexStore.Item> media = store.media();
+        if (adultCalibratedAt < 0 || Math.abs(media.size() - adultCalibratedAt) > Math.max(20, adultCalibratedAt / 10)) {
+            // the gallery's typical best similarity: up to 500 pictures spread over the index
+            List<float[]> sample = new ArrayList<float[]>();
+            int dim = adult.vecs.length > 0 ? adult.vecs[0].length : 0;
+            int step = Math.max(1, media.size() / 500);
+            for (int i = 0; i < media.size(); i += step) {
+                float[] e = media.get(i).emb;
+                if (e != null && e.length == dim) sample.add(e);
+            }
+            adult.calibrate(sample);
+            adultCalibratedAt = media.size();
+        }
+        return adult;
+    }
+
+    /**
+     * Runs the filter over every photo and video (hiding on, the photo model loaded); unless {@code force}, only when
+     * the index, the level or the model changed since the last run.
+     */
+    private void classifyAdult(boolean force) throws Exception {
+        if (!hideAdult() || photo == null || !photo.supportsImages()) return;
+        List<IndexStore.Item> media = store.media();
+        int level = adultLevel();
+        String sig = level + ":" + media.size() + ":" + prefs.getString("media_sig", "") + ":" + photoModel();
+        if (!force && sig.equals(prefs.getString("adult_sig", null))) return;
+        long t0 = System.currentTimeMillis();
+        PhotoTags t = photoTags();
+        AdultFilter f = adultFilter();
+        int dim = f.vecs.length > 0 ? f.vecs[0].length : 0;
+        java.util.Set<Long> found = new java.util.HashSet<Long>();
+        for (IndexStore.Item it : media) {
+            if (it.emb != null && it.emb.length == dim && f.adult(it.emb, t, level)) found.add(IndexStore.key(it));
+        }
+        synchronized (hideLock) {
+            if (adultAuto == null) applyHidden(store);
+            adultAuto.clear();
+            adultAuto.addAll(found);
+            saveKeys("adult_auto", found);
+        }
+        prefs.edit().putString("adult_sig", sig).apply();
+        applyHidden(store);
+        Journal.add(ctx, "app", "18+ (" + ADULT_LEVELS[level] + "): найдено " + found.size() + " из " + media.size() + " за "
+                + (System.currentTimeMillis() - t0) + " мс");
+    }
+
+    /** Checks the index again on the ml thread, when hiding is on and the model is there. */
+    private void refreshAdult() {
+        if (!hideAdult()) return;
+        ml.submit(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    if (state != State.READY) return;
+                    classifyAdult(false);
+                    notifyChanged();
+                } catch (Throwable e) {
+                    android.util.Log.e("SemSearch", "18+ check", e);
+                }
+            }
+        });
+    }
+
+    /** A photo or video just indexed: hidden at once when it is 18+ (the whole index is checked again at the end). */
+    private void checkAdult(IndexStore.Item it) {
+        if (!hideAdult() || it == null) return;
+        try {
+            AdultFilter f = adultFilter();
+            if (it.emb.length == f.vecs[0].length && f.adult(it.emb, photoTags(), adultLevel())) {
+                synchronized (hideLock) {
+                    adultAuto.add(IndexStore.key(it));
+                }
+                applyHidden(store);
+            }
+        } catch (Throwable e) {
+            android.util.Log.e("SemSearch", "18+ check", e);
+        }
     }
 
     // ------------------------------------------------------------------ notes
@@ -3506,7 +3731,7 @@ public final class Engine {
             for (int i = 0; i < ok.size(); i++) {
                 if (embs[i] == null) continue;
                 Media.Entry e = ok.get(i);
-                store.add(e.kind, e.id, e.uri.toString(), e.name, null, e.date, embs[i]);
+                checkAdult(store.add(e.kind, e.id, e.uri.toString(), e.name, null, e.date, embs[i]));
                 idxDone++;
                 failStreak.clear();
             }
@@ -3601,7 +3826,7 @@ public final class Engine {
         timedPhotos += entries.size();
         for (int i = 0; i < entries.size(); i++) {
             Media.Entry e = entries.get(i);
-            store.add(e.kind, e.id, e.uri.toString(), e.name, null, e.date, embs[i]);
+            checkAdult(store.add(e.kind, e.id, e.uri.toString(), e.name, null, e.date, embs[i]));
             idxDone++;
             failStreak.clear();
         }
@@ -3675,7 +3900,7 @@ public final class Engine {
                         new ArrayList<io.github.teoplaydor.semsearch.core.ImagePreprocessor.Source>();
                 for (Bitmap f : frames) src.add(new Media.BitmapSource(f));
                 float[] emb = photo.embedVideo(src, 0);
-                store.add(e.kind, e.id, e.uri.toString(), e.name, null, e.date, emb);
+                checkAdult(store.add(e.kind, e.id, e.uri.toString(), e.name, null, e.date, emb));
                 idxDone++;
                 videoHangs = 0;
             } finally {
@@ -3810,6 +4035,7 @@ public final class Engine {
         backgroundRun = false;
         idxStatus = msg;
         notifyChanged();
+        refreshAdult();
     }
 
     public void stopIndex() {

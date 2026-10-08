@@ -1,0 +1,15 @@
+# 18+ (AdultFilter): what the photo model compares every picture with, as search queries; one phrase per line,
+# in English, as the model understands it best. A picture is hidden when it stands out on these from the gallery and
+# they are among the main things in it (a beach in swimsuits stands out more on "beach" and "swimsuit"). No words
+# for people as such ("naked woman"): a photo of a dressed woman matches it through "woman".
+nudity
+nude body
+naked body
+topless
+bare breasts
+genitals
+erotic photo
+erotic lingerie
+pornography
+sex
+explicit sexual content

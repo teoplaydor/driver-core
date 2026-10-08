@@ -80,6 +80,8 @@ public final class MainActivity extends Activity implements Engine.Listener, Vie
     private String resultsLabel;
     private Intent pendingShare;
     private int lastIndexed = -1;
+    /** IndexStore.hiddenVersion the grid shows. */
+    private int lastHidden;
     private long lastRefreshMs;
     private Engine.State lastState;
     private final Runnable debounced = new Runnable() {
@@ -684,6 +686,7 @@ public final class MainActivity extends Activity implements Engine.Listener, Vie
                     note.setText("Не получилось: " + e.getMessage());
                     return;
                 }
+                if (engine.hideAdult() && !engine.hiddenItems().isEmpty()) s.body().addView(hiddenRow(s));
                 if (albums.isEmpty()) {
                     note.setText("Пока не из чего собрать альбомы — проиндексируйте больше фото");
                     return;
@@ -723,6 +726,36 @@ public final class MainActivity extends Activity implements Engine.Listener, Vie
         return row;
     }
 
+    /** The hidden folder (18+) among the albums: a padlock, no pictures. */
+    private View hiddenRow(final Sheet s) {
+        LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        row.setPadding(0, dp(6), 0, dp(6));
+        FrameLayout lock = new FrameLayout(this);
+        lock.setBackground(Ui.round(this, Ui.SURFACE3, 10));
+        FrameLayout.LayoutParams ip = new FrameLayout.LayoutParams(dp(26), dp(26));
+        ip.gravity = Gravity.CENTER;
+        lock.addView(Ui.icon(this, Icon.LOCK, Ui.TEXT2, 26), ip);
+        row.addView(lock, new LinearLayout.LayoutParams(dp(52), dp(52)));
+        LinearLayout text = new LinearLayout(this);
+        text.setOrientation(LinearLayout.VERTICAL);
+        text.setPadding(dp(14), 0, 0, 0);
+        text.addView(Ui.text(this, HIDDEN, 15, Ui.TEXT, Ui.MEDIUM));
+        int n = engine.hiddenItems().size();
+        text.addView(Ui.text(this, "18+ · " + n + " " + plural(n, "файл", "файла", "файлов"), 12.5f, Ui.TEXT2, Ui.REGULAR));
+        row.addView(text, new LinearLayout.LayoutParams(0, -2, 1));
+        row.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                s.dismiss();
+                showHidden();
+            }
+        });
+        Ui.pressable(row);
+        return row;
+    }
+
     private static String plural(int n, String one, String few, String many) {
         int m10 = n % 10, m100 = n % 100;
         if (m10 == 1 && m100 != 11) return one;
@@ -739,6 +772,49 @@ public final class MainActivity extends Activity implements Engine.Listener, Vie
         setItems(a.items, true);
         sectionText(resultsLabel + " · " + a.items.size());
         updateEmpty();
+    }
+
+    static final String HIDDEN = "Скрытое";
+
+    /** The hidden photos and videos (18+) in the grid, as results. */
+    void showHidden() {
+        hideKeyboard();
+        List<IndexStore.Item> items = engine.hiddenItems();
+        resultsLabel = HIDDEN;
+        shownResults = items;
+        moreResults = null;
+        setItems(items, true);
+        sectionText(HIDDEN + " · " + items.size());
+        updateEmpty();
+    }
+
+    /** What is hidden changed: the grid drops what it no longer shows (the hidden folder is read again). */
+    private void hiddenChanged() {
+        if (resultsLabel == null) {
+            showRecent(false);
+        } else if (HIDDEN.equals(resultsLabel)) {
+            List<IndexStore.Item> items = engine.hiddenItems();
+            shownResults = items;
+            setItems(items, false);
+            sectionText(HIDDEN + " · " + items.size());
+            updateEmpty();
+        } else {
+            List<IndexStore.Item> left = new ArrayList<IndexStore.Item>();
+            for (IndexStore.Item it : gallery.items()) if (!engine.isHidden(it)) left.add(it);
+            if (left.size() == gallery.items().size()) return;
+            if (shownResults != null) {
+                List<IndexStore.Item> sr = new ArrayList<IndexStore.Item>();
+                for (IndexStore.Item it : shownResults) if (!engine.isHidden(it)) sr.add(it);
+                shownResults = sr;
+            }
+            if (moreResults != null) {
+                List<IndexStore.Item> mr = new ArrayList<IndexStore.Item>();
+                for (IndexStore.Item it : moreResults) if (!engine.isHidden(it)) mr.add(it);
+                moreResults = mr.isEmpty() ? null : mr;
+            }
+            setItems(left, false);
+            updateEmpty();
+        }
     }
 
     /** The less sure results after the sure ones. */
@@ -939,6 +1015,12 @@ public final class MainActivity extends Activity implements Engine.Listener, Vie
         IndexStore s = engine.store();
         int indexed = s == null ? 0 : s.count(IndexStore.KIND_PHOTO) + s.count(IndexStore.KIND_VIDEO) + s.count(IndexStore.KIND_NOTE);
         long now = System.currentTimeMillis();
+        int hidden = s == null ? lastHidden : s.hiddenVersion();
+        if (hidden != lastHidden) {
+            // 18+ hidden or shown: out of the gallery and the results, into the hidden folder (or back)
+            lastHidden = hidden;
+            hiddenChanged();
+        }
         if (resultsLabel == null && indexed != lastIndexed && (lastIndexed < 0 || !engine.indexing || now - lastRefreshMs > 1500)) {
             boolean first = lastIndexed <= 0;
             lastIndexed = indexed;
@@ -1377,6 +1459,23 @@ public final class MainActivity extends Activity implements Engine.Listener, Vie
             return;
         }
         engine.describe(it, cb);
+    }
+
+    @Override
+    public boolean hidingOn() {
+        return engine.hideAdult();
+    }
+
+    @Override
+    public boolean isHidden(IndexStore.Item it) {
+        return engine.isHidden(it);
+    }
+
+    @Override
+    public void setHidden(IndexStore.Item it, boolean hide) {
+        if (viewer != null) viewer.close();
+        engine.setHidden(it, hide);
+        toast(hide ? "Скрыто — оно в папке «Скрытое» (кнопка альбомов)" : "Возвращено в галерею");
     }
 
     @Override

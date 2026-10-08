@@ -102,6 +102,30 @@ public final class PhotoTags {
         return sampled;
     }
 
+    /** The picture's mean similarity to the words and its spread (the standard deviation). */
+    public double[] own(float[] picture) {
+        double m = 0, v = 0;
+        double[] s = new double[vecs.length];
+        for (int t = 0; t < vecs.length; t++) m += s[t] = dot(vecs[t], picture);
+        m /= Math.max(1, s.length);
+        for (double x : s) v += (x - m) * (x - m);
+        return new double[]{m, Math.sqrt(v / Math.max(1, s.length))};
+    }
+
+    /**
+     * The picture's largest excess over any word's typical similarity in the gallery (as {@link #rank} measures it),
+     * or, with a gallery too small to calibrate on, over the picture's own mean similarity.
+     */
+    public double topExcess(float[] picture) {
+        double top = -2, m = 0;
+        for (int t = 0; t < vecs.length; t++) {
+            double s = dot(vecs[t], picture);
+            m += s;
+            top = Math.max(top, sampled >= MIN_SAMPLE ? s - mean[t] : s);
+        }
+        return sampled >= MIN_SAMPLE ? top : top - m / Math.max(1, vecs.length);
+    }
+
     /**
      * The words for this picture, best first (at most {@link #MAX}): {@link #MIN_Z} above a typical picture of the
      * gallery, by their excess over it, while that is at least {@link #RELATIVE} of the best word's — none when

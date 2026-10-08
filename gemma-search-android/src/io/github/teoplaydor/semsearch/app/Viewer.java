@@ -56,6 +56,13 @@ final class Viewer extends FrameLayout {
 
         /** Closes the viewer and searches for this text. */
         void searchFor(String query);
+
+        /** Hiding of 18+ is on: a photo can be hidden by hand, a hidden one shown. */
+        boolean hidingOn();
+
+        boolean isHidden(IndexStore.Item it);
+
+        void setHidden(IndexStore.Item it, boolean hide);
     }
 
     private final Host host;
@@ -326,6 +333,15 @@ final class Viewer extends FrameLayout {
                     else tagsBox.setVisibility(GONE);
                 }
             });
+            if (host.hidingOn()) {
+                final boolean hidden = host.isHidden(it);
+                action(hidden ? Icon.SHOW : Icon.HIDE, hidden ? "Вернуть" : "Скрыть", new Runnable() {
+                    @Override
+                    public void run() {
+                        host.setHidden(it, !hidden);
+                    }
+                });
+            }
             action(Icon.OPEN, "Открыть в…", new Runnable() {
                 @Override
                 public void run() {

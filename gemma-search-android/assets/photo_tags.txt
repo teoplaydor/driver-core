@@ -21,6 +21,8 @@ face	лицо
 smile	улыбка
 hands	руки
 group photo	групповое фото
+swimsuit	купальник
+shirtless man	мужчина без футболки
 # животные
 dog	собака
 puppy	щенок

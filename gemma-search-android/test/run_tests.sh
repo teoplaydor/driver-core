@@ -53,6 +53,7 @@ java -Dfile.encoding=UTF-8 -cp "$T/cls" StemmerParityTest "$T/stem-cases.tsv"
 java -Dfile.encoding=UTF-8 -cp "$T/cls" QueryBridgeTest assets/ru_en_lexicon.txt
 java -Dfile.encoding=UTF-8 -Dstdout.encoding=UTF-8 -cp "$T/cls" PhotoTagsTest assets/photo_tags.txt "$T"
 java -Dfile.encoding=UTF-8 -Dstdout.encoding=UTF-8 -cp "$T/cls" AlbumsTest assets/photo_tags.txt assets/albums.txt
+java -Dfile.encoding=UTF-8 -Dstdout.encoding=UTF-8 -cp "$T/cls" AdultFilterTest assets/photo_tags.txt assets/adult.txt
 
 echo "== 2b'. SigLIP 2 (fast photo model) vs transformers.js"
 python3 test/siglip/make_dummy_siglip.py "$T/gemma3/tokenizer.json" "$T/models/siglip-dummy" >/dev/null

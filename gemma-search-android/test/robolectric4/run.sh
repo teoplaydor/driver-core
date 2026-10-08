@@ -2,6 +2,7 @@
 # App tests on Robolectric 4.14 (Android 14 runtime) with native graphics, after ./build.sh:
 #   UiShots         — renders the main screens to build/shots/*.png (real fonts, Skia)
 #   AppFlowTest     — gallery, search, viewer, settings and notes driven through the real Activity
+#   HiddenTest      — hiding 18+: gallery, search, albums, the hidden folder, hiding and showing by hand
 #   AppIndexingTest — MediaStore → decode → embed → SQLite with a stand-in model, Russian bridge
 #   IndexStopTest   — a broken model (the same error file after file, the NPU process gone) stops the run, files unmarked
 #   AutoIndexTest   — background jobs: content triggers on MediaStore, the periodic safety net
@@ -80,7 +81,7 @@ fi
 
 rm -rf build/shots
 TESTS=("$@")
-[ ${#TESTS[@]} -gt 0 ] || TESTS=(UiShots AppFlowTest AppIndexingTest IndexStopTest PipelineTest ViewerTest OpenTimeoutTest AutoIndexTest IdleIndexTest SpeedupsTest)
+[ ${#TESTS[@]} -gt 0 ] || TESTS=(UiShots AppFlowTest AppIndexingTest IndexStopTest PipelineTest ViewerTest HiddenTest OpenTimeoutTest AutoIndexTest IdleIndexTest SpeedupsTest)
 # One JVM per class: Engine is an app-wide singleton.
 for t in "${TESTS[@]}"; do
   echo "-- $t"

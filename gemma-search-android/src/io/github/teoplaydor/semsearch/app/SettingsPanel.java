@@ -34,7 +34,8 @@ final class SettingsPanel extends FrameLayout implements Engine.Listener {
     private TextView modelButton, indexButton, errorButton, deleteButton, fp32Button, reportLink, compareButton, fp32Delete,
             speedButton, liteRtSwitch, liteRtLeave, fp16Delete, liteRtDelete, qnnButton, qnnDelete;
     private ProgressLine modelProgress, indexProgress;
-    private Toggle autoToggle, idleToggle, batteryToggle;
+    private Toggle autoToggle, idleToggle, batteryToggle, adultToggle;
+    private TextView adultLevelValue, hiddenValue, adultNote;
     private View batteryRow;
     private TextView unrestrictedValue;
 
@@ -79,6 +80,7 @@ final class SettingsPanel extends FrameLayout implements Engine.Listener {
         buildIndex();
         buildSpeed();
         buildSearch();
+        buildAdult();
         buildLook();
         TextView about = Ui.text(c, "EmbeddingGemma 2 (Google DeepMind, Apache 2.0) · версия " + BuildInfo.version(c)
                 + "\nВсё считается на телефоне, файлы никуда не отправляются.", 12, Ui.TEXT3, Ui.REGULAR);
@@ -812,6 +814,59 @@ final class SettingsPanel extends FrameLayout implements Engine.Listener {
         });
     }
 
+    private void buildAdult() {
+        Context c = getContext();
+        LinearLayout card = section("18+");
+        adultToggle = new Toggle(c, e.hideAdult());
+        adultToggle.setListener(new Toggle.Listener() {
+            @Override
+            public void changed(boolean on) {
+                adultNote.setText(!on ? "" : e.ready() ? "Проверяю галерею… (в первый раз — до полуминуты)"
+                        : "Проверю галерею, когда загрузится модель");
+                e.setHideAdult(on, adultDone(on));
+                onEngineChanged();
+            }
+        });
+        toggleRow(card, "Скрывать 18+", "откровенные фото и видео не видны в галерее, поиске и альбомах; файлы остаются на телефоне",
+                adultToggle);
+        adultLevelValue = row(card, "Строгость", null, new Runnable() {
+            @Override
+            public void run() {
+                Sheet.choose(root(), "Строгость", new String[]{"Мягко", "Обычно", "Строго"},
+                        new String[]{"только явное", "рекомендуется", "больше скрытого, в том числе обычные фото с открытым телом"},
+                        e.adultLevel(), new Sheet.Choice() {
+                            @Override
+                            public void chosen(int i) {
+                                adultNote.setText(e.ready() ? "Проверяю галерею…" : "Проверю галерею, когда загрузится модель");
+                                e.setAdultLevel(i, adultDone(true));
+                                onEngineChanged();
+                            }
+                        });
+            }
+        });
+        hiddenValue = row(card, "Скрытое", "откроется вместо галереи; вернуть файл — «Вернуть» в просмотре", new Runnable() {
+            @Override
+            public void run() {
+                close();
+                a.showHidden();
+            }
+        });
+        adultNote = note(card);
+    }
+
+    private Engine.Callback<Integer> adultDone(final boolean on) {
+        return new Engine.Callback<Integer>() {
+            @Override
+            public void done(Integer n, Exception err) {
+                if (!on) return;
+                if (err != null) adultNote.setText("Не получилось: " + err.getMessage());
+                else if (e.ready()) adultNote.setText("Скрыто: " + n + ". Модель узнаёт откровенное по смыслу и может ошибаться: лишнее "
+                        + "верните кнопкой «Вернуть» в просмотре, пропущенное скройте кнопкой «Скрыть».");
+                onEngineChanged();
+            }
+        };
+    }
+
     private void buildLook() {
         LinearLayout card = section("Вид");
         sideValue = row(card, "Панель поиска", "фильтры и поиск сбоку, под большим пальцем", new Runnable() {
@@ -904,6 +959,13 @@ final class SettingsPanel extends FrameLayout implements Engine.Listener {
         rowOf(threadsValue).setVisibility(fast ? GONE : VISIBLE);
         rowOf(dimsValue).setVisibility(fast ? GONE : VISIBLE);
         sideValue.setText(a.railSide() == 0 ? "справа" : "слева");
+        boolean adult = e.hideAdult();
+        if (adultToggle.isOn() != adult) adultToggle.setOn(adult, false);
+        rowOf(adultLevelValue).setVisibility(adult ? VISIBLE : GONE);
+        rowOf(hiddenValue).setVisibility(adult ? VISIBLE : GONE);
+        adultNote.setVisibility(adult && adultNote.length() > 0 ? VISIBLE : GONE);
+        adultLevelValue.setText(Engine.ADULT_LEVELS[e.adultLevel()]);
+        if (adult) hiddenValue.setText(String.valueOf(e.hiddenItems().size()));
 
         IndexStore s = e.store();
         if (s != null) {
