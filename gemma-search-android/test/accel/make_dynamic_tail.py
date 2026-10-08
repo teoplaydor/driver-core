@@ -1,6 +1,7 @@
 # The end of EmbeddingGemma 2's vision graph, where shapes are known only when it runs: the real tokens picked
 # from the pooled ones by a mask (NonZero → Gather: hidden_states[pooler_mask]), then the norm before the
-# projection and the projection. QNN builds static shapes only.
+# projection and the projection. QNN builds static shapes only. Before them a Reshape to a shape computed from a
+# Shape, as the export does everywhere: its output looks unknown to shape inference on the raw graph, but it is not.
 # usage: make_dynamic_tail.py <out.onnx>
 import sys
 import numpy as np
@@ -15,7 +16,15 @@ inits = [numpy_helper.from_array((rnd.randn(P, D) * 0.3).astype(np.float32), "w_
          numpy_helper.from_array(np.array(0, np.int64), "i0"),
          numpy_helper.from_array(np.array(1, np.int64), "i1"),
          numpy_helper.from_array(np.array(-1, np.int64), "m1")]
-nodes = [helper.make_node("MatMul", ["pixel_values", "w_in"], ["x"], name="/tail/embed"),
+inits += [numpy_helper.from_array(np.array([0], np.int64), "s0"), numpy_helper.from_array(np.array([2], np.int64), "s2"),
+          numpy_helper.from_array(np.array([-1], np.int64), "minus1v")]
+nodes = [helper.make_node("MatMul", ["pixel_values", "w_in"], ["x0"], name="/tail/embed"),
+         # a shape computed from a shape, as the export does it everywhere: unknown to shape inference on the raw
+         # graph, fixed once constants fold (and in QNN's view)
+         helper.make_node("Shape", ["x0"], ["xs"], name="/tail/shape"),
+         helper.make_node("Slice", ["xs", "s0", "s2"], ["head"], name="/tail/head"),
+         helper.make_node("Concat", ["head", "minus1v"], ["newshape"], name="/tail/newshape", axis=0),
+         helper.make_node("Reshape", ["x0", "newshape"], ["x"], name="/tail/reshape"),
          helper.make_node("Gather", ["pixel_position_ids", "i0"], ["px"], name="/tail/px", axis=2),
          helper.make_node("Equal", ["px", "m1"], ["pad"], name="/tail/pad"),
          helper.make_node("Not", ["pad"], ["valid"], name="/tail/valid"),

@@ -336,27 +336,75 @@ public final class QnnBuild {
     }
 
     /**
-     * Nodes with an output whose shape is known only when the graph runs (after a NonZero: the image's real tokens
-     * selected from the pooled ones, and what follows — the last norm, the projection), with the inputs' sizes
-     * fixed. QNN builds static shapes only; most of its ops refuse such a node, but not all (Reciprocal does not
-     * check), and a part of the graph with such an input or output does not compile.
+     * Nodes with an output whose size is known only when the graph runs: after a NonZero (the image's real tokens
+     * selected from the pooled ones) and what follows — the last norm, the projection. QNN builds static shapes
+     * only; most of its ops refuse such a node, but not all (Reciprocal does not check), and a part of the graph
+     * with such an input or output does not compile.
+     *
+     * <p>Found by the graph's structure, not by ONNX Runtime's shape inference on the raw graph: there most shapes
+     * are computed (Shape → Gather → Concat → Reshape) and unknown until constant folding, which makes them fixed
+     * for fixed inputs. A size depends on the data only where an op's output count does (NonZero, Compress,
+     * Unique, NonMaxSuppression); it passes on through data, and through the inputs that give a shape (Reshape's
+     * target, Expand's, Slice's bounds…) when their values come from such a size. Shape and Size stop it: their
+     * own shape is fixed.
      */
-    public static Set<String> dynamicShapeNodes(List<OnnxPatcher.Node> nodes, Map<String, OnnxPatcher.TensorType> types) {
-        Set<String> out = new LinkedHashSet<String>();
+    public static Set<String> dynamicShapeNodes(List<OnnxPatcher.Node> nodes) {
+        Set<String> sized = new HashSet<String>(), valued = new HashSet<String>(), out = new LinkedHashSet<String>();
         for (OnnxPatcher.Node n : nodes) {
-            if (n.opType.equals("Constant")) continue;
-            for (String o : n.outputs) {
-                OnnxPatcher.TensorType t = types.get(o);
-                if (t == null || t.dims == null) continue;
-                boolean dynamic = false;
-                for (long d : t.dims) dynamic |= d < 0;
-                if (dynamic) {
-                    out.add(n.name);
-                    break;
+            boolean dyn = DATA_SIZED.contains(n.opType), val = false;
+            if (!dyn) {
+                int[] shapeIn = SHAPE_INPUTS.get(n.opType);
+                for (int i = 0; i < n.inputs.size(); i++) {
+                    String in = n.inputs.get(i);
+                    if (in.isEmpty()) continue;
+                    boolean isShape = false;
+                    if (shapeIn != null) for (int k : shapeIn) isShape |= k == i;
+                    if (n.opType.equals("Shape") || n.opType.equals("Size")) {
+                        val |= sized.contains(in) || valued.contains(in);
+                    } else if (sized.contains(in) && !isShape) {
+                        dyn = true;
+                    } else if (isShape && (sized.contains(in) || valued.contains(in))) {
+                        dyn = true;
+                    } else if (valued.contains(in)) {
+                        val = true;
+                    }
                 }
+            }
+            if (dyn) {
+                sized.addAll(n.outputs);
+                out.add(n.name);
+            } else if (val) {
+                valued.addAll(n.outputs);
             }
         }
         return out;
+    }
+
+    /** Ops whose output size depends on the values of their input. */
+    private static final Set<String> DATA_SIZED = new HashSet<String>(java.util.Arrays.asList("NonZero", "Compress", "Unique",
+            "NonMaxSuppression"));
+    /** Inputs that give an op's output shape by their values. */
+    private static final Map<String, int[]> SHAPE_INPUTS = new HashMap<String, int[]>();
+
+    static {
+        SHAPE_INPUTS.put("Reshape", new int[]{1});
+        SHAPE_INPUTS.put("Expand", new int[]{1});
+        SHAPE_INPUTS.put("Tile", new int[]{1});
+        SHAPE_INPUTS.put("Range", new int[]{0, 1, 2});
+        SHAPE_INPUTS.put("ConstantOfShape", new int[]{0});
+        SHAPE_INPUTS.put("Slice", new int[]{1, 2, 3, 4});
+        SHAPE_INPUTS.put("Pad", new int[]{1});
+        SHAPE_INPUTS.put("Resize", new int[]{2, 3});
+        SHAPE_INPUTS.put("Upsample", new int[]{1});
+        SHAPE_INPUTS.put("TopK", new int[]{1});
+        SHAPE_INPUTS.put("Split", new int[]{1});
+        SHAPE_INPUTS.put("OneHot", new int[]{1});
+        SHAPE_INPUTS.put("Squeeze", new int[]{1});
+        SHAPE_INPUTS.put("Unsqueeze", new int[]{1});
+        for (String r : new String[]{"ReduceMax", "ReduceMin", "ReduceMean", "ReduceSum", "ReduceProd", "ReduceL1", "ReduceL2",
+                "ReduceLogSum", "ReduceLogSumExp", "ReduceSumSquare"}) {
+            SHAPE_INPUTS.put(r, new int[]{1});
+        }
     }
 
     private static final java.util.regex.Pattern DYNAMIC =

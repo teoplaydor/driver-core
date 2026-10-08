@@ -304,7 +304,7 @@ public final class NpuService extends Service {
         List<OnnxPatcher.Node> nodes = OnnxPatcher.nodes(graph, new HashMap<String, Long>());
         // shapes known only when the graph runs (the real tokens picked after pooling, and what follows): QNN
         // builds static shapes only
-        Set<String> dynamic = QnnBuild.dynamicShapeNodes(nodes, types);
+        Set<String> dynamic = QnnBuild.dynamicShapeNodes(nodes);
         dynamic.removeAll(start);
         if (!dynamic.isEmpty()) {
             start.addAll(dynamic);
@@ -366,7 +366,10 @@ public final class NpuService extends Service {
             }
             try {
                 OrtSession s = rounds(patches, source, cpu, borders, deepFirst, pixels, positions, patchDim, want, rep, way);
-                if (s != null) return s;
+                if (s != null) {
+                    if (big) writeText(note(patches, WAY), String.valueOf(way)); // the next compilation of this size starts here
+                    return s;
+                }
                 start = cpu;
                 start.removeAll(borders);
                 if (!big || way + 1 >= BIG_WAYS.length) break;
@@ -386,7 +389,6 @@ public final class NpuService extends Service {
                 }
             }
             way++;
-            writeText(note(patches, WAY), String.valueOf(way));
         }
         bf16 = false;
         String where;
@@ -417,10 +419,12 @@ public final class NpuService extends Service {
      */
     static final int[][] BIG_WAYS = {{4, 0, 1}, {4, 0, 4}, {8, 0, 8}, {4, 1, 1}};
     /**
-     * The notes of the ways (which one is next, which one is running) are of this order of BIG_WAYS: level 3 first
-     * had the process killed for memory at 2520 patches (3.6 GB), so it went last.
+     * The notes of the ways (which one to start with, which one is running) are of this order of BIG_WAYS: level 3
+     * first had the process killed for memory at 2520 patches (3.6 GB), so it went last. The way to start with
+     * moves on only past a way that killed the process, and to the one that worked: a way that failed otherwise
+     * (in 0.10.3 every way failed for one bug of the app) is tried again next time.
      */
-    private static final String WAY = "way2", ATTEMPT = "attempt2", CRASHES = "crashes2";
+    private static final String WAY = "way3", ATTEMPT = "attempt3", CRASHES = "crashes3";
 
     static String wayText(int[] w) {
         return "внимание по " + w[0] + " частям, " + (w[1] == 1 ? "оптимизация QNN 3" : "оптимизация QNN по умолчанию")

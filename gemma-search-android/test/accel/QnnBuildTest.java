@@ -433,17 +433,28 @@ public class QnnBuildTest {
         OnnxPatcher.forQnn(tailSrc, tail);
         Map<String, OnnxPatcher.TensorType> tt = QnnBuild.tensorTypes(env, tail, dims());
         List<OnnxPatcher.Node> tn = OnnxPatcher.nodes(tail, new HashMap<String, Long>());
-        Set<String> dynamic = QnnBuild.dynamicShapeNodes(tn, tt);
+        Set<String> dynamic = QnnBuild.dynamicShapeNodes(tn);
         Set<String> dynOps = new java.util.TreeSet<String>();
-        boolean reciprocal = false, embed = false;
+        boolean reciprocal = false, before = false;
         for (OnnxPatcher.Node nd : tn) {
             if (!dynamic.contains(nd.name)) continue;
             dynOps.add(nd.opType);
             reciprocal |= nd.opType.equals("Reciprocal");
-            embed |= nd.name.startsWith("/tail/embed");
+            before |= nd.name.startsWith("/tail/embed") || nd.name.startsWith("/tail/reshape") || nd.name.startsWith("/tail/shape");
         }
-        check(reciprocal && !embed && dynamic.size() >= 14 && dynOps.contains("MatMul") && dynOps.contains("Gather") && dynOps.contains("NonZero"),
-                "shapes known only when it runs: " + dynamic.size() + " nodes " + dynOps + ", not the embedding before the selection");
+        check(reciprocal && !before && dynamic.size() >= 14 && dynOps.contains("MatMul") && dynOps.contains("Gather") && dynOps.contains("NonZero"),
+                "sizes known only when it runs: " + dynamic.size() + " nodes " + dynOps + ", none before the selection");
+        // the trap of 0.10.3: on the raw graph shape inference leaves the computed Reshape's shape unknown (in the real
+        // model nearly every tensor) — taken for a dynamic size, the whole model went to the CPU
+        OnnxPatcher.TensorType reshaped = tt.get("x");
+        boolean unknownRaw = reshaped == null || reshaped.dims == null;
+        for (int i = 0; reshaped != null && reshaped.dims != null && i < reshaped.dims.length; i++) unknownRaw |= reshaped.dims[i] < 0;
+        check(unknownRaw, "the computed Reshape looks unknown to shape inference on the raw graph (" + reshaped + "), and is not taken for dynamic");
+        Set<String> g4dynamic = QnnBuild.dynamicShapeNodes(gn);
+        check(g4dynamic.size() == 1 && g4dynamic.iterator().next().startsWith("/block/nz_N")
+                        && QnnBuild.dynamicShapeNodes(nodes).isEmpty(),
+                "the Gemma 4 block: only NonZero's own size is dynamic (its count, through Shape, is not): " + g4dynamic
+                        + "; the attention test graph: none");
         Set<String> tailCpu = new LinkedHashSet<String>(dynamic);
         tailCpu.addAll(QnnBuild.positionOnlyNodes(tn, tt, OnnxPatcher.inputDims(tail).keySet()));
         File tailMoved = new File(dir, "tail.qnn.r5.cpu.onnx");
