@@ -71,8 +71,16 @@ public final class QnnBuild {
         long deadline = npu.nowMs() + budgetMs;
         List<OnnxPatcher.Node> nodes = OnnxPatcher.nodes(graph, new HashMap<String, Long>());
         Set<String> known = new HashSet<String>();
-        for (OnnxPatcher.Node n : nodes) known.add(n.name);
-        for (String c : cpuStart) if (known.contains(c)) out.cpu.add(c);
+        // a list from an older rewrite of the graph: the same nodes, other tokens
+        Map<String, String> byBareName = new HashMap<String, String>();
+        for (OnnxPatcher.Node n : nodes) {
+            known.add(n.name);
+            byBareName.put(bare(n.name), n.name);
+        }
+        for (String c : cpuStart) {
+            if (known.contains(c)) out.cpu.add(c);
+            else if (byBareName.containsKey(bare(c))) out.cpu.add(byBareName.get(bare(c)));
+        }
         File variant = new File(graph.getParentFile(), graph.getName().replace(".onnx", "") + ".cpu.onnx");
         Map<String, OnnxPatcher.TensorType> types = null;
         Map<String, Integer> cpuOps = new LinkedHashMap<String, Integer>();
@@ -160,12 +168,96 @@ public final class QnnBuild {
         return out;
     }
 
+    /** A node's name without its unique token (OnnxPatcher.forQnn). */
+    static String bare(String name) {
+        return name.replaceFirst("_N\\d+N$", "");
+    }
+
     private static String ops(Map<String, Integer> m) {
         StringBuilder sb = new StringBuilder();
         for (Map.Entry<String, Integer> e : m.entrySet()) {
             sb.append(sb.length() > 0 ? ", " : "").append(e.getKey()).append(" ×").append(e.getValue());
         }
         return sb.toString();
+    }
+
+    /**
+     * Where the NPU's result goes wrong, from the largest and mean magnitude of every watched tensor ({max, mean})
+     * on the NPU and on the CPU (OnnxPatcher.withRanges), in graph order: the first tensor that is infinite or
+     * NaN on the NPU, with the node that makes it and its inputs on both — or, without one, the first whose mean
+     * magnitude is off by more than 10% — and the tensors that leave fp16's range even in fp32.
+     */
+    public static String compareRanges(List<String> order, Map<String, float[]> cpu, Map<String, float[]> npu,
+                                       List<OnnxPatcher.Node> nodes, Map<String, OnnxPatcher.TensorType> types) {
+        Map<String, OnnxPatcher.Node> producer = new HashMap<String, OnnxPatcher.Node>();
+        for (OnnxPatcher.Node n : nodes) for (String o : n.outputs) producer.put(o, n);
+        StringBuilder sb = new StringBuilder();
+        String bad = null, off = null;
+        for (String t : order) {
+            float[] n = npu.get(t), c = cpu.get(t);
+            if (n == null || c == null) continue;
+            if (bad == null && !(finite(n[0]) && finite(n[1]))) bad = t;
+            if (off == null && finite(c[1]) && Math.abs(n[1] - c[1]) > 0.1 * Math.max(Math.abs(c[1]), 1e-3)) off = t;
+        }
+        String first = bad != null ? bad : off;
+        if (first == null) {
+            sb.append("NPU и процессор совпадают на всех ").append(order.size()).append(" проверенных тензорах");
+        } else {
+            sb.append(bad != null ? "на NPU первым портится " : "первое расхождение NPU с процессором (больше 10%): ").append(first)
+                    .append(" — NPU ").append(range(npu.get(first))).append(", процессор ").append(range(cpu.get(first)));
+            OnnxPatcher.Node p = producer.get(first);
+            if (p != null) {
+                sb.append("\n  его делает ").append(describe(p, types));
+                for (String in : p.inputs) {
+                    if (in.isEmpty()) continue;
+                    sb.append("\n  вход ").append(in).append(": NPU ").append(npu.containsKey(in) ? range(npu.get(in)) : "—")
+                            .append(", процессор ").append(cpu.containsKey(in) ? range(cpu.get(in)) : "—");
+                }
+            }
+        }
+        List<String> over = new ArrayList<String>();
+        for (String t : order) {
+            float[] c = cpu.get(t);
+            if (c != null && c[0] > 65504f) over.add(t + " (" + String.format(java.util.Locale.ROOT, "%.3g", c[0]) + ")");
+        }
+        sb.append("\n  за пределы fp16 (65504) даже на процессоре выходят: ")
+                .append(over.isEmpty() ? "ничего" : over.size() <= 5 ? over.toString() : over.subList(0, 5) + " и ещё " + (over.size() - 5));
+        return sb.toString();
+    }
+
+    /** Float tensors (not constants) in graph order, at most {@code cap} of them, evenly spread. */
+    public static List<String> watchList(List<OnnxPatcher.Node> nodes, Map<String, OnnxPatcher.TensorType> types, int cap) {
+        List<String> watch = new ArrayList<String>();
+        for (OnnxPatcher.Node n : nodes) {
+            if ("Constant".equals(n.opType)) continue;
+            for (String o : n.outputs) {
+                OnnxPatcher.TensorType t = types.get(o);
+                if (t != null && t.elem == OnnxPatcher.TYPE_FLOAT && t.dims.length > 0) watch.add(o);
+            }
+        }
+        if (watch.size() <= cap) return watch;
+        List<String> every = new ArrayList<String>();
+        for (int i = 0; i < cap; i++) every.add(watch.get((int) ((long) i * (watch.size() - 1) / (cap - 1))));
+        return every;
+    }
+
+    /** {max, mean} magnitude of each watched tensor from a run of a graph made by OnnxPatcher.withRanges. */
+    public static Map<String, float[]> readRanges(OrtSession.Result r, List<String> watch) throws Exception {
+        Map<String, float[]> out = new HashMap<String, float[]>();
+        for (String t : watch) {
+            float max = ((ai.onnxruntime.OnnxTensor) r.get(OnnxPatcher.RANGE_MAX + t).get()).getFloatBuffer().get(0);
+            float mean = ((ai.onnxruntime.OnnxTensor) r.get(OnnxPatcher.RANGE_MEAN + t).get()).getFloatBuffer().get(0);
+            out.put(t, new float[]{max, mean});
+        }
+        return out;
+    }
+
+    private static boolean finite(float v) {
+        return !Float.isNaN(v) && !Float.isInfinite(v);
+    }
+
+    private static String range(float[] r) {
+        return r == null ? "—" : String.format(java.util.Locale.ROOT, "max %.4g, среднее %.4g", r[0], r[1]);
     }
 
     /** "Gather name: float[2048,768], int64[1,630] → float[1,630,768] (axis=0)". */

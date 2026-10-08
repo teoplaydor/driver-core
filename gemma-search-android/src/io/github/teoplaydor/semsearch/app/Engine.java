@@ -1504,9 +1504,17 @@ public final class Engine {
         File graph = qnnGraph(fp32);
         if (!graph.exists() || graph.lastModified() < fp32.lastModified()) {
             // a graph from an older rewrite (and what was compiled from it) goes
-            String base = fp32.getName().replace(".onnx", ".qnn.");
+            String base = fp32.getName().replace(".onnx", ".qnn."), now = graph.getName().replace(".onnx", "");
             File[] old = fp32.getParentFile().listFiles();
-            if (old != null) for (File f : old) if (f.getName().startsWith(base)) f.delete();
+            if (old != null) {
+                for (File f : old) {
+                    if (!f.getName().startsWith(base)) continue;
+                    // the nodes an older graph kept on the CPU are worth trying first (QnnBuild matches them by name)
+                    java.util.regex.Matcher m = java.util.regex.Pattern.compile("\\.(p\\d+_cpu\\.txt)$").matcher(f.getName());
+                    if (m.find() && !f.getName().startsWith(now + ".")) f.renameTo(new File(f.getParentFile(), now + "." + m.group(1)));
+                    else f.delete();
+                }
+            }
             OnnxPatcher.forQnn(fp32, graph);
         }
         File text = graphFile(plan.textModel, true);
@@ -1519,9 +1527,26 @@ public final class Engine {
         }
     }
 
-    /** The vision graph rewritten for QNN; the "r" number changes with the rewrite (r2: unique node names). */
+    /**
+     * The vision graph rewritten for QNN; the "r" number changes with the rewrite (r2: unique node names; r3:
+     * RMS norm and constants safe in fp16).
+     */
     private static File qnnGraph(File fp32) {
-        return new File(fp32.getParentFile(), fp32.getName().replace(".onnx", ".qnn.r2.onnx"));
+        return new File(fp32.getParentFile(), fp32.getName().replace(".onnx", ".qnn.r3.onnx"));
+    }
+
+    /** Where the NPU's result differs from the CPU's (NpuService.scan), for the last image it ran. */
+    private String scanQnn(ModelConfig cfg, HfRepo.Plan plan, int budget) {
+        NpuVision v = null;
+        try {
+            v = new NpuVision(ctx, qnn().libDir(), qnnGraph(new File(modelDir, plan.accelVision)));
+            int pool = Math.max(1, cfg.image.poolingKernelSize);
+            return v.scan(budget * pool * pool, cfg.image.patchSize * cfg.image.patchSize * 3);
+        } catch (Exception e) {
+            return "не вышло: " + e.getMessage();
+        } finally {
+            if (v != null) v.close();
+        }
     }
 
     /** Where the NPU graph's nodes run for {@code budget} tokens (profiled in the NPU process). */
@@ -1864,7 +1889,7 @@ public final class Engine {
                     double bestMs = Double.MAX_VALUE, offerMs = Double.MAX_VALUE, lrtBestMs = Double.MAX_VALUE;
                     float offerCos = 0, lrtBestCos = 0;
                     List<int[]> okCands = new ArrayList<int[]>();
-                    boolean qnnMeasured = false;
+                    boolean qnnMeasured = false, qnnWrong = false;
                     List<Double> okMs = new ArrayList<Double>();
                     int step = 0;
                     for (int phase = 0; phase < 3; phase++) {
@@ -1905,6 +1930,7 @@ public final class Engine {
                             }
                             if (reference == null) reference = m.emb;
                             boolean ok = m.cos >= 0.98f;
+                            if (isQnn(c[0]) && phase == 0 && !ok) qnnWrong = true;
                             // LiteRT-LM is Google's own quantisation of the model: close, but maybe not close enough
                             // to share an index with the ONNX vectors — then it is offered with a re-index instead
                             boolean ownSpace = !space && isLiteRt(c[0]);
@@ -2104,6 +2130,11 @@ public final class Engine {
                         status = "Смотрю, что NPU взял на себя…";
                         notifyChanged();
                         rep.append("\n\nNPU Snapdragon (").append(budget).append(" токенов):\n").append(profileQnn(cfg, plan, budget));
+                        if (qnnWrong) {
+                            status = "Ищу, где NPU портит результат (сборка с проверками, до нескольких минут)…";
+                            notifyChanged();
+                            rep.append("\nГде NPU портит результат: ").append(scanQnn(cfg, plan, budget));
+                        }
                     }
                     try {
                         // how the vision encoder computes attention (the cost that grows quadratically with detail)

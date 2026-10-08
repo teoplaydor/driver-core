@@ -31,7 +31,10 @@ import io.github.teoplaydor.semsearch.core.QnnLog;
  *     describes the node with its types and shapes;</li>
  * <li>QNN names nothing: the tiny graph compiles, a bisection over truncated graphs finds the node;</li>
  * <li>the tiny graph does not compile: the search stops and says the NPU is the problem;</li>
- * <li>a later compilation starts with the nodes kept on the CPU; the time budget ends the search.</li>
+ * <li>a later compilation starts with the nodes kept on the CPU (also with a list from an older rewrite of the
+ *     graph); the time budget ends the search;</li>
+ * <li>where the NPU's result goes wrong: the first tensor that turns NaN, its node and inputs; values beyond
+ *     fp16 even in fp32 are listed.</li>
  * </ul>
  * usage: QnnBuildTest <vit graph rewritten for QNN> <op zoo graph> <work dir>
  */
@@ -129,6 +132,20 @@ public class QnnBuildTest {
         public long nowMs() {
             return clock;
         }
+    }
+
+    /** {max, mean} magnitudes of the watched tensors of the vision graph for one input (CPU). */
+    static Map<String, float[]> ranges(File scan, List<String> watch, float[] px, float[] mask) throws Exception {
+        OrtSession s = load(scan);
+        Map<String, OnnxTensor> in = new HashMap<String, OnnxTensor>();
+        in.put("pixel_values", OnnxTensor.createTensor(env, FloatBuffer.wrap(px), new long[]{1, 24, 32}));
+        in.put("attention_bias", OnnxTensor.createTensor(env, FloatBuffer.wrap(mask), new long[]{1, 1, 24, 24}));
+        OrtSession.Result r = s.run(in);
+        Map<String, float[]> out = QnnBuild.readRanges(r, watch);
+        r.close();
+        for (OnnxTensor t : in.values()) t.close();
+        s.close();
+        return out;
     }
 
     public static void main(String[] args) throws Exception {
@@ -236,6 +253,43 @@ public class QnnBuildTest {
         FakeNpu e = new FakeNpu(oproj1, false, false);
         QnnBuild.Outcome oe = QnnBuild.run(vit, new HashSet<String>(), e, 30000);
         check(!oe.ok && oe.report.contains("кончилось время"), "the time budget ends the search");
+
+        // a list saved for an older rewrite of the graph (other tokens) still applies
+        Set<String> older = new LinkedHashSet<String>();
+        for (String n : oa.cpu) older.add(n.replaceFirst("_N\\d+N$", "_N999N"));
+        FakeNpu f = new FakeNpu(softmax, true, false);
+        QnnBuild.Outcome of = QnnBuild.run(vit, older, f, 15 * 60 * 1000);
+        check(of.ok && f.compiles == 1 && of.cpu.equals(oa.cpu), "a list from an older graph (other tokens) is matched by name: " + f.compiles + " compilation");
+
+        // where the NPU's result goes wrong: magnitudes of every float tensor, on the CPU and a stand-in NPU whose
+        // values turn to NaN from one tensor on
+        Map<String, OnnxPatcher.TensorType> vt = QnnBuild.tensorTypes(env, vit, dims());
+        List<String> watch = QnnBuild.watchList(nodes, vt, 600);
+        File scan = new File(dir, "vit.scan.onnx");
+        OnnxPatcher.withRanges(vit, scan, watch);
+        Map<String, float[]> cpuR = ranges(scan, watch, px, mask);
+        float[] big = new float[px.length];
+        for (int i = 0; i < big.length; i++) big[i] = px[i] * 100000;
+        Map<String, float[]> bigR = ranges(scan, watch, big, mask);
+        String broken = null;
+        for (String t : watch) if (t.contains("layers.1/post_layernorm/rms")) broken = t;
+        Map<String, float[]> npuR = new HashMap<String, float[]>();
+        boolean after = false;
+        for (String t : watch) {
+            after |= t.equals(broken);
+            npuR.put(t, after ? new float[]{Float.NaN, Float.NaN} : cpuR.get(t).clone());
+        }
+        check(watch.size() > 50 && cpuR.size() == watch.size() && cpuR.get(watch.get(0))[0] > 0, watch.size() + " tensors watched, all read back");
+        String cmp = QnnBuild.compareRanges(watch, cpuR, npuR, nodes, vt);
+        System.out.println("  " + cmp.replace("\n", "\n  "));
+        check(cmp.startsWith("на NPU первым портится " + broken + " — NPU max NaN") && cmp.contains("его делает Sqrt ")
+                && cmp.contains("вход ") && cmp.contains("за пределы fp16 (65504) даже на процессоре выходят: ничего"),
+                "the first NaN tensor, its node and inputs");
+        String same = QnnBuild.compareRanges(watch, cpuR, cpuR, nodes, vt);
+        check(same.startsWith("NPU и процессор совпадают на всех " + watch.size()), "no difference: says so");
+        String over = QnnBuild.compareRanges(watch, bigR, bigR, nodes, vt);
+        check(over.contains("за пределы fp16 (65504) даже на процессоре выходят: [qnn0_/encoder/layers.0/input_layernorm/abs"),
+                "values beyond fp16 even in fp32 are listed: " + over.substring(over.indexOf("за пределы")));
 
         if (bad > 0) {
             System.out.println(bad + " FAILED");

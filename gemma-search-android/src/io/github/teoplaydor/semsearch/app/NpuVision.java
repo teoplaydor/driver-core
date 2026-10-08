@@ -183,6 +183,20 @@ final class NpuVision implements VisionRunner {
         return s;
     }
 
+    /** Where the NPU's result goes wrong, for the last run's image (NpuService.scan). */
+    String scan(final int patches, final int patchDim) throws IOException {
+        Parcel reply = call(NpuService.SCAN, 1800, new Writer() {
+            @Override
+            public void write(Parcel p) {
+                p.writeInt(patches);
+                p.writeInt(patchDim);
+            }
+        });
+        String s = reply.readString();
+        reply.recycle();
+        return s;
+    }
+
     @Override
     public synchronized void close() {
         try {

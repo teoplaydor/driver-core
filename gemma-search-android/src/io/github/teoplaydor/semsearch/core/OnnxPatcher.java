@@ -174,15 +174,19 @@ public final class OnnxPatcher {
      * <ul>
      * <li>attention becomes Reshape/Transpose → MatMul(Q, Kᵀ) → ×scale (+ mask, floored to −60000 for fp16)
      *     → Softmax → MatMul(V) → Transpose/Reshape (scale = 1/√head when the node has none);</li>
-     * <li>RMS normalisation becomes X/4 → mean of squares → +ε/16 → √ → divide → ×weight — the same values,
-     *     but the squares of X/4 stay inside fp16 (the NPU computes in fp16) for |X| up to ~1000.</li>
+     * <li>RMS normalisation is computed on X divided by its largest magnitude (per vector): the squares stay
+     *     within 1, so they cannot overflow fp16 (the NPU computes in fp16), and ε enters as (√ε / scale)², since
+     *     ε itself (1e-6) is below fp16's normal range and the NPU flushes such numbers to zero — a zero vector
+     *     (padding) then gave 0/0 = NaN. The same values in exact arithmetic; a zero vector stays zero.</li>
+     * <li>float constants beyond fp16's range (masks filled with −3.4e38: −∞ in fp16, and 0 × −∞ = NaN) are
+     *     brought to ±60000, and tiny nonzero ones (an ε) up to fp16's smallest normal number.</li>
      * </ul>
      * Everything else is copied as is. Initializers stay in the external data file next to the original.
      * Every node's name gets a token unique in the graph ({@code _N12N}): ONNX Runtime assigns nodes to an
      * execution provider by substrings of their names (session.name_based_layer_assignment), and a token cannot
      * be part of another one, so a node can be kept off the NPU exactly.
      *
-     * @return {attention nodes, normalisation nodes} rewritten
+     * @return {attention nodes, normalisation nodes, constants brought into fp16's range} rewritten
      */
     public static int[] forQnn(File in, File out) throws IOException {
         java.util.Map<String, Long> opsets = new java.util.HashMap<String, Long>();
@@ -215,12 +219,12 @@ public final class OnnxPatcher {
         }
         if (out.exists() && !out.delete()) throw new IOException("cannot replace " + out);
         if (!tmp.renameTo(out)) throw new IOException("cannot write " + out);
-        return new int[]{q.attention, q.norms};
+        return new int[]{q.attention, q.norms, q.clamped};
     }
 
     private static final class QnnRewrite {
         final long opset;
-        int attention, norms;
+        int attention, norms, clamped;
         final java.util.Set<String> constants = new java.util.HashSet<String>();
         ByteArrayOutputStream out;
         int named;
@@ -256,6 +260,17 @@ public final class OnnxPatcher {
                 int start = r.pos;
                 long key = r.varint();
                 int field = (int) (key >>> 3), wire = (int) (key & 7);
+                if (field == 5 && wire == 2) {
+                    // an initializer: small ones stored in the file are checked for fp16's range
+                    int len = (int) r.varint();
+                    byte[] t = new byte[len];
+                    System.arraycopy(b, r.pos, t, 0, len);
+                    r.pos += len;
+                    byte[] c = clampTensor(t);
+                    if (c != null) clamped++;
+                    writeLenField(out, 5, c != null ? c : t);
+                    continue;
+                }
                 if (field != 1 || wire != 2) {
                     r.skip(wire);
                     out.write(b, start, r.pos - start);
@@ -266,6 +281,7 @@ public final class OnnxPatcher {
                 System.arraycopy(b, r.pos, raw, 0, len);
                 r.pos += len;
                 Node n = parseNode(raw);
+                if ("Constant".equals(n.opType)) raw = clampConstant(raw);
                 if ("MultiHeadAttention".equals(n.opType) && "com.microsoft".equals(n.domain)) {
                     attention(n, attributes(raw));
                 } else if ("SimplifiedLayerNormalization".equals(n.opType)) {
@@ -351,6 +367,43 @@ public final class OnnxPatcher {
                     t + "/out");
         }
 
+        /** A reduction over one axis, keeping it (axes as an input from opset 18, as an attribute before). */
+        private void reduce(String op, String in, String out, long axis) {
+            if (opset >= 18) {
+                emit(op, new String[]{in, constInts("qnn_axes_" + (axis < 0 ? "m" + -axis : String.valueOf(axis)), axis)},
+                        new String[]{out}, out, attrInt("keepdims", 1));
+            } else {
+                emit(op, new String[]{in}, new String[]{out}, out, attrInts("axes", axis), attrInt("keepdims", 1));
+            }
+        }
+
+        /** A Constant node with its float values brought into fp16's range (counted), or as it was. */
+        private byte[] clampConstant(byte[] raw) throws IOException {
+            ByteArrayOutputStream nb = new ByteArrayOutputStream(raw.length);
+            boolean changed = false;
+            Reader r = new Reader(raw, 0, raw.length);
+            while (r.more()) {
+                int s0 = r.pos;
+                long k = r.varint();
+                int f = (int) (k >>> 3), w = (int) (k & 7);
+                if (f != 5 || w != 2) {
+                    r.skip(w);
+                    nb.write(raw, s0, r.pos - s0);
+                    continue;
+                }
+                int len = (int) r.varint();
+                byte[] attr = new byte[len];
+                System.arraycopy(raw, r.pos, attr, 0, len);
+                r.pos += len;
+                byte[] c = clampAttribute(attr);
+                if (c != null) changed = true;
+                writeLenField(nb, 5, c != null ? c : attr);
+            }
+            if (!changed) return raw;
+            clamped++;
+            return nb.toByteArray();
+        }
+
         private void rmsNorm(Node n, java.util.Map<String, Object> attrs) throws IOException {
             if (n.outputs.size() > 1) {
                 for (int i = 1; i < n.outputs.size(); i++) {
@@ -361,20 +414,22 @@ public final class OnnxPatcher {
             float eps = attrs.containsKey("epsilon") ? (Float) attrs.get("epsilon") : 1e-5f;
             String t = "qnn" + norms++ + "_" + (n.name.isEmpty() ? "rms" : n.name.replaceAll("[^A-Za-z0-9_./]", "_"));
             String x = n.inputs.get(0), w = n.inputs.size() > 1 ? n.inputs.get(1) : "";
-            emit("Mul", new String[]{x, constFloat("qnn_quarter", 0.25f)}, new String[]{t + "/x4"}, t + "/x4");
-            emit("Mul", new String[]{t + "/x4", t + "/x4"}, new String[]{t + "/sq"}, t + "/sq");
-            if (opset >= 18) {
-                emit("ReduceMean", new String[]{t + "/sq", constInts("qnn_axes_" + (axis < 0 ? "m" + -axis : String.valueOf(axis)), axis)},
-                        new String[]{t + "/ms"}, t + "/ms", attrInt("keepdims", 1));
-            } else {
-                emit("ReduceMean", new String[]{t + "/sq"}, new String[]{t + "/ms"}, t + "/ms", attrInts("axes", axis),
-                        attrInt("keepdims", 1));
-            }
-            emit("Add", new String[]{t + "/ms", constFloat("qnn_eps_" + Float.floatToIntBits(eps), eps / 16f)},
-                    new String[]{t + "/mse"}, t + "/mse");
-            emit("Sqrt", new String[]{t + "/mse"}, new String[]{t + "/rms"}, t + "/rms");
+            emit("Abs", new String[]{x}, new String[]{t + "/abs"}, t + "/abs");
+            reduce("ReduceMax", t + "/abs", t + "/amax", axis);
+            // a zero vector (padding) is divided by this and stays zero
+            emit("Max", new String[]{t + "/amax", constFloat("qnn_scale_floor", 1e-4f)}, new String[]{t + "/s"}, t + "/s");
+            emit("Div", new String[]{x, t + "/s"}, new String[]{t + "/y"}, t + "/y");
+            emit("Mul", new String[]{t + "/y", t + "/y"}, new String[]{t + "/sq"}, t + "/sq");
+            reduce("ReduceMean", t + "/sq", t + "/ms", axis);
+            // ε / s² = (√ε / s)²: √ε is a normal fp16 number, ε is not
+            float rootEps = (float) Math.sqrt(eps);
+            emit("Div", new String[]{constFloat("qnn_sqrt_eps_" + Float.floatToIntBits(rootEps), rootEps), t + "/s"},
+                    new String[]{t + "/r"}, t + "/r");
+            emit("Mul", new String[]{t + "/r", t + "/r"}, new String[]{t + "/r2"}, t + "/r2");
+            emit("Add", new String[]{t + "/ms", t + "/r2"}, new String[]{t + "/den"}, t + "/den");
+            emit("Sqrt", new String[]{t + "/den"}, new String[]{t + "/rms"}, t + "/rms");
             String normed = w.isEmpty() ? n.outputs.get(0) : t + "/normed";
-            emit("Div", new String[]{t + "/x4", t + "/rms"}, new String[]{normed}, normed);
+            emit("Div", new String[]{t + "/y", t + "/rms"}, new String[]{normed}, normed);
             if (!w.isEmpty()) emit("Mul", new String[]{normed, w}, new String[]{n.outputs.get(0)}, t + "/out");
         }
     }
@@ -442,6 +497,133 @@ public final class OnnxPatcher {
         writeLenField(vi, 1, name.getBytes(UTF8));
         writeLenField(vi, 2, type.toByteArray());
         return vi.toByteArray();
+    }
+
+    /** fp16's largest finite value; constants beyond it become ±CLAMP. */
+    private static final float FP16_MAX = 65504f, CLAMP = 60000f;
+    /** fp16's smallest normal number: tiny nonzero constants are raised to it (the NPU flushes smaller ones to 0). */
+    private static final float FP16_MIN_NORMAL = 6.1035156e-5f;
+
+    private static float fp16Range(float v, boolean small) {
+        if (Float.isNaN(v)) return v;
+        if (v > FP16_MAX) return CLAMP;
+        if (v < -FP16_MAX) return -CLAMP;
+        if (small && v != 0f && Math.abs(v) < FP16_MIN_NORMAL) return Math.copySign(FP16_MIN_NORMAL, v);
+        return v;
+    }
+
+    /**
+     * A float TensorProto stored in the file (raw_data or float_data, up to 4096 values) with its values brought
+     * into fp16's range — tiny ones too when it holds at most 16 (an ε); null when nothing changed.
+     */
+    static byte[] clampTensor(byte[] t) throws IOException {
+        int type = 0;
+        byte[] data = null;
+        boolean packed = false;
+        java.util.List<Float> loose = new java.util.ArrayList<Float>();
+        Reader r = new Reader(t, 0, t.length);
+        while (r.more()) {
+            long k = r.varint();
+            int f = (int) (k >>> 3), w = (int) (k & 7);
+            if (f == 2 && w == 0) {
+                type = (int) r.varint();
+            } else if ((f == 9 || f == 4) && w == 2) {
+                int len = (int) r.varint();
+                data = new byte[len];
+                System.arraycopy(t, r.pos, data, 0, len);
+                r.pos += len;
+                packed = f == 4;
+            } else if (f == 4 && w == 5) {
+                loose.add(Float.intBitsToFloat((t[r.pos] & 0xff) | (t[r.pos + 1] & 0xff) << 8 | (t[r.pos + 2] & 0xff) << 16
+                        | (t[r.pos + 3] & 0xff) << 24));
+                r.pos += 4;
+            } else if (f == 13) {
+                return null; // external data: weights, not constants
+            } else {
+                r.skip(w);
+            }
+        }
+        if (type != TYPE_FLOAT) return null;
+        float[] v;
+        if (data != null) {
+            java.nio.FloatBuffer fb = java.nio.ByteBuffer.wrap(data).order(java.nio.ByteOrder.LITTLE_ENDIAN).asFloatBuffer();
+            v = new float[fb.remaining()];
+            fb.get(v);
+        } else {
+            v = new float[loose.size()];
+            for (int i = 0; i < v.length; i++) v[i] = loose.get(i);
+        }
+        if (v.length == 0 || v.length > 4096) return null;
+        boolean changed = false;
+        for (int i = 0; i < v.length; i++) {
+            float c = fp16Range(v[i], v.length <= 16);
+            if (Float.floatToIntBits(c) != Float.floatToIntBits(v[i])) {
+                v[i] = c;
+                changed = true;
+            }
+        }
+        if (!changed) return null;
+        ByteArrayOutputStream out = new ByteArrayOutputStream(t.length);
+        r = new Reader(t, 0, t.length);
+        while (r.more()) {
+            int s0 = r.pos;
+            long k = r.varint();
+            int f = (int) (k >>> 3), w = (int) (k & 7);
+            r.skip(w);
+            if (f == 9 || f == 4) continue;
+            out.write(t, s0, r.pos - s0);
+        }
+        java.nio.ByteBuffer raw = java.nio.ByteBuffer.allocate(4 * v.length).order(java.nio.ByteOrder.LITTLE_ENDIAN);
+        for (float x : v) raw.putFloat(x);
+        writeLenField(out, 9, raw.array());
+        return out.toByteArray();
+    }
+
+    /** A Constant's value / value_float / value_floats attribute brought into fp16's range; null if unchanged. */
+    static byte[] clampAttribute(byte[] a) throws IOException {
+        ByteArrayOutputStream out = new ByteArrayOutputStream(a.length);
+        boolean changed = false;
+        Reader r = new Reader(a, 0, a.length);
+        while (r.more()) {
+            int s0 = r.pos;
+            long k = r.varint();
+            int f = (int) (k >>> 3), w = (int) (k & 7);
+            if (f == 5 && w == 2) {
+                int len = (int) r.varint();
+                byte[] t = new byte[len];
+                System.arraycopy(a, r.pos, t, 0, len);
+                r.pos += len;
+                byte[] c = clampTensor(t);
+                if (c != null) changed = true;
+                writeLenField(out, 5, c != null ? c : t);
+            } else if (f == 2 && w == 5) {
+                int bits = (a[r.pos] & 0xff) | (a[r.pos + 1] & 0xff) << 8 | (a[r.pos + 2] & 0xff) << 16 | (a[r.pos + 3] & 0xff) << 24;
+                r.pos += 4;
+                float v = Float.intBitsToFloat(bits), c = fp16Range(v, true);
+                if (Float.floatToIntBits(c) != bits) changed = true;
+                writeVarint(out, (2L << 3) | 5);
+                int cb = Float.floatToIntBits(c);
+                for (int i = 0; i < 4; i++) out.write((cb >>> (8 * i)) & 0xff);
+            } else if (f == 7 && w == 2) {
+                int len = (int) r.varint();
+                java.nio.FloatBuffer fb = java.nio.ByteBuffer.wrap(a, r.pos, len).order(java.nio.ByteOrder.LITTLE_ENDIAN).asFloatBuffer();
+                r.pos += len;
+                float[] v = new float[fb.remaining()];
+                fb.get(v);
+                for (int i = 0; i < v.length; i++) {
+                    float c = fp16Range(v[i], v.length <= 16);
+                    if (Float.floatToIntBits(c) != Float.floatToIntBits(v[i])) changed = true;
+                    v[i] = c;
+                }
+                java.nio.ByteBuffer raw = java.nio.ByteBuffer.allocate(4 * v.length).order(java.nio.ByteOrder.LITTLE_ENDIAN);
+                for (float x : v) raw.putFloat(x);
+                writeLenField(out, 7, raw.array());
+            } else {
+                r.skip(w);
+                out.write(a, s0, r.pos - s0);
+            }
+        }
+        return changed ? out.toByteArray() : null;
     }
 
     // ---------------------------------------------------------------- graph edits for the NPU search (QnnBuild)
@@ -545,6 +727,39 @@ public final class OnnxPatcher {
                         vi = v.toByteArray();
                     }
                     writeLenField(g, 12, vi);
+                }
+                return g.toByteArray();
+            }
+        });
+    }
+
+    public static final String RANGE_MAX = "range_max:", RANGE_MEAN = "range_mean:";
+
+    /**
+     * The graph with, for each of these tensors, its largest and mean magnitude as extra scalar outputs
+     * ({@link #RANGE_MAX} / {@link #RANGE_MEAN} + name): run on the NPU and on the CPU, they show where the NPU's
+     * fp16 first goes to infinity or NaN, and how large the values are there in fp32.
+     */
+    public static void withRanges(File in, File out, final java.util.List<String> tensors) throws IOException {
+        editGraph(in, out, new GraphEdit() {
+            @Override
+            public byte[] apply(byte[] b, int from, int to) throws IOException {
+                ByteArrayOutputStream g = new ByteArrayOutputStream(to - from + 256 * tensors.size());
+                g.write(b, from, to - from);
+                int i = 0;
+                for (String t : tensors) {
+                    String abs = "range_abs_" + i, max = RANGE_MAX + t, mean = RANGE_MEAN + t;
+                    writeLenField(g, 1, node("Abs", "", new String[]{t}, new String[]{abs}, abs, null, 0));
+                    for (String[] r : new String[][]{{"ReduceMax", max}, {"ReduceMean", mean}}) {
+                        byte[] nb = node(r[0], "", new String[]{abs}, new String[]{r[1]}, "range_" + r[0] + "_" + i, "keepdims", 0);
+                        writeLenField(g, 1, nb);
+                    }
+                    for (String o : new String[]{max, mean}) {
+                        ByteArrayOutputStream v = new ByteArrayOutputStream();
+                        writeLenField(v, 1, o.getBytes(UTF8));
+                        writeLenField(g, 12, v.toByteArray());
+                    }
+                    i++;
                 }
                 return g.toByteArray();
             }

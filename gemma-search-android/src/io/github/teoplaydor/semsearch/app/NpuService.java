@@ -50,13 +50,17 @@ import io.github.teoplaydor.semsearch.core.QnnRuntime;
  */
 public final class NpuService extends Service {
     static final String DESCRIPTOR = "io.github.teoplaydor.semsearch.NpuService";
-    static final int INIT = 1, RUN = 2, PROFILE = 3;
+    static final int INIT = 1, RUN = 2, PROFILE = 3, SCAN = 4;
     static final int OK = 0, FAILED = 1;
 
     // per process: Android makes a new service object for every bind after the last unbind, while the process
     // (with the libraries loaded and ONNX Runtime's environment) stays
     private static boolean loaded;
     private static OrtEnvironment env;
+    /** The first image of the last run, for SCAN (compares that run's tensors on the NPU and the CPU). */
+    private static float[] lastPixels;
+    private static long[] lastPositions;
+    private static int lastPatches;
     private String libDir;
     private File graph;
     private final Map<Integer, OrtSession> sessions = new HashMap<Integer, OrtSession>();
@@ -64,7 +68,7 @@ public final class NpuService extends Service {
     private final Binder binder = new Binder() {
         @Override
         protected boolean onTransact(int code, Parcel data, Parcel reply, int flags) throws android.os.RemoteException {
-            if (code < INIT || code > PROFILE) return super.onTransact(code, data, reply, flags);
+            if (code < INIT || code > SCAN) return super.onTransact(code, data, reply, flags);
             data.enforceInterface(DESCRIPTOR);
             try {
                 switch (code) {
@@ -83,7 +87,7 @@ public final class NpuService extends Service {
                     }
                     default: {
                         int patches = data.readInt(), patchDim = data.readInt();
-                        String s = profile(patches, patchDim);
+                        String s = code == PROFILE ? profile(patches, patchDim) : scan(patches, patchDim);
                         reply.writeInt(OK);
                         reply.writeString(s);
                     }
@@ -356,6 +360,11 @@ public final class NpuService extends Service {
                 m.position(4 * pixelCount + 8 * k * patches * 2);
                 m.slice().order(ByteOrder.nativeOrder()).asLongBuffer().get(positions);
                 float[] f = encode(s, pixels, positions, patches, patchDim);
+                if (k == 0) {
+                    lastPixels = pixels.clone();
+                    lastPositions = positions.clone();
+                    lastPatches = patches;
+                }
                 feats.add(f);
                 total += f.length;
             }
@@ -373,18 +382,25 @@ public final class NpuService extends Service {
         }
     }
 
-    private float[] encode(OrtSession s, float[] pixels, long[] positions, int patches, int patchDim) throws Exception {
+    private static Map<String, OnnxTensor> inputs(OrtSession s, float[] pixels, long[] positions, int patches, int patchDim)
+            throws Exception {
         Map<String, OnnxTensor> in = new HashMap<String, OnnxTensor>();
-        try {
-            for (String name : s.getInputNames()) {
-                if ("pixel_values".equals(name)) {
-                    in.put(name, OnnxTensor.createTensor(env, FloatBuffer.wrap(pixels), new long[]{1, patches, patchDim}));
-                } else if ("pixel_position_ids".equals(name) || "image_position_ids".equals(name)) {
-                    in.put(name, OnnxTensor.createTensor(env, LongBuffer.wrap(positions), new long[]{1, patches, 2}));
-                } else {
-                    throw new IllegalStateException("unexpected vision encoder input: " + name);
-                }
+        for (String name : s.getInputNames()) {
+            if ("pixel_values".equals(name)) {
+                in.put(name, OnnxTensor.createTensor(env, FloatBuffer.wrap(pixels), new long[]{1, patches, patchDim}));
+            } else if ("pixel_position_ids".equals(name) || "image_position_ids".equals(name)) {
+                in.put(name, OnnxTensor.createTensor(env, LongBuffer.wrap(positions), new long[]{1, patches, 2}));
+            } else {
+                for (OnnxTensor t : in.values()) t.close();
+                throw new IllegalStateException("unexpected vision encoder input: " + name);
             }
+        }
+        return in;
+    }
+
+    private float[] encode(OrtSession s, float[] pixels, long[] positions, int patches, int patchDim) throws Exception {
+        Map<String, OnnxTensor> in = inputs(s, pixels, positions, patches, patchDim);
+        try {
             OrtSession.Result r = s.run(in);
             try {
                 OnnxTensor t = (OnnxTensor) (r.get("image_features").isPresent() ? r.get("image_features").get() : r.get(0));
@@ -398,6 +414,72 @@ public final class NpuService extends Service {
         } finally {
             for (OnnxTensor t : in.values()) t.close();
         }
+    }
+
+    /** Tensors watched by SCAN at most (each adds three small nodes to what the NPU compiles). */
+    private static final int SCAN_TENSORS = 600;
+
+    /**
+     * Where the NPU's result goes wrong: the last run's image through a copy of the graph that also returns the
+     * largest and mean magnitude of its float tensors, on the CPU (fp32) and on the NPU (fp16), compared in
+     * graph order (QnnBuild.compareRanges). Nodes kept on the CPU for the NPU stay there here too.
+     */
+    private synchronized String scan(int patches, int patchDim) throws Exception {
+        if (lastPixels == null || lastPatches != patches) throw new IllegalStateException("нет прогона на NPU, не с чем сравнивать");
+        Map<String, Long> d = dims(graph, patches);
+        Map<String, OnnxPatcher.TensorType> types = QnnBuild.tensorTypes(env, graph, d);
+        Set<String> cpu = new LinkedHashSet<String>();
+        for (String l : readText(note(patches, "cpu")).split("\n")) if (!l.trim().isEmpty()) cpu.add(l.trim());
+        String base = graph.getName().replace(".onnx", "");
+        File variant = new File(graph.getParentFile(), base + ".scanbase.onnx"), scanFile = new File(graph.getParentFile(), base + ".scan.onnx");
+        try {
+            File g = graph;
+            if (!cpu.isEmpty()) {
+                OnnxPatcher.keepOnCpu(graph, variant, cpu, types);
+                g = variant;
+            }
+            List<OnnxPatcher.Node> nodes = OnnxPatcher.nodes(g, new HashMap<String, Long>());
+            List<String> watch = QnnBuild.watchList(nodes, types, SCAN_TENSORS);
+            OnnxPatcher.withRanges(g, scanFile, watch);
+            OrtSession.SessionOptions onCpu = new OrtSession.SessionOptions();
+            onCpu.setOptimizationLevel(OrtSession.SessionOptions.OptLevel.BASIC_OPT);
+            for (Map.Entry<String, Long> e : d.entrySet()) onCpu.setSymbolicDimensionValue(e.getKey(), e.getValue());
+            Map<String, float[]> c = ranges(scanFile, onCpu, watch, patches, patchDim);
+            Map<String, float[]> n;
+            try {
+                n = ranges(scanFile, options(scanFile, patches, false, false), watch, patches, patchDim);
+            } catch (Exception e) {
+                return "сравнить не вышло — NPU не собрал граф с проверками: " + e.getMessage();
+            }
+            return QnnBuild.compareRanges(watch, c, n, nodes, types);
+        } finally {
+            variant.delete();
+            scanFile.delete();
+        }
+    }
+
+    /** {max, mean} magnitude of each watched tensor for the last run's image. */
+    private Map<String, float[]> ranges(File model, OrtSession.SessionOptions o, List<String> watch, int patches, int patchDim)
+            throws Exception {
+        Map<String, float[]> out = new HashMap<String, float[]>();
+        OrtSession s = env.createSession(model.getPath(), o);
+        try {
+            Map<String, OnnxTensor> in = inputs(s, lastPixels, lastPositions, patches, patchDim);
+            try {
+                OrtSession.Result r = s.run(in);
+                try {
+                    out = QnnBuild.readRanges(r, watch);
+                } finally {
+                    r.close();
+                }
+            } finally {
+                for (OnnxTensor t : in.values()) t.close();
+            }
+        } finally {
+            s.close();
+            o.close();
+        }
+        return out;
     }
 
     /** One profiled run (from the saved context, so no second compilation): which nodes the NPU took. */
