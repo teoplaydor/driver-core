@@ -25,6 +25,7 @@ import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 import ai.onnxruntime.OnnxTensor;
 import ai.onnxruntime.OrtEnvironment;
@@ -43,8 +44,9 @@ import io.github.teoplaydor.semsearch.core.QnnRuntime;
  *
  * <p>The NPU compiles a graph for fixed shapes: one session per patch count (token budget), batch 1, compiled
  * once and kept as a QNN context next to the graph, so later starts skip the compilation. When QNN cannot
- * compile it, the reasons come from the log (see QnnLog); nodes QNN names as the ones it could not build are
- * kept on the CPU (in every layer) and the compilation is tried again, then with QNN's default optimisation.
+ * compile it, the reasons come from the log (see QnnLog). Nodes QNN names in its errors are kept on the CPU (the
+ * same node in every layer) and the compilation is tried again; when it names none, a tiny graph tells whether
+ * the NPU compiles anything at all, and a bisection over the graph finds the node that breaks it.
  */
 public final class NpuService extends Service {
     static final String DESCRIPTOR = "io.github.teoplaydor.semsearch.NpuService";
@@ -158,12 +160,16 @@ public final class NpuService extends Service {
      * @param deep  QNN's longest graph optimisation (faster runs), else its default
      */
     private OrtSession.SessionOptions options(int patches, String cpu, boolean log, boolean deep) throws Exception {
+        return options(graph, patches, cpu, log, deep);
+    }
+
+    private OrtSession.SessionOptions options(File model, int patches, String cpu, boolean log, boolean deep) throws Exception {
         OrtSession.SessionOptions o = new OrtSession.SessionOptions();
         // basic optimisations only: later fusions would put back ops the NPU cannot run
         o.setOptimizationLevel(OrtSession.SessionOptions.OptLevel.BASIC_OPT);
         o.setIntraOpNumThreads(2);
         o.setSessionLogLevel(log ? OrtLoggingLevel.ORT_LOGGING_LEVEL_INFO : OrtLoggingLevel.ORT_LOGGING_LEVEL_WARNING);
-        for (List<String> dims : OnnxPatcher.inputDims(graph).values()) {
+        for (List<String> dims : OnnxPatcher.inputDims(model).values()) {
             for (int i = 0; i < dims.size() && i < 2; i++) {
                 String d = dims.get(i);
                 if (d.isEmpty() || Character.isDigit(d.charAt(0)) || "?".equals(d)) continue;
@@ -199,17 +205,22 @@ public final class NpuService extends Service {
         return s;
     }
 
+    /** Time for all compilations of one graph, the bisection included. */
+    private static final long COMPILE_BUDGET_MS = 15 * 60 * 1000;
+
     /**
-     * Compiles the graph for the NPU and saves the QNN context. A failed compilation is tried again with the
-     * nodes QNN's errors name kept on the CPU (the same node in every layer), then with QNN's default
-     * optimisation; the error says what QNN said at every attempt.
+     * Compiles the graph for the NPU and saves the QNN context. When QNN cannot build the graph, the nodes its
+     * errors name are kept on the CPU (the same node in every layer) and it is tried again; when it names none,
+     * a tiny graph shows whether the NPU compiles anything at all, and a bisection finds the node that breaks
+     * the graph. The error says what QNN said and what was tried.
      */
     private OrtSession compile(int patches) throws Exception {
         File ctx = context(patches);
+        long deadline = android.os.SystemClock.elapsedRealtime() + COMPILE_BUDGET_MS;
         List<OnnxPatcher.Node> nodes = null;
         LinkedHashSet<String> cpu = new LinkedHashSet<String>();
         Map<String, Integer> cpuOps = new LinkedHashMap<String, Integer>();
-        boolean deep = true;
+        boolean deep = true, canaryChecked = false;
         StringBuilder tries = new StringBuilder();
         for (int attempt = 1; ; attempt++) {
             String what = (deep ? "оптимизация QNN 3" : "оптимизация QNN по умолчанию")
@@ -242,25 +253,109 @@ public final class NpuService extends Service {
                 }
             }
             String msg = failure.getMessage() != null ? failure.getMessage() : failure.toString();
-            tries.append(" — ").append(msg.length() > 160 ? msg.substring(0, 160) + "…" : msg.trim());
+            tries.append(" — ").append(msg.length() > 120 ? msg.substring(0, 120) + "…" : msg.trim());
             boolean graphFailed = msg.contains("finalize QNN graph") || msg.contains("compose Qnn graph");
-            if (graphFailed && attempt < 4) {
+            boolean timeLeft = android.os.SystemClock.elapsedRealtime() < deadline;
+            if (graphFailed && timeLeft && attempt < 8) {
                 if (nodes == null) nodes = OnnxPatcher.nodes(graph, new HashMap<String, Long>());
                 int before = cpu.size();
-                for (OnnxPatcher.Node n : log.failingNodes(nodes)) {
-                    for (String name : QnnLog.inEveryLayer(nodes, n)) {
-                        if (cpu.add(name)) cpuOps.put(n.opType, cpuOps.containsKey(n.opType) ? cpuOps.get(n.opType) + 1 : 1);
+                for (OnnxPatcher.Node n : log.failingNodes(nodes)) keepOnCpu(nodes, n, cpu, cpuOps);
+                if (cpu.size() > before) continue;
+                if (!canaryChecked) {
+                    canaryChecked = true;
+                    String canary = canary();
+                    tries.append("; крошечный граф (MatMul, Add, Softmax): ").append(canary == null ? "собирается" : "не собирается — " + canary);
+                    if (canary != null) {
+                        throw new Exception(msg.trim() + "\n  NPU не собирает даже крошечный граф, дело не в модели: " + canary
+                                + "\n  " + log.summary(8) + "\n  попытки: " + tries);
                     }
                 }
-                if (cpu.size() > before) continue;
+                int culprit = bisect(nodes, cpu, patches, deadline, tries);
+                if (culprit >= 0) {
+                    OnnxPatcher.Node c = nodes.get(culprit);
+                    tries.append(" → ломает узел №").append(culprit + 1).append(" из ").append(nodes.size()).append(": ")
+                            .append(c.opType).append(' ').append(c.name);
+                    keepOnCpu(nodes, c, cpu, cpuOps);
+                    if (cpu.size() > before) continue;
+                }
                 if (deep) {
                     deep = false;
                     continue;
                 }
             }
-            String summary = log.summary(6);
+            String summary = log.summary(10);
             throw new Exception(msg.trim() + (summary.isEmpty() ? "" : "\n  " + summary)
-                    + (attempt == 1 ? "\n  сборка шла " + sec + " с" : "\n  попытки: " + tries));
+                    + (attempt == 1 && tries.indexOf(";") < 0 ? "\n  сборка шла " + sec + " с" : "\n  попытки: " + tries));
+        }
+    }
+
+    /** The node, in every layer, goes to the CPU. */
+    private static void keepOnCpu(List<OnnxPatcher.Node> nodes, OnnxPatcher.Node n, Set<String> cpu, Map<String, Integer> cpuOps) {
+        for (String name : QnnLog.inEveryLayer(nodes, n)) {
+            if (cpu.add(name)) cpuOps.put(n.opType, cpuOps.containsKey(n.opType) ? cpuOps.get(n.opType) + 1 : 1);
+        }
+    }
+
+    /** Whether QNN compiles a tiny float graph (MatMul → Add → Softmax): null if it does, else what it said. */
+    private String canary() {
+        File f = new File(getCacheDir(), "npu-canary.onnx");
+        LogTail tail = null;
+        try {
+            OutputStream out = new FileOutputStream(f);
+            try {
+                out.write(OnnxPatcher.canaryModel());
+            } finally {
+                out.close();
+            }
+            OrtSession.SessionOptions o = options(f, 0, "", true, true);
+            tail = LogTail.start();
+            OrtSession s = env.createSession(f.getPath(), o);
+            QnnLog log = QnnLog.parse(tail != null ? tail.finish() : Collections.<String>emptyList());
+            tail = null;
+            s.close();
+            return log.supported == 0 ? "QNN не взял ни одного узла" : null;
+        } catch (Exception e) {
+            QnnLog log = QnnLog.parse(tail != null ? tail.finish() : Collections.<String>emptyList());
+            String summary = log.summary(6);
+            return e.getMessage() + (summary.isEmpty() ? "" : "\n  " + summary);
+        } finally {
+            f.delete();
+        }
+    }
+
+    /**
+     * Bisection over the graph's nodes in order: QNN may take only the first k (the others, and those already
+     * kept off the NPU, stay on the CPU). Returns the index of the node whose addition breaks the compilation,
+     * or -1 when the time ran out.
+     */
+    private int bisect(final List<OnnxPatcher.Node> nodes, final Set<String> cpu, final int patches, final long deadline,
+                       final StringBuilder tries) {
+        final int[] steps = {0};
+        final long t0 = android.os.SystemClock.elapsedRealtime();
+        try {
+            int c = QnnLog.firstBreaking(nodes.size(), new QnnLog.Probe() {
+                @Override
+                public boolean compiles(int k) throws Exception {
+                    if (android.os.SystemClock.elapsedRealtime() > deadline) throw new java.util.concurrent.TimeoutException();
+                    steps[0]++;
+                    List<String> off = new ArrayList<String>(cpu);
+                    for (int i = k; i < nodes.size(); i++) off.add(nodes.get(i).name);
+                    OrtSession.SessionOptions o = options(patches, QnnLog.cpuAssignment(off), false, false);
+                    o.addConfigEntry("session.disable_prepacking", "1");
+                    try {
+                        env.createSession(graph.getPath(), o).close();
+                        return true;
+                    } catch (Exception e) {
+                        return false;
+                    }
+                }
+            });
+            tries.append("; поиск: ").append(steps[0]).append(" сборок, ")
+                    .append((android.os.SystemClock.elapsedRealtime() - t0 + 500) / 1000).append(" с");
+            return c;
+        } catch (Exception e) {
+            tries.append("; поиск прерван после ").append(steps[0]).append(" сборок — кончилось время");
+            return -1;
         }
     }
 

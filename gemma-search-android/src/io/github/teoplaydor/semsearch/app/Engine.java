@@ -1501,8 +1501,14 @@ public final class Engine {
             throw new java.io.IOException("для NPU Snapdragon нужна полная версия визуального энкодера — «Проверить NPU Snapdragon»");
         }
         if (!qnnInstalled()) throw new java.io.IOException("QNN не скачан — «Проверить NPU Snapdragon» в настройках");
-        File graph = new File(fp32.getParentFile(), fp32.getName().replace(".onnx", ".qnn.onnx"));
-        if (!graph.exists() || graph.lastModified() < fp32.lastModified()) OnnxPatcher.forQnn(fp32, graph);
+        File graph = qnnGraph(fp32);
+        if (!graph.exists() || graph.lastModified() < fp32.lastModified()) {
+            // a graph from an older rewrite (and what was compiled from it) goes
+            String base = fp32.getName().replace(".onnx", ".qnn.");
+            File[] old = fp32.getParentFile().listFiles();
+            if (old != null) for (File f : old) if (f.getName().startsWith(base)) f.delete();
+            OnnxPatcher.forQnn(fp32, graph);
+        }
         File text = graphFile(plan.textModel, true);
         NpuVision vision = new NpuVision(ctx, qnn().libDir(), graph);
         try {
@@ -1513,12 +1519,16 @@ public final class Engine {
         }
     }
 
+    /** The vision graph rewritten for QNN; the "r" number changes with the rewrite (r2: unique node names). */
+    private static File qnnGraph(File fp32) {
+        return new File(fp32.getParentFile(), fp32.getName().replace(".onnx", ".qnn.r2.onnx"));
+    }
+
     /** Where the NPU graph's nodes run for {@code budget} tokens (profiled in the NPU process). */
     private String profileQnn(ModelConfig cfg, HfRepo.Plan plan, int budget) {
         NpuVision v = null;
         try {
-            File fp32 = new File(modelDir, plan.accelVision);
-            File graph = new File(fp32.getParentFile(), fp32.getName().replace(".onnx", ".qnn.onnx"));
+            File graph = qnnGraph(new File(modelDir, plan.accelVision));
             v = new NpuVision(ctx, qnn().libDir(), graph);
             int pool = Math.max(1, cfg.image.poolingKernelSize);
             return v.profile(budget * pool * pool, cfg.image.patchSize * cfg.image.patchSize * 3);
@@ -1878,7 +1888,7 @@ public final class Engine {
                             notifyChanged();
                             mark("подбор ускорения: " + name);
                             if (isQnn(c[0]) && phase == 0) {
-                                status = "NPU Snapdragon: компилирую модель под NPU — в первый раз до нескольких минут (если QNN не справится, ещё попытки)";
+                                status = "NPU Snapdragon: компилирую модель под NPU — в первый раз до нескольких минут, если QNN не справится — до 15 минут поиска";
                                 notifyChanged();
                             }
                             probe(c[0], true);

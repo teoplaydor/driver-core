@@ -27,8 +27,13 @@ public final class QnnLog {
     /** op type → names of the nodes QNN refused, and the first reason given for that op type. */
     public final Map<String, Set<String>> refused = new LinkedHashMap<String, Set<String>>();
     public final Map<String, String> reasons = new HashMap<String, String>();
-    /** QNN's errors and warnings, deduplicated, in order. */
+    /**
+     * QNN's errors and warnings while compiling (after ONNX Runtime split the graph), deduplicated, in order —
+     * the reasons a compilation failed. Errors while QNN checked single nodes come before that: they only mean
+     * the node stays on the CPU, so they are kept apart.
+     */
     public final List<String> errors = new ArrayList<String>(), warnings = new ArrayList<String>();
+    public final List<String> checkErrors = new ArrayList<String>();
     /** Errors of other parts of the process, e.g. the DSP loader (FastRPC). */
     public final List<String> system = new ArrayList<String>();
 
@@ -53,7 +58,10 @@ public final class QnnLog {
                 text = lm.group(3);
             }
             if (!tag.isEmpty() && !"onnxruntime".equals(tag)) {
-                if (("E".equals(level) || "F".equals(level)) && q.system.size() < 6) addOnce(q.system, tag + ": " + text.trim());
+                // the DSP loader's complaints about folders it may not watch are noise
+                if (("E".equals(level) || "F".equals(level)) && !text.contains("add watcher") && q.system.size() < 6) {
+                    addOnce(q.system, tag + ": " + text.trim());
+                }
                 continue;
             }
             boolean fromQnn = text.contains("QnnLogging");
@@ -97,6 +105,10 @@ public final class QnnLog {
                 continue;
             }
             if ((m = PARTITIONS.matcher(msg)).find()) {
+                // what QNN said so far was about single nodes (it decides which ones it takes)
+                for (String e : q.errors) addOnce(q.checkErrors, e);
+                q.errors.clear();
+                q.warnings.clear();
                 q.partitions = Integer.parseInt(m.group(1));
                 if (m.group(2) != null) {
                     q.nodes = Integer.parseInt(m.group(2));
@@ -172,19 +184,45 @@ public final class QnnLog {
         return out;
     }
 
+    private static final Pattern TOKEN = Pattern.compile("(_N\\d+N)$");
+
     /**
-     * ONNX Runtime's {@code session.name_based_layer_assignment} value that keeps these nodes on the CPU (it
-     * matches substrings of node names; names its grammar cannot carry are left out).
+     * ONNX Runtime's {@code session.name_based_layer_assignment} value that keeps these nodes on the CPU. It
+     * matches substrings of node names, so a name's unique token (OnnxPatcher.forQnn) is enough; names its
+     * grammar cannot carry are left out. The CPU is named by its execution provider: "cpu" would mean any
+     * provider on a CPU device, and ONNX Runtime 1.29 counts QNN's as one (it registers without a device).
      */
     public static String cpuAssignment(Collection<String> names) {
         StringBuilder sb = new StringBuilder();
         Set<String> seen = new LinkedHashSet<String>();
         for (String n : names) {
             String t = n.trim();
+            Matcher m = TOKEN.matcher(t);
+            if (m.find()) t = m.group(1);
             if (t.isEmpty() || t.startsWith("=") || t.matches(".*[,;()].*") || !seen.add(t)) continue;
             sb.append(sb.length() == 0 ? "" : ", ").append(t);
         }
-        return sb.length() == 0 ? "" : "cpu(" + sb + ")";
+        return sb.length() == 0 ? "" : "CPUExecutionProvider(" + sb + ")";
+    }
+
+    /** Whether the graph compiles for the NPU when QNN may take only its first {@code k} nodes. */
+    public interface Probe {
+        boolean compiles(int k) throws Exception;
+    }
+
+    /**
+     * The node that breaks the compilation, by bisection over the nodes in graph order: QNN gets the first k
+     * nodes, the rest stay on the CPU. Given that all {@code n} do not compile (and none trivially do), the
+     * smallest k that does not compile ends with the culprit, index k − 1.
+     */
+    public static int firstBreaking(int n, Probe p) throws Exception {
+        int lo = 0, hi = n;
+        while (hi - lo > 1) {
+            int mid = (lo + hi) >>> 1;
+            if (p.compiles(mid)) lo = mid;
+            else hi = mid;
+        }
+        return hi - 1;
     }
 
     /** For the report: how much QNN took, what it refused and why, and its errors. */
@@ -212,9 +250,15 @@ public final class QnnLog {
         }
         if (finalizeCode != null) sb.append(sb.length() > 0 ? "; " : "").append("код ошибки сборки ").append(finalizeCode);
         if (layeringError != null) sb.append(sb.length() > 0 ? "; " : "").append(layeringError);
+        if (layeringMatched >= 0) sb.append(sb.length() > 0 ? "; " : "").append("назначение на процессор применено");
         List<String> shown = errors.isEmpty() ? warnings : errors;
-        for (int i = 0; i < shown.size() && i < maxErrors; i++) sb.append("\n  QNN: ").append(shown.get(i));
-        if (shown.size() > maxErrors) sb.append("\n  QNN: … ещё ").append(shown.size() - maxErrors);
+        for (int i = 0; i < shown.size() && i < maxErrors; i++) sb.append("\n  QNN при сборке: ").append(shown.get(i));
+        if (shown.size() > maxErrors) sb.append("\n  QNN при сборке: … ещё ").append(shown.size() - maxErrors);
+        if (shown.isEmpty() && partitions >= 0) sb.append("\n  QNN при сборке ничего не сообщил");
+        if (!checkErrors.isEmpty()) {
+            sb.append("\n  при проверке узлов QNN сообщил ").append(checkErrors.size()).append(" раз, например: ")
+                    .append(checkErrors.get(0));
+        }
         for (int i = 0; i < system.size() && i < 3; i++) sb.append("\n  ").append(system.get(i));
         return sb.toString();
     }

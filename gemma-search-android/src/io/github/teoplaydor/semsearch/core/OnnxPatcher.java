@@ -178,6 +178,9 @@ public final class OnnxPatcher {
      *     but the squares of X/4 stay inside fp16 (the NPU computes in fp16) for |X| up to ~1000.</li>
      * </ul>
      * Everything else is copied as is. Initializers stay in the external data file next to the original.
+     * Every node's name gets a token unique in the graph ({@code _N12N}): ONNX Runtime assigns nodes to an
+     * execution provider by substrings of their names (session.name_based_layer_assignment), and a token cannot
+     * be part of another one, so a node can be kept off the NPU exactly.
      *
      * @return {attention nodes, normalisation nodes} rewritten
      */
@@ -220,6 +223,27 @@ public final class OnnxPatcher {
         int attention, norms;
         final java.util.Set<String> constants = new java.util.HashSet<String>();
         ByteArrayOutputStream out;
+        int named;
+
+        String unique(String name) {
+            return (name.isEmpty() ? "node" : name) + "_N" + named++ + "N";
+        }
+
+        /** The node with its name replaced by a unique one. */
+        byte[] renamed(byte[] raw, String name) throws IOException {
+            ByteArrayOutputStream nb = new ByteArrayOutputStream(raw.length + 16);
+            Reader r = new Reader(raw, 0, raw.length);
+            while (r.more()) {
+                int s0 = r.pos;
+                long k = r.varint();
+                int f = (int) (k >>> 3), w = (int) (k & 7);
+                r.skip(w);
+                if (f == 3 && w == 2) continue;
+                nb.write(raw, s0, r.pos - s0);
+            }
+            writeLenField(nb, 3, unique(name).getBytes(UTF8));
+            return nb.toByteArray();
+        }
 
         QnnRewrite(long opset) {
             this.opset = opset;
@@ -247,7 +271,7 @@ public final class OnnxPatcher {
                 } else if ("SimplifiedLayerNormalization".equals(n.opType)) {
                     rmsNorm(n, attributes(raw));
                 } else {
-                    writeLenField(out, 1, raw);
+                    writeLenField(out, 1, renamed(raw, n.name));
                 }
             }
             return out.toByteArray();
@@ -257,7 +281,7 @@ public final class OnnxPatcher {
             ByteArrayOutputStream nb = new ByteArrayOutputStream();
             for (String x : ins) writeLenField(nb, 1, x.getBytes(UTF8));
             for (String y : outs) writeLenField(nb, 2, y.getBytes(UTF8));
-            writeLenField(nb, 3, name.getBytes(UTF8));
+            writeLenField(nb, 3, unique(name).getBytes(UTF8));
             writeLenField(nb, 4, op.getBytes(UTF8));
             for (byte[] a : attrs) writeLenField(nb, 5, a);
             writeLenField(out, 1, nb.toByteArray());
@@ -353,6 +377,71 @@ public final class OnnxPatcher {
             emit("Div", new String[]{t + "/x4", t + "/rms"}, new String[]{normed}, normed);
             if (!w.isEmpty()) emit("Mul", new String[]{normed, w}, new String[]{n.outputs.get(0)}, t + "/out");
         }
+    }
+
+    /**
+     * A tiny float graph — MatMul → Add → Softmax on [1, 64, 64], the ops of attention — to tell whether the NPU
+     * compiles anything at all, when a whole model does not compile.
+     */
+    public static byte[] canaryModel() {
+        int n = 64;
+        float[] w = new float[n * n], b = new float[n];
+        for (int i = 0; i < w.length; i++) w[i] = (float) Math.sin(i * 0.37) * 0.1f;
+        for (int i = 0; i < n; i++) b[i] = i / (float) n;
+        ByteArrayOutputStream g = new ByteArrayOutputStream();
+        writeLenField(g, 1, node("MatMul", "", new String[]{"x", "w"}, new String[]{"xw"}, "canary_matmul", null, 0));
+        writeLenField(g, 1, node("Add", "", new String[]{"xw", "b"}, new String[]{"xb"}, "canary_add", null, 0));
+        writeLenField(g, 1, node("Softmax", "", new String[]{"xb"}, new String[]{"y"}, "canary_softmax", "axis", -1));
+        writeLenField(g, 2, "canary".getBytes(UTF8));
+        writeLenField(g, 5, floatTensor("w", new long[]{n, n}, w));
+        writeLenField(g, 5, floatTensor("b", new long[]{n}, b));
+        writeLenField(g, 11, floatValueInfo("x", new long[]{1, n, n}));
+        writeLenField(g, 12, floatValueInfo("y", new long[]{1, n, n}));
+        ByteArrayOutputStream opset = new ByteArrayOutputStream();
+        writeLenField(opset, 1, new byte[0]);
+        writeVarint(opset, 2L << 3);
+        writeVarint(opset, 17);
+        ByteArrayOutputStream m = new ByteArrayOutputStream();
+        writeVarint(m, 1L << 3);
+        writeVarint(m, 8); // IR version
+        writeLenField(m, 8, opset.toByteArray());
+        writeLenField(m, 7, g.toByteArray());
+        return m.toByteArray();
+    }
+
+    private static byte[] floatTensor(String name, long[] dims, float[] v) {
+        ByteArrayOutputStream t = new ByteArrayOutputStream();
+        for (long d : dims) {
+            writeVarint(t, 1L << 3);
+            writeVarint(t, d);
+        }
+        writeVarint(t, 2L << 3);
+        writeVarint(t, FLOAT);
+        writeLenField(t, 8, name.getBytes(UTF8));
+        java.nio.ByteBuffer raw = java.nio.ByteBuffer.allocate(4 * v.length).order(java.nio.ByteOrder.LITTLE_ENDIAN);
+        for (float f : v) raw.putFloat(f);
+        writeLenField(t, 9, raw.array());
+        return t.toByteArray();
+    }
+
+    private static byte[] floatValueInfo(String name, long[] dims) {
+        ByteArrayOutputStream shape = new ByteArrayOutputStream();
+        for (long d : dims) {
+            ByteArrayOutputStream dim = new ByteArrayOutputStream();
+            writeVarint(dim, 1L << 3);
+            writeVarint(dim, d);
+            writeLenField(shape, 1, dim.toByteArray());
+        }
+        ByteArrayOutputStream tensor = new ByteArrayOutputStream();
+        writeVarint(tensor, 1L << 3);
+        writeVarint(tensor, FLOAT);
+        writeLenField(tensor, 2, shape.toByteArray());
+        ByteArrayOutputStream type = new ByteArrayOutputStream();
+        writeLenField(type, 1, tensor.toByteArray());
+        ByteArrayOutputStream vi = new ByteArrayOutputStream();
+        writeLenField(vi, 1, name.getBytes(UTF8));
+        writeLenField(vi, 2, type.toByteArray());
+        return vi.toByteArray();
     }
 
     /** name → Long (INT), Float (FLOAT), long[] (INTS) for the attributes a rewrite needs. */
