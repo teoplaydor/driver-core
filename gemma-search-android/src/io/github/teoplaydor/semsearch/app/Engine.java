@@ -65,6 +65,11 @@ public final class Engine {
     private final ExecutorService net = Executors.newSingleThreadExecutor();
     /** Decodes the next photo while the current one is being embedded. */
     private final ExecutorService decoder = Executors.newSingleThreadExecutor();
+    /**
+     * The indexing pipeline's text stage: the text model (CPU) of one batch runs here while the vision encoder (the
+     * NPU, the GPU) takes the next batch on {@link #ml}.
+     */
+    private final ExecutorService textStage = Executors.newSingleThreadExecutor();
     private long sumWaitMs, sumVisionMs, sumTextMs;
     private int timedPhotos;
     public volatile int threads;
@@ -1686,11 +1691,27 @@ public final class Engine {
 
     private static final class Measure {
         double perPhotoMs = Double.MAX_VALUE, visionMs, textMs;
+        /** Measured in the pipeline: the time per photo is the interval between batches, the stages overlap. */
+        boolean pipelined;
         float cos = 1f;
         float[] emb;
         String error;
         /** The NPU process crashes on the way (a large graph's compilation, tried again another way). */
         String crashes = "";
+
+        /** "1.21 с (1.19 + 0.18)", in the pipeline "1.21 с (1.19 + 0.18, конвейер)". */
+        String time() {
+            return String.format(java.util.Locale.ROOT, "%.2f с (%.2f + %.2f%s)", perPhotoMs / 1000.0, visionMs / 1000.0,
+                    textMs / 1000.0, pipelined ? ", конвейер" : "");
+        }
+    }
+
+    /**
+     * The vision encoder runs off the CPU (the GPU, the NPU), so the text model of one batch can run on the CPU at
+     * the same time as the vision encoder takes the next one. On the CPU both would share its cores.
+     */
+    static boolean pipelines(int accel) {
+        return isGpu(accel) || isQnn(accel) || isNpu(accel);
     }
 
     /** Times the NPU process may crash while compiling a large graph before the NPU gives up (each time another way). */
@@ -1860,7 +1881,9 @@ public final class Engine {
             for (int k = 0; k < batch; k++) imgs.add(new PatternSource(640, 480, 2 + k));
             benchDoing(cold ? "первый запуск: сборка модели под NPU (минуты)" : isGpu(accel) ? "прогрев: шейдеры видеокарты" : "прогрев");
             m.embedImages(imgs, budget); // warm-up: allocations, GPU shader compilation
-            for (int run = 0; run < 2; run++) {
+            if (m instanceof Embedder.Staged && pipelines(accel)) {
+                measurePipeline((Embedder.Staged) m, imgs, batch, budget, r);
+            } else for (int run = 0; run < 2; run++) {
                 benchDoing("замер " + (run + 1) + " из 2");
                 long t0 = System.currentTimeMillis();
                 float[][] e = m.embedImages(imgs, budget);
@@ -1893,6 +1916,51 @@ public final class Engine {
         return r;
     }
 
+    /**
+     * As indexing runs it: the text stage of a batch on {@link #textStage} while the vision stage takes the next
+     * batch. The time per photo is the interval between two batches done once the pipeline is full (two of them:
+     * 4 vision runs, the first fills the pipeline, the last one's text is not waited for).
+     */
+    private void measurePipeline(final Embedder.Staged st, List<io.github.teoplaydor.semsearch.core.ImagePreprocessor.Source> imgs,
+                                 int batch, int budget, Measure r) throws Exception {
+        benchDoing("конвейер: заполняю");
+        Object cur = st.startImages(imgs, budget);
+        long last = 0;
+        for (int k = 0; k < 3; k++) {
+            if (k > 0) benchDoing("замер " + k + " из 2 (конвейер)");
+            final Object started = cur;
+            Future<float[][]> text = textStage.submit(new java.util.concurrent.Callable<float[][]>() {
+                @Override
+                public float[][] call() throws Exception {
+                    return st.finishImages(started);
+                }
+            });
+            Object next = st.startImages(imgs, budget);
+            float[][] e;
+            try {
+                e = text.get();
+            } catch (ExecutionException ee) {
+                throw ee.getCause() instanceof Exception ? (Exception) ee.getCause() : ee;
+            }
+            long done = System.currentTimeMillis();
+            if (k > 0) {
+                double per = (done - last) / (double) batch;
+                long[] tm = st.timingsMs(started);
+                Journal.add(ctx, "app", String.format(java.util.Locale.ROOT, "  замер %d: %.0f мс на фото в конвейере (картинка %d мс, "
+                        + "текст %d мс на пачку из %d — одновременно с картинкой следующей)", k, per, tm[0], tm[1], batch));
+                if (per < r.perPhotoMs) {
+                    r.perPhotoMs = per;
+                    r.visionMs = tm[0] / (double) batch;
+                    r.textMs = tm[1] / (double) batch;
+                    r.emb = e[0];
+                    r.pipelined = true;
+                }
+            }
+            last = done;
+            cur = next;
+        }
+    }
+
     /** One variant at another detail level, under its crash probe. */
     private Measure measureAt(ModelConfig cfg, HfTokenizer tok, HfRepo.Plan plan, int[] c, int budget) {
         return measureAt(cfg, tok, plan, c, budget, null);
@@ -1913,8 +1981,7 @@ public final class Engine {
         rep.append("\n• ").append(ACCEL_NAMES[c[0]]).append(": ");
         if (o.error != null) rep.append("не работает — ").append(o.error);
         else if (isLiteRt(c[0])) rep.append(String.format(java.util.Locale.ROOT, "%.2f с", o.perPhotoMs / 1000.0));
-        else rep.append(String.format(java.util.Locale.ROOT, "%.2f с (%.2f + %.2f)", o.perPhotoMs / 1000.0,
-                    o.visionMs / 1000.0, o.textMs / 1000.0));
+        else rep.append(o.time());
         rep.append(o.crashes);
     }
 
@@ -2202,8 +2269,7 @@ public final class Engine {
                             boolean ownSpace = !space && isLiteRt(c[0]);
                             rep.append(String.format(java.util.Locale.ROOT, "• %s: %s%s%s\n", name, isLiteRt(c[0])
                                             ? String.format(java.util.Locale.ROOT, "%.2f с", m.perPhotoMs / 1000.0)
-                                            : String.format(java.util.Locale.ROOT, "%.2f с (%.2f + %.2f)", m.perPhotoMs / 1000.0,
-                                            m.visionMs / 1000.0, m.textMs / 1000.0),
+                                            : m.time(),
                                     reference == m.emb ? "" : String.format(java.util.Locale.ROOT, ", совпадение %.3f", m.cos),
                                     ok ? "" : ownSpace ? " — векторы отличаются от ONNX-версии" : " — отклонено, результат расходится"));
                             if (!m.crashes.isEmpty()) rep.setLength(rep.length() - 1);
@@ -3015,6 +3081,7 @@ public final class Engine {
         npuRestarts = 0;
         requeue.clear();
         qnnSeen.clear();
+        pipelinedRun = false;
         sumWaitMs = sumVisionMs = sumTextMs = 0;
         timedPhotos = 0;
         idxTotal = 0;
@@ -3076,6 +3143,11 @@ public final class Engine {
         @Override
         public void run() {
             List<Media.Entry> batch = new ArrayList<Media.Entry>();
+            boolean last;
+            synchronized (queue) {
+                last = cancelIndex || stopError != null || queue.isEmpty() || model == null;
+            }
+            if (last) collectText(); // the pipeline's last batch: its text stage, into the index
             synchronized (queue) {
                 if (cancelIndex || stopError != null || queue.isEmpty() || model == null) {
                     for (Future<Bitmap> f : prefetched.values()) f.cancel(false);
@@ -3104,6 +3176,7 @@ public final class Engine {
                 }
             }
             if (batch.get(0).kind == IndexStore.KIND_VIDEO) {
+                collectText();
                 indexVideo(batch.get(0));
             } else {
                 indexPhotos(batch);
@@ -3126,6 +3199,7 @@ public final class Engine {
                 idxStatus = idxDone + " из " + idxTotal + " · NPU-процесс упал при сборке — перезапускаю его, сборка пойдёт другим "
                         + "способом (перезапуск " + npuRestarts + " из " + MAX_NPU_RESTARTS + ")";
                 notifyChanged();
+                collectText();
                 loadNow(loadedFull);
                 if (state != State.READY || photo == null) stopError = "после падения NPU-процесса модель не загрузилась: " + status;
             }
@@ -3167,6 +3241,11 @@ public final class Engine {
         if (ok.isEmpty()) return;
         int budget = budgetFor(ok.get(0));
         boolean compiles = qnnCompiles(budget);
+        if (!compiles && photo instanceof Embedder.Staged && pipelines(loadedAccel) && startPipelined(ok, bitmaps, budget)) {
+            sumWaitMs += waited;
+            return;
+        }
+        collectText(); // the batch before goes into the index first, then this one the usual way
         if (compiles) {
             idxStatus = idxDone + " из " + idxTotal + " · NPU Snapdragon: первая сборка модели под " + budget
                     + " токенов — несколько минут, дальше быстро";
@@ -3207,6 +3286,94 @@ public final class Engine {
             for (Bitmap b : bitmaps) b.recycle();
             // the compilation is a one-off: it does not count in the time per file
             if (compiles) idxStarted += System.currentTimeMillis() - e0;
+        }
+    }
+
+    /** The batch whose text stage runs on {@link #textStage} now (its vision stage done), and the model it runs on. */
+    private Future<float[][]> textJob;
+    private List<Media.Entry> textEntries;
+    private Object textStarted;
+    private Embedder.Staged textModel;
+    /** Photos of this run went through the pipeline (for the status line). */
+    private boolean pipelinedRun;
+
+    /**
+     * The vision stage of a batch here, its text stage on {@link #textStage}: while it runs, the next batch's vision
+     * stage does (the NPU or GPU and the CPU busy at once). The batch before is collected after this vision stage.
+     * False when the vision stage failed: the batch goes the usual way (one photo at a time, the failure rules).
+     */
+    private boolean startPipelined(final List<Media.Entry> ok, List<Bitmap> bitmaps, int budget) {
+        final Embedder.Staged st = (Embedder.Staged) photo;
+        List<ImagePreprocessor.Source> src = new ArrayList<ImagePreprocessor.Source>();
+        for (Bitmap b : bitmaps) src.add(new Media.BitmapSource(b));
+        final Object started;
+        try {
+            started = st.startImages(src, budget);
+        } catch (Throwable t) {
+            android.util.Log.w("SemSearch", "index: vision stage failed, the batch goes the usual way", t);
+            collectText();
+            return false;
+        }
+        for (Bitmap b : bitmaps) b.recycle();
+        collectText();
+        pipelinedRun = true;
+        textEntries = ok;
+        textStarted = started;
+        textModel = st;
+        textJob = textStage.submit(new Callable<float[][]>() {
+            @Override
+            public float[][] call() throws Exception {
+                return st.finishImages(started);
+            }
+        });
+        return true;
+    }
+
+    /** Waits for the pipeline's text stage and puts its photos into the index (on {@link #ml}, as everything else). */
+    private void collectText() {
+        Future<float[][]> job = textJob;
+        if (job == null) return;
+        List<Media.Entry> entries = textEntries;
+        Object started = textStarted;
+        Embedder.Staged st = textModel;
+        textJob = null;
+        textEntries = null;
+        textStarted = null;
+        textModel = null;
+        float[][] embs;
+        try {
+            boolean interrupted = false;
+            while (true) {
+                try {
+                    embs = job.get();
+                    break;
+                } catch (InterruptedException ie) {
+                    interrupted = true;
+                }
+            }
+            if (interrupted) Thread.currentThread().interrupt();
+        } catch (ExecutionException ee) {
+            Throwable t = ee.getCause() != null ? ee.getCause() : ee;
+            if (t instanceof Embedder.Closed) {
+                // the model was replaced before its text stage ran: the photos are fine, the next batches take them
+                synchronized (queue) {
+                    queue.addAll(0, entries);
+                }
+                idxProcessed -= entries.size();
+                return;
+            }
+            for (Media.Entry e : entries) modelFail(e, t);
+            return;
+        }
+        long[] tm = st.timingsMs(started);
+        sumVisionMs += tm[0];
+        sumTextMs += tm[1];
+        timedPhotos += entries.size();
+        for (int i = 0; i < entries.size(); i++) {
+            Media.Entry e = entries.get(i);
+            store.add(e.kind, e.id, e.uri.toString(), e.name, null, e.date, embs[i]);
+            idxDone++;
+            failStreak.clear();
         }
     }
 
@@ -3330,9 +3497,9 @@ public final class Engine {
     /** Where the time per photo goes: waiting for decode, vision encoder, text model. */
     private String timingSplit() {
         if (timedPhotos == 0) return "";
-        return String.format(java.util.Locale.ROOT, "\nна фото: чтение %.2f с · картинка %.2f с · текст %.2f с · потоков %d",
+        return String.format(java.util.Locale.ROOT, "\nна фото: чтение %.2f с · картинка %.2f с · текст %.2f с%s · потоков %d",
                 sumWaitMs / 1000.0 / timedPhotos, sumVisionMs / 1000.0 / timedPhotos,
-                sumTextMs / 1000.0 / timedPhotos, threads);
+                sumTextMs / 1000.0 / timedPhotos, pipelinedRun ? " (одновременно со следующей картинкой)" : "", threads);
     }
 
     private static String eta(long sec) {

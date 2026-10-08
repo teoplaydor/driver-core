@@ -28,7 +28,7 @@ import ai.onnxruntime.platform.Fp16Conversions;
  * {@code attention_mask} and the per-modality feature matrices, returning the mean-pooled,
  * L2-normalised {@code sentence_embedding}.
  */
-public final class EmbeddingGemma2 implements Embedder {
+public final class EmbeddingGemma2 implements Embedder, Embedder.Staged {
     /** Retrieval prompts from the model card (text inputs only; media is passed as is). */
     public static final String QUERY_PREFIX = "task: search result | query: ";
     public static final String DOCUMENT_PREFIX = "title: none | text: ";
@@ -244,31 +244,72 @@ public final class EmbeddingGemma2 implements Embedder {
      * then the text model per photo. Same results as calling {@link #embedImage} one by one.
      */
     public float[][] embedImages(List<ImagePreprocessor.Source> images, int maxSoftTokens) throws OrtException {
+        return finishImages(startImages(images, maxSoftTokens));
+    }
+
+    /** A batch between the stages: all soft tokens in order, how many each photo has, the stages' times. */
+    private static final class Started {
+        float[] feats;
+        int[] tokens;
+        long visionMs, textMs;
+    }
+
+    /** The text stages running now (on the indexing pipeline's thread): close() waits for them. */
+    private int textBusy;
+    private boolean closed;
+
+    public Object startImages(List<ImagePreprocessor.Source> images, int maxSoftTokens) throws OrtException {
         if (!supportsImages()) throw new IllegalStateException("vision encoder is not loaded");
         ModelConfig.ImageParams p = budget(cfg.image, maxSoftTokens);
         List<ImagePreprocessor.Patches> patches = new ArrayList<ImagePreprocessor.Patches>();
         for (ImagePreprocessor.Source img : images) patches.add(ImagePreprocessor.process(img, p));
+        Started s = new Started();
+        s.tokens = new int[patches.size()];
+        for (int k = 0; k < s.tokens.length; k++) s.tokens[k] = patches.get(k).numSoftTokens;
         long t0 = System.nanoTime();
-        float[] feats = encodeVisionBatch(patches);
-        lastVisionMs = (System.nanoTime() - t0) / 1000000;
-        float[][] out = new float[images.size()][];
-        long textNs = 0;
-        int off = 0;
-        for (int k = 0; k < patches.size(); k++) {
-            int n = patches.get(k).numSoftTokens;
-            float[] f = new float[n * cfg.hiddenSize];
-            System.arraycopy(feats, off, f, 0, f.length);
-            off += f.length;
-            StringBuilder sb = new StringBuilder(cfg.boiToken == null ? "" : cfg.boiToken);
-            for (int i = 0; i < n; i++) sb.append(cfg.imageToken);
-            if (cfg.eoiToken != null) sb.append(cfg.eoiToken);
-            int[] ids = tokenizer.encode(sb.toString());
-            long t1 = System.nanoTime();
-            out[k] = runTextModel(ids, f, n, new float[0], 0);
-            textNs += System.nanoTime() - t1;
+        s.feats = encodeVisionBatch(patches);
+        s.visionMs = (System.nanoTime() - t0) / 1000000;
+        return s;
+    }
+
+    public float[][] finishImages(Object started) throws OrtException {
+        Started s = (Started) started;
+        synchronized (this) {
+            if (closed) throw new Embedder.Closed();
+            textBusy++;
         }
-        lastTextMs = textNs / 1000000;
-        return out;
+        try {
+            float[][] out = new float[s.tokens.length][];
+            long textNs = 0;
+            int off = 0;
+            for (int k = 0; k < s.tokens.length; k++) {
+                int n = s.tokens[k];
+                float[] f = new float[n * cfg.hiddenSize];
+                System.arraycopy(s.feats, off, f, 0, f.length);
+                off += f.length;
+                StringBuilder sb = new StringBuilder(cfg.boiToken == null ? "" : cfg.boiToken);
+                for (int i = 0; i < n; i++) sb.append(cfg.imageToken);
+                if (cfg.eoiToken != null) sb.append(cfg.eoiToken);
+                int[] ids = tokenizer.encode(sb.toString());
+                long t1 = System.nanoTime();
+                out[k] = runTextModel(ids, f, n, new float[0], 0);
+                textNs += System.nanoTime() - t1;
+            }
+            s.textMs = textNs / 1000000;
+            lastVisionMs = s.visionMs;
+            lastTextMs = s.textMs;
+            return out;
+        } finally {
+            synchronized (this) {
+                textBusy--;
+                notifyAll();
+            }
+        }
+    }
+
+    public long[] timingsMs(Object started) {
+        Started s = (Started) started;
+        return new long[]{s.visionMs, s.textMs};
     }
 
     /** A video is a sequence of frames, each an image-like block of video soft tokens. */
@@ -511,6 +552,19 @@ public final class EmbeddingGemma2 implements Embedder {
 
     @Override
     public void close() {
+        // a text stage on the pipeline's thread finishes first: its session must not go away under it
+        synchronized (this) {
+            closed = true;
+            boolean interrupted = false;
+            while (textBusy > 0) {
+                try {
+                    wait();
+                } catch (InterruptedException e) {
+                    interrupted = true;
+                }
+            }
+            if (interrupted) Thread.currentThread().interrupt();
+        }
         try {
             textSession.close();
         } catch (OrtException ignored) {
