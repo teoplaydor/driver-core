@@ -23,6 +23,8 @@ public final class QnnLog {
     /** Rules of the name-based node assignment ONNX Runtime matched (-1: none were given or it said nothing). */
     public int layeringMatched = -1;
     public String layeringError;
+    /** QNN declined BF16 mode (needs a newer SoC), and the reason it gave. */
+    public String bf16Refused;
     /** op type → names of the nodes QNN refused, and the first reason given for that op type. */
     public final Map<String, Set<String>> refused = new LinkedHashMap<String, Set<String>>();
     public final Map<String, String> reasons = new HashMap<String, String>();
@@ -121,6 +123,8 @@ public final class QnnLog {
                 q.layeringMatched = Integer.parseInt(m.group(1));
             } else if (msg.contains("could not be mapped to any available Execution Provider")) {
                 q.layeringError = msg;
+            } else if (msg.contains("BF16 mode is enabled but")) {
+                q.bf16Refused = msg;
             }
         }
         return q;

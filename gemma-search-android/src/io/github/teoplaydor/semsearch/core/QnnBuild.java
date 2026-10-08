@@ -29,6 +29,9 @@ public final class QnnBuild {
         /** Compiles the graph; {@code save}: as the QNN context to run. Null when it compiled, else the failure. */
         Failure compile(File graph, boolean save, boolean deep) throws Exception;
 
+        /** What was logged in the last compilation that worked (null when nothing was read). */
+        QnnLog lastLog();
+
         /** Null when QNN compiles a tiny float graph, else why not. */
         String canary() throws Exception;
 
@@ -60,6 +63,8 @@ public final class QnnBuild {
         /** Nodes kept on the CPU. */
         public final Set<String> cpu = new LinkedHashSet<String>();
         public String report = "";
+        /** What ONNX Runtime and QNN said in the compilation that worked. */
+        public QnnLog log;
     }
 
     /**
@@ -108,6 +113,7 @@ public final class QnnBuild {
                 if (f == null) {
                     out.ok = true;
                     out.compiled = current;
+                    out.log = npu.lastLog();
                     steps.append(" — собрано");
                     break;
                 }
@@ -189,6 +195,17 @@ public final class QnnBuild {
      */
     public static String compareRanges(List<String> order, Map<String, float[]> cpu, Map<String, float[]> npu,
                                        List<OnnxPatcher.Node> nodes, Map<String, OnnxPatcher.TensorType> types) {
+        return compareRanges(order, cpu, npu, nodes, types, new HashMap<String, double[]>());
+    }
+
+    /**
+     * As above, and how the first bad tensor is made: the nodes up the graph from it (up to six steps, eighteen
+     * nodes), with the values of small constants and the magnitudes on the CPU ({@code cpu} may watch more
+     * tensors than {@code order}) and the NPU.
+     */
+    public static String compareRanges(List<String> order, Map<String, float[]> cpu, Map<String, float[]> npu,
+                                       List<OnnxPatcher.Node> nodes, Map<String, OnnxPatcher.TensorType> types,
+                                       Map<String, double[]> consts) {
         Map<String, OnnxPatcher.Node> producer = new HashMap<String, OnnxPatcher.Node>();
         for (OnnxPatcher.Node n : nodes) for (String o : n.outputs) producer.put(o, n);
         StringBuilder sb = new StringBuilder();
@@ -207,12 +224,16 @@ public final class QnnBuild {
                     .append(" — NPU ").append(range(npu.get(first))).append(", процессор ").append(range(cpu.get(first)));
             OnnxPatcher.Node p = producer.get(first);
             if (p != null) {
-                sb.append("\n  его делает ").append(describe(p, types));
+                sb.append("\n  его делает ").append(describe(p, types, consts));
                 for (String in : p.inputs) {
-                    if (in.isEmpty()) continue;
+                    if (in.isEmpty() || consts.containsKey(in)) continue;
                     sb.append("\n  вход ").append(in).append(": NPU ").append(npu.containsKey(in) ? range(npu.get(in)) : "—")
                             .append(", процессор ").append(cpu.containsKey(in) ? range(cpu.get(in)) : "—");
                 }
+                sb.append("\n  откуда (вверх по графу; процессор / NPU):");
+                Set<OnnxPatcher.Node> seen = new HashSet<OnnxPatcher.Node>();
+                seen.add(p);
+                trace(p, 1, producer, types, consts, cpu, npu, seen, sb);
             }
         }
         List<String> over = new ArrayList<String>();
@@ -241,6 +262,54 @@ public final class QnnBuild {
         return every;
     }
 
+    /**
+     * As watchList, but the attention core of every layer (the tensors our rewrite of MultiHeadAttention makes:
+     * q, k, v, scores, mask, probabilities, context) is always watched; the rest fills up to {@code cap}.
+     */
+    public static List<String> npuWatchList(List<OnnxPatcher.Node> nodes, Map<String, OnnxPatcher.TensorType> types, int cap) {
+        List<String> all = watchList(nodes, types, Integer.MAX_VALUE);
+        Set<String> keep = new LinkedHashSet<String>();
+        for (String t : all) {
+            if (t.startsWith("qnn") && t.matches(".*/(q|k|v|qk|scores|mask|masked|probs|ctx)(_N\\d+N)?$")) keep.add(t);
+        }
+        // the inputs of the attention core too (what MultiHeadAttention got)
+        Map<String, OnnxPatcher.Node> byOutput = new HashMap<String, OnnxPatcher.Node>();
+        for (OnnxPatcher.Node n : nodes) for (String o : n.outputs) byOutput.put(o, n);
+        for (OnnxPatcher.Node n : nodes) {
+            if (n.opType.equals("Reshape") && n.name.matches("qnn\\d+_.*/(q4|k4|v4)(_N\\d+N)?") && all.contains(n.inputs.get(0))) keep.add(n.inputs.get(0));
+        }
+        int rest = Math.max(0, cap - keep.size());
+        List<String> others = new ArrayList<String>();
+        for (String t : all) if (!keep.contains(t)) others.add(t);
+        Set<String> chosen = new HashSet<String>(keep);
+        if (others.size() <= rest) chosen.addAll(others);
+        else for (int i = 0; i < rest; i++) chosen.add(others.get((int) ((long) i * (others.size() - 1) / Math.max(1, rest - 1))));
+        List<String> out = new ArrayList<String>();
+        for (String t : all) if (chosen.contains(t)) out.add(t);
+        return out;
+    }
+
+    /**
+     * Nodes that make or take a tensor whose values, in fp32 on the CPU, go beyond {@code limit}: in fp16 (65504
+     * at most) they would overflow or come close, so they are better kept on the CPU.
+     */
+    public static Set<String> overflowNodes(List<OnnxPatcher.Node> nodes, Map<String, float[]> cpu, float limit) {
+        Set<String> big = new HashSet<String>();
+        for (Map.Entry<String, float[]> e : cpu.entrySet()) {
+            float m = e.getValue()[0];
+            if (Float.isNaN(m) || m > limit) big.add(e.getKey());
+        }
+        Set<String> out = new LinkedHashSet<String>();
+        for (OnnxPatcher.Node n : nodes) {
+            if ("Constant".equals(n.opType)) continue;
+            boolean touches = false;
+            for (String t : n.inputs) touches |= big.contains(t);
+            for (String t : n.outputs) touches |= big.contains(t);
+            if (touches) out.add(n.name);
+        }
+        return out;
+    }
+
     /** {max, mean} magnitude of each watched tensor from a run of a graph made by OnnxPatcher.withRanges. */
     public static Map<String, float[]> readRanges(OrtSession.Result r, List<String> watch) throws Exception {
         Map<String, float[]> out = new HashMap<String, float[]>();
@@ -250,6 +319,21 @@ public final class QnnBuild {
             out.put(t, new float[]{max, mean});
         }
         return out;
+    }
+
+    private static void trace(OnnxPatcher.Node n, int depth, Map<String, OnnxPatcher.Node> producer,
+                              Map<String, OnnxPatcher.TensorType> types, Map<String, double[]> consts,
+                              Map<String, float[]> cpu, Map<String, float[]> npu, Set<OnnxPatcher.Node> seen, StringBuilder sb) {
+        if (depth > 6) return;
+        for (String in : n.inputs) {
+            OnnxPatcher.Node p = producer.get(in);
+            if (p == null || "Constant".equals(p.opType) || seen.size() >= 18 || !seen.add(p)) continue;
+            sb.append("\n  ");
+            for (int i = 0; i < depth; i++) sb.append("  ");
+            sb.append("← ").append(describe(p, types, consts)).append(" | ").append(cpu.containsKey(in) ? range(cpu.get(in)) : "—")
+                    .append(" / ").append(npu.containsKey(in) ? range(npu.get(in)) : "—");
+            trace(p, depth + 1, producer, types, consts, cpu, npu, seen, sb);
+        }
     }
 
     private static boolean finite(float v) {
@@ -262,11 +346,22 @@ public final class QnnBuild {
 
     /** "Gather name: float[2048,768], int64[1,630] → float[1,630,768] (axis=0)". */
     public static String describe(OnnxPatcher.Node n, Map<String, OnnxPatcher.TensorType> types) {
+        return describe(n, types, new HashMap<String, double[]>());
+    }
+
+    /** As above, with the values of small constant inputs ("=[-10000]"). */
+    public static String describe(OnnxPatcher.Node n, Map<String, OnnxPatcher.TensorType> types, Map<String, double[]> consts) {
         StringBuilder sb = new StringBuilder(n.domain.isEmpty() ? "" : n.domain + ":").append(n.opType).append(' ').append(n.name).append(": ");
         for (int i = 0; i < n.inputs.size(); i++) {
             String in = n.inputs.get(i);
             OnnxPatcher.TensorType t = types.get(in);
             sb.append(i > 0 ? ", " : "").append(in.isEmpty() ? "—" : t != null ? t.toString() : "?");
+            double[] c = consts.get(in);
+            if (c != null) {
+                sb.append("=[");
+                for (int j = 0; j < c.length; j++) sb.append(j > 0 ? "," : "").append(String.format(java.util.Locale.ROOT, "%.4g", c[j]));
+                sb.append(']');
+            }
         }
         sb.append(" →");
         for (String o : n.outputs) {

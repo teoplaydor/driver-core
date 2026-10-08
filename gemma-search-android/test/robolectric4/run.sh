@@ -65,7 +65,7 @@ ANDROID_JAR=${ANDROID_JAR:-/usr/lib/android-sdk/platforms/android-23/android.jar
 # The NPU process round trip with a real ONNX Runtime: the desktop build (no QNN in it) and stand-in QNN host
 # libraries, plus a small vision graph
 N="$R/npu"
-if [ ! -s "$N/vit.onnx" ]; then
+if [ ! -s "$N/vit.onnx" ] || ! grep -q pixel_position_ids "$N/vit.onnx"; then
   mkdir -p "$N"
   OJ=build/test/ort-desktop.jar
   [ -s "$OJ" ] || { mkdir -p build/test && curl -fsSL --retry 8 --retry-delay 10 -o "$OJ" \
@@ -74,7 +74,7 @@ if [ ! -s "$N/vit.onnx" ]; then
   echo 'int qnn_stand_in = 1;' > "$N/stub.c"
   for l in libQnnSystem libQnnHtpPrepare libQnnHtp libQnnHtpV81Stub; do gcc -shared -fPIC "$N/stub.c" -o "$N/$l.so"; done
   python3 -c 'import onnx, numpy' 2>/dev/null || python3 -m pip install -q onnx numpy
-  python3 test/accel/make_vit_block.py "$N/vit.onnx"
+  python3 test/robolectric4/make_npu_graph.py "$N/vit.onnx"
 fi
 
 rm -rf build/shots

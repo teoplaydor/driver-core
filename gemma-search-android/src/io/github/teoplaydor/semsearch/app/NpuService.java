@@ -64,6 +64,18 @@ public final class NpuService extends Service {
     private String libDir;
     private File graph;
     private final Map<Integer, OrtSession> sessions = new HashMap<Integer, OrtSession>();
+    /** The vision graph on the CPU in fp32, per patch count: the NPU is checked against it, and it stands in for an image the NPU gets wrong. */
+    private final Map<Integer, OrtSession> cpuSessions = new HashMap<Integer, OrtSession>();
+    /** Images the NPU gave non-numbers for, computed on the CPU instead. */
+    private static int fallbacks;
+    /** BF16 instead of fp16 on the NPU (fp32's range); per graph and patch count, noted next to the context. */
+    private boolean bf16;
+    /** QNN's number for the SoC in BF16 mode: QNN EP 1.29 allows BF16 from 88 on. */
+    private static final String BF16_SOC = "88";
+    /** Values beyond this (fp32, on the CPU) keep their nodes on the CPU: fp16 ends at 65504. */
+    private static final float SAFE_FP16 = 16000f;
+    /** The NPU's features must match the CPU's this closely (cosine), or they are not used. */
+    private static final float MATCH = 0.98f;
 
     private final Binder binder = new Binder() {
         @Override
@@ -108,14 +120,16 @@ public final class NpuService extends Service {
     @Override
     public void onDestroy() {
         synchronized (this) {
-            for (OrtSession s : sessions.values()) {
-                try {
-                    s.close();
-                } catch (Exception ignored) {
-                    // going away
+            for (Map<Integer, OrtSession> m : java.util.Arrays.asList(sessions, cpuSessions)) {
+                for (OrtSession s : m.values()) {
+                    try {
+                        s.close();
+                    } catch (Exception ignored) {
+                        // going away
+                    }
                 }
+                m.clear();
             }
-            sessions.clear();
         }
         super.onDestroy();
     }
@@ -128,6 +142,8 @@ public final class NpuService extends Service {
             if (graph != null && !graph.equals(visionGraph)) {
                 for (OrtSession s : sessions.values()) s.close();
                 sessions.clear();
+                for (OrtSession s : cpuSessions.values()) s.close();
+                cpuSessions.clear();
             }
             libDir = dir;
             graph = visionGraph;
@@ -172,7 +188,12 @@ public final class NpuService extends Service {
         Map<String, String> qnn = new HashMap<String, String>();
         qnn.put("backend_path", new File(libDir, "libQnnHtp.so").getAbsolutePath());
         qnn.put("htp_performance_mode", "burst");
-        qnn.put("enable_htp_fp16_precision", "1");
+        if (bf16) {
+            qnn.put("htp_bf16_enable", "1");
+            qnn.put("soc_model", BF16_SOC);
+        } else {
+            qnn.put("enable_htp_fp16_precision", "1");
+        }
         if (deep) qnn.put("htp_graph_finalization_optimization_mode", "3");
         o.addQnn(qnn);
         return o;
@@ -191,22 +212,40 @@ public final class NpuService extends Service {
         return out;
     }
 
-    /** The compiled NPU graph for this many patches: from the saved QNN context, or compiled now and saved. */
-    private synchronized OrtSession session(int patches) throws Exception {
+    /**
+     * The compiled NPU graph for this many patches: from the saved QNN context, or compiled now (checked on this
+     * image against the CPU) and saved.
+     */
+    private synchronized OrtSession session(int patches, float[] pixels, long[] positions, int patchDim) throws Exception {
         OrtSession s = sessions.get(patches);
         if (s != null) return s;
         // next to the graph, so whatever stays on the CPU still finds its weights in the external data file
         File ctx = context(patches);
         if (ctx.exists() && ctx.lastModified() < graph.lastModified()) ctx.delete(); // made from an older graph
         if (ctx.exists()) {
+            bf16 = "bf16".equals(readText(note(patches, "precision")).trim());
             try {
                 s = env.createSession(ctx.getPath(), options(graph, patches, false, true));
             } catch (Exception stale) {
                 ctx.delete();
             }
         }
-        if (s == null) s = compile(patches);
+        if (s == null) s = compile(patches, pixels, positions, patchDim);
         sessions.put(patches, s);
+        return s;
+    }
+
+    /** The vision graph on the CPU in fp32 for this many patches (the reference, and the fallback). */
+    private synchronized OrtSession cpuSession(int patches) throws Exception {
+        OrtSession s = cpuSessions.get(patches);
+        if (s == null) {
+            OrtSession.SessionOptions o = new OrtSession.SessionOptions();
+            o.setOptimizationLevel(OrtSession.SessionOptions.OptLevel.BASIC_OPT);
+            o.setIntraOpNumThreads(2);
+            for (Map.Entry<String, Long> d : dims(graph, patches).entrySet()) o.setSymbolicDimensionValue(d.getKey(), d.getValue());
+            s = env.createSession(graph.getPath(), o);
+            cpuSessions.put(patches, s);
+        }
         return s;
     }
 
@@ -214,15 +253,79 @@ public final class NpuService extends Service {
     private static final long COMPILE_BUDGET_MS = 15 * 60 * 1000;
 
     /**
-     * Compiles the graph for the NPU and saves the QNN context (see QnnBuild: when QNN refuses the graph, the
-     * node to blame is kept on the CPU and it is compiled again). Nodes kept on the CPU are noted, so a later
-     * compilation starts from there.
+     * Compiles the graph for the NPU and saves the QNN context. First the image runs on the CPU in fp32 with the
+     * magnitude of every tensor: nodes that see values beyond SAFE_FP16 stay on the CPU (fp16 would overflow
+     * there). Then QnnBuild compiles (finding nodes QNN cannot build), and the NPU's features for the image are
+     * checked against the CPU's; if they differ, BF16 is tried (where QNN allows it), and if that does not help
+     * either, the error says where the NPU's result goes wrong (scanReport).
      */
-    private OrtSession compile(final int patches) throws Exception {
+    private OrtSession compile(final int patches, float[] pixels, long[] positions, int patchDim) throws Exception {
         final File ctx = context(patches);
+        StringBuilder rep = new StringBuilder();
         Set<String> start = new LinkedHashSet<String>();
         for (String l : readText(note(patches, "cpu")).split("\n")) if (!l.trim().isEmpty()) start.add(l.trim());
-        QnnBuild.Outcome o = QnnBuild.run(graph, start, new QnnBuild.Npu() {
+        Map<String, OnnxPatcher.TensorType> types = QnnBuild.tensorTypes(env, graph, dims(graph, patches));
+        List<OnnxPatcher.Node> nodes = OnnxPatcher.nodes(graph, new HashMap<String, Long>());
+        Map<String, float[]> onCpu = ranges(graph, cpuOptions(patches), QnnBuild.watchList(nodes, types, Integer.MAX_VALUE),
+                patches, patchDim, pixels, positions);
+        Set<String> big = QnnBuild.overflowNodes(nodes, onCpu, SAFE_FP16);
+        big.removeAll(start);
+        if (!big.isEmpty()) {
+            start.addAll(big);
+            rep.append("на процессоре из-за значений больше ").append((int) SAFE_FP16).append(" (в fp16 — до 65504): ")
+                    .append(opCounts(nodes, big)).append('\n');
+        }
+        float[] want = encode(cpuSession(patches), pixels, positions, patches, patchDim);
+        for (int round = 0; round < 2; round++) {
+            bf16 = round == 1;
+            QnnBuild.Outcome o = QnnBuild.run(graph, start, npu(patches, ctx), COMPILE_BUDGET_MS);
+            rep.append(bf16 ? "BF16: " : "").append(o.report);
+            if (o.compiled != null && !o.compiled.equals(graph)) o.compiled.delete();
+            if (!o.ok) {
+                if (round == 0) {
+                    bf16 = false;
+                    writeText(note(patches, "qnn"), rep.toString());
+                    throw new Exception(rep.toString());
+                }
+                break;
+            }
+            if (bf16 && o.log != null && (o.log.bf16Refused != null || o.log.supported == 0)) {
+                rep.append("\n  BF16 недоступен: ").append(o.log.bf16Refused != null ? o.log.bf16Refused : "QNN не взял ни одного узла");
+                ctx.delete();
+                break;
+            }
+            OrtSession quiet = env.createSession(ctx.getPath(), options(graph, patches, false, true));
+            float c = cosine(encode(quiet, pixels, positions, patches, patchDim), want);
+            rep.append(String.format(java.util.Locale.ROOT, "\n  проверка на этой картинке: совпадение с процессором %.4f", c));
+            if (c >= MATCH) {
+                writeText(note(patches, "qnn"), rep.toString());
+                StringBuilder cpu = new StringBuilder();
+                for (String n : o.cpu) cpu.append(n).append('\n');
+                writeText(note(patches, "cpu"), cpu.toString());
+                writeText(note(patches, "precision"), bf16 ? "bf16" : "fp16");
+                return quiet;
+            }
+            quiet.close();
+            ctx.delete();
+            start = new LinkedHashSet<String>(o.cpu);
+            rep.append('\n');
+        }
+        bf16 = false;
+        String where;
+        try {
+            where = scanReport(patches, patchDim, pixels, positions, start, types);
+        } catch (Exception e) {
+            where = "не вышло: " + e.getMessage();
+        }
+        String text = "NPU считает неверно — " + rep.toString().trim() + "\nГде NPU портит результат: " + where;
+        writeText(note(patches, "qnn"), text);
+        throw new Exception(text);
+    }
+
+    private QnnBuild.Npu npu(final int patches, final File ctx) {
+        return new QnnBuild.Npu() {
+            private QnnLog last;
+
             @Override
             public QnnBuild.Failure compile(File g, boolean save, boolean deep) throws Exception {
                 OrtSession.SessionOptions so = options(g, patches, save, deep);
@@ -236,7 +339,7 @@ public final class NpuService extends Service {
                 LogTail tail = save ? LogTail.start() : null;
                 try {
                     env.createSession(g.getPath(), so).close();
-                    if (tail != null) tail.finish();
+                    last = tail != null ? QnnLog.parse(tail.finish()) : null;
                     return null;
                 } catch (Exception e) {
                     QnnLog log = QnnLog.parse(tail != null ? tail.finish() : Collections.<String>emptyList());
@@ -244,6 +347,11 @@ public final class NpuService extends Service {
                 } finally {
                     so.close();
                 }
+            }
+
+            @Override
+            public QnnLog lastLog() {
+                return last;
             }
 
             @Override
@@ -260,18 +368,41 @@ public final class NpuService extends Service {
             public long nowMs() {
                 return android.os.SystemClock.elapsedRealtime();
             }
-        }, COMPILE_BUDGET_MS);
-        writeText(note(patches, "qnn"), o.report);
-        if (!o.ok) throw new Exception(o.report);
-        StringBuilder cpu = new StringBuilder();
-        for (String n : o.cpu) cpu.append(n).append('\n');
-        writeText(note(patches, "cpu"), cpu.toString());
-        try {
-            // runs log quietly: the graph again, from the context just saved
-            return env.createSession(ctx.getPath(), options(graph, patches, false, true));
-        } finally {
-            if (o.compiled != null && !o.compiled.equals(graph)) o.compiled.delete();
+        };
+    }
+
+    private OrtSession.SessionOptions cpuOptions(int patches) throws Exception {
+        OrtSession.SessionOptions o = new OrtSession.SessionOptions();
+        o.setOptimizationLevel(OrtSession.SessionOptions.OptLevel.BASIC_OPT);
+        o.setIntraOpNumThreads(2);
+        for (Map.Entry<String, Long> d : dims(graph, patches).entrySet()) o.setSymbolicDimensionValue(d.getKey(), d.getValue());
+        return o;
+    }
+
+    private static String opCounts(List<OnnxPatcher.Node> nodes, Set<String> names) {
+        Map<String, Integer> m = new LinkedHashMap<String, Integer>();
+        for (OnnxPatcher.Node n : nodes) if (names.contains(n.name)) m.put(n.opType, m.containsKey(n.opType) ? m.get(n.opType) + 1 : 1);
+        StringBuilder sb = new StringBuilder();
+        for (Map.Entry<String, Integer> e : m.entrySet()) sb.append(sb.length() > 0 ? ", " : "").append(e.getKey()).append(" ×").append(e.getValue());
+        return sb.toString();
+    }
+
+    /** Cosine of two feature vectors; NaN when either holds a non-number or their lengths differ. */
+    static float cosine(float[] a, float[] b) {
+        if (a.length != b.length) return Float.NaN;
+        double ab = 0, aa = 0, bb = 0;
+        for (int i = 0; i < a.length; i++) {
+            ab += (double) a[i] * b[i];
+            aa += (double) a[i] * a[i];
+            bb += (double) b[i] * b[i];
         }
+        double c = ab / Math.sqrt(aa * bb);
+        return Double.isNaN(c) || Double.isInfinite(c) ? Float.NaN : (float) c;
+    }
+
+    private static boolean finite(float[] f) {
+        for (float v : f) if (Float.isNaN(v) || Float.isInfinite(v)) return false;
+        return true;
     }
 
     /** Whether QNN compiles a tiny float graph (MatMul → Add → Softmax): null if it does, else what it said. */
@@ -343,7 +474,6 @@ public final class NpuService extends Service {
 
     /** {@code batch} images from the shared file, one NPU run each; the features go back into the same file. */
     private synchronized int run(String io, int batch, int patches, int patchDim) throws Exception {
-        OrtSession s = session(patches);
         RandomAccessFile raf = new RandomAccessFile(io, "rw");
         try {
             FileChannel ch = raf.getChannel();
@@ -352,6 +482,12 @@ public final class NpuService extends Service {
             int pixelCount = batch * patches * patchDim;
             float[] pixels = new float[patches * patchDim];
             long[] positions = new long[patches * 2];
+            // the first image: a first compilation checks the NPU on it
+            m.position(0);
+            m.slice().order(ByteOrder.nativeOrder()).asFloatBuffer().get(pixels);
+            m.position(4 * pixelCount);
+            m.slice().order(ByteOrder.nativeOrder()).asLongBuffer().get(positions);
+            OrtSession s = session(patches, pixels, positions, patchDim);
             java.util.List<float[]> feats = new java.util.ArrayList<float[]>();
             int total = 0;
             for (int k = 0; k < batch; k++) {
@@ -360,6 +496,11 @@ public final class NpuService extends Service {
                 m.position(4 * pixelCount + 8 * k * patches * 2);
                 m.slice().order(ByteOrder.nativeOrder()).asLongBuffer().get(positions);
                 float[] f = encode(s, pixels, positions, patches, patchDim);
+                if (!finite(f)) {
+                    // the NPU went out of fp16's range on this image: the CPU computes it
+                    f = encode(cpuSession(patches), pixels, positions, patches, patchDim);
+                    fallbacks++;
+                }
                 if (k == 0) {
                     lastPixels = pixels.clone();
                     lastPositions = positions.clone();
@@ -419,19 +560,26 @@ public final class NpuService extends Service {
     /** Tensors watched by SCAN at most (each adds three small nodes to what the NPU compiles). */
     private static final int SCAN_TENSORS = 600;
 
-    /**
-     * Where the NPU's result goes wrong: the last run's image through a copy of the graph that also returns the
-     * largest and mean magnitude of its float tensors, on the CPU (fp32) and on the NPU (fp16), compared in
-     * graph order (QnnBuild.compareRanges). Nodes kept on the CPU for the NPU stay there here too.
-     */
+    /** Where the NPU's result goes wrong for the last run's image (scanReport). */
     private synchronized String scan(int patches, int patchDim) throws Exception {
         if (lastPixels == null || lastPatches != patches) throw new IllegalStateException("нет прогона на NPU, не с чем сравнивать");
-        Map<String, Long> d = dims(graph, patches);
-        Map<String, OnnxPatcher.TensorType> types = QnnBuild.tensorTypes(env, graph, d);
         Set<String> cpu = new LinkedHashSet<String>();
         for (String l : readText(note(patches, "cpu")).split("\n")) if (!l.trim().isEmpty()) cpu.add(l.trim());
+        return scanReport(patches, patchDim, lastPixels, lastPositions, cpu,
+                QnnBuild.tensorTypes(env, graph, dims(graph, patches)));
+    }
+
+    /**
+     * Where the NPU's result goes wrong: the image through copies of the graph that also return the largest and
+     * mean magnitude of float tensors — all of them on the CPU (fp32), the attention cores and a sample of the
+     * rest on the NPU (fp16) — compared in graph order (QnnBuild.compareRanges), with the way up the graph from
+     * the first tensor that breaks. Nodes kept on the CPU for the NPU stay there here too.
+     */
+    private String scanReport(int patches, int patchDim, float[] pixels, long[] positions, Set<String> cpu,
+                              Map<String, OnnxPatcher.TensorType> types) throws Exception {
         String base = graph.getName().replace(".onnx", "");
-        File variant = new File(graph.getParentFile(), base + ".scanbase.onnx"), scanFile = new File(graph.getParentFile(), base + ".scan.onnx");
+        File variant = new File(graph.getParentFile(), base + ".scanbase.onnx");
+        File scanNpu = new File(graph.getParentFile(), base + ".scan.onnx");
         try {
             File g = graph;
             if (!cpu.isEmpty()) {
@@ -439,52 +587,63 @@ public final class NpuService extends Service {
                 g = variant;
             }
             List<OnnxPatcher.Node> nodes = OnnxPatcher.nodes(g, new HashMap<String, Long>());
-            List<String> watch = QnnBuild.watchList(nodes, types, SCAN_TENSORS);
-            OnnxPatcher.withRanges(g, scanFile, watch);
-            OrtSession.SessionOptions onCpu = new OrtSession.SessionOptions();
-            onCpu.setOptimizationLevel(OrtSession.SessionOptions.OptLevel.BASIC_OPT);
-            for (Map.Entry<String, Long> e : d.entrySet()) onCpu.setSymbolicDimensionValue(e.getKey(), e.getValue());
-            Map<String, float[]> c = ranges(scanFile, onCpu, watch, patches, patchDim);
+            List<String> npuWatch = QnnBuild.npuWatchList(nodes, types, SCAN_TENSORS);
+            Map<String, float[]> c = ranges(g, cpuOptions(patches), QnnBuild.watchList(nodes, types, Integer.MAX_VALUE),
+                    patches, patchDim, pixels, positions);
             Map<String, float[]> n;
             try {
-                n = ranges(scanFile, options(scanFile, patches, false, false), watch, patches, patchDim);
+                OnnxPatcher.withRanges(g, scanNpu, npuWatch);
+                n = ranges(scanNpu, null, npuWatch, patches, patchDim, pixels, positions);
             } catch (Exception e) {
                 return "сравнить не вышло — NPU не собрал граф с проверками: " + e.getMessage();
             }
-            return QnnBuild.compareRanges(watch, c, n, nodes, types);
+            return QnnBuild.compareRanges(npuWatch, c, n, nodes, types, OnnxPatcher.smallConstants(g));
         } finally {
             variant.delete();
-            scanFile.delete();
+            scanNpu.delete();
         }
     }
 
-    /** {max, mean} magnitude of each watched tensor for the last run's image. */
-    private Map<String, float[]> ranges(File model, OrtSession.SessionOptions o, List<String> watch, int patches, int patchDim)
-            throws Exception {
-        Map<String, float[]> out = new HashMap<String, float[]>();
-        OrtSession s = env.createSession(model.getPath(), o);
+    /**
+     * {max, mean} magnitude of each watched tensor for this image: {@code model} with ranges added (when
+     * {@code cpu} options are given, a copy with the ranges is made here; else {@code model} has them and runs
+     * on the NPU).
+     */
+    private Map<String, float[]> ranges(File model, OrtSession.SessionOptions cpu, List<String> watch, int patches,
+                                        int patchDim, float[] pixels, long[] positions) throws Exception {
+        File withRanges = model;
+        if (cpu != null) {
+            withRanges = new File(graph.getParentFile(), graph.getName().replace(".onnx", "") + ".ranges.onnx");
+            OnnxPatcher.withRanges(model, withRanges, watch);
+        }
+        OrtSession.SessionOptions o = cpu != null ? cpu : options(withRanges, patches, false, false);
         try {
-            Map<String, OnnxTensor> in = inputs(s, lastPixels, lastPositions, patches, patchDim);
+            OrtSession s = env.createSession(withRanges.getPath(), o);
             try {
-                OrtSession.Result r = s.run(in);
+                Map<String, OnnxTensor> in = inputs(s, pixels, positions, patches, patchDim);
                 try {
-                    out = QnnBuild.readRanges(r, watch);
+                    OrtSession.Result r = s.run(in);
+                    try {
+                        return QnnBuild.readRanges(r, watch);
+                    } finally {
+                        r.close();
+                    }
                 } finally {
-                    r.close();
+                    for (OnnxTensor t : in.values()) t.close();
                 }
             } finally {
-                for (OnnxTensor t : in.values()) t.close();
+                s.close();
             }
         } finally {
-            s.close();
             o.close();
+            if (withRanges != model) withRanges.delete();
         }
-        return out;
     }
 
     /** One profiled run (from the saved context, so no second compilation): which nodes the NPU took. */
     private synchronized String profile(int patches, int patchDim) throws Exception {
-        session(patches); // makes sure the context exists
+        if (!sessions.containsKey(patches) && !context(patches).exists()) throw new IllegalStateException("NPU ещё не собран под эту детализацию");
+        bf16 = "bf16".equals(readText(note(patches, "precision")).trim());
         File ctx = context(patches);
         OrtSession.SessionOptions o = options(graph, patches, false, true);
         File prefix = new File(getCacheDir(), "npu-profile");
@@ -500,7 +659,7 @@ public final class NpuService extends Service {
             }
             encode(s, new float[patches * patchDim], positions, patches, patchDim);
             json = new File(s.endProfiling());
-            String built = readText(note(patches, "qnn")).trim();
+            String built = readText(note(patches, "qnn")).trim() + (fallbacks > 0 ? "\nснимков, пересчитанных на процессоре (NPU дал не числа): " + fallbacks : "");
             return (built.isEmpty() ? "" : built + "\n") + OrtProfile.parse(json).summary(6);
         } finally {
             s.close();

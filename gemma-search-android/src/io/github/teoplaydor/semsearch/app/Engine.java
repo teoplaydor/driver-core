@@ -1529,10 +1529,11 @@ public final class Engine {
 
     /**
      * The vision graph rewritten for QNN; the "r" number changes with the rewrite (r2: unique node names; r3:
-     * RMS norm and constants safe in fp16).
+     * RMS norm and constants safe in fp16; r4: sentinels used as data — the mask carried in the keys — become
+     * ±10⁴, bounds ±65504).
      */
     private static File qnnGraph(File fp32) {
-        return new File(fp32.getParentFile(), fp32.getName().replace(".onnx", ".qnn.r3.onnx"));
+        return new File(fp32.getParentFile(), fp32.getName().replace(".onnx", ".qnn.r4.onnx"));
     }
 
     /** Where the NPU's result differs from the CPU's (NpuService.scan), for the last image it ran. */

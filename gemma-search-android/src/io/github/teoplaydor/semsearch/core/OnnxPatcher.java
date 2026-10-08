@@ -178,8 +178,11 @@ public final class OnnxPatcher {
      *     within 1, so they cannot overflow fp16 (the NPU computes in fp16), and ε enters as (√ε / scale)², since
      *     ε itself (1e-6) is below fp16's normal range and the NPU flushes such numbers to zero — a zero vector
      *     (padding) then gave 0/0 = NaN. The same values in exact arithmetic; a zero vector stays zero.</li>
-     * <li>float constants beyond fp16's range (masks filled with −3.4e38: −∞ in fp16, and 0 × −∞ = NaN) are
-     *     brought to ±60000, and tiny nonzero ones (an ε) up to fp16's smallest normal number.</li>
+     * <li>float constants beyond fp16's range are brought into it, by how they are used: a sentinel (±3.4e38,
+     *     ±∞) used as data — a mask, even one carried as an extra channel of the keys, where q·k sums it up —
+     *     becomes ±10⁴, enough to mask and far from overflowing when added up; as the bound of a Clip, Min or Max
+     *     it becomes ±65504, which bounds nothing in fp16. Tiny nonzero constants (an ε) are raised to fp16's
+     *     smallest normal number.</li>
      * </ul>
      * Everything else is copied as is. Initializers stay in the external data file next to the original.
      * Every node's name gets a token unique in the graph ({@code _N12N}): ONNX Runtime assigns nodes to an
@@ -253,7 +256,34 @@ public final class OnnxPatcher {
             this.opset = opset;
         }
 
+        /** Tensors used only as bounds (Clip's min and max, Min, Max): their sentinels become fp16's limits. */
+        final java.util.Set<String> bounds = new java.util.HashSet<String>();
+
+        private void findBounds(byte[] b, int from, int to) throws IOException {
+            java.util.Set<String> data = new java.util.HashSet<String>();
+            Reader r = new Reader(b, from, to);
+            while (r.more()) {
+                long key = r.varint();
+                int field = (int) (key >>> 3), wire = (int) (key & 7);
+                if (field != 1 || wire != 2) {
+                    r.skip(wire);
+                    continue;
+                }
+                int len = (int) r.varint();
+                byte[] raw = new byte[len];
+                System.arraycopy(b, r.pos, raw, 0, len);
+                r.pos += len;
+                Node n = parseNode(raw);
+                for (int i = 0; i < n.inputs.size(); i++) {
+                    boolean bound = ("Clip".equals(n.opType) && i >= 1) || "Min".equals(n.opType) || "Max".equals(n.opType);
+                    (bound ? bounds : data).add(n.inputs.get(i));
+                }
+            }
+            bounds.removeAll(data);
+        }
+
         byte[] graph(byte[] b, int from, int to) throws IOException {
+            findBounds(b, from, to);
             out = new ByteArrayOutputStream(to - from + 65536);
             Reader r = new Reader(b, from, to);
             while (r.more()) {
@@ -266,7 +296,7 @@ public final class OnnxPatcher {
                     byte[] t = new byte[len];
                     System.arraycopy(b, r.pos, t, 0, len);
                     r.pos += len;
-                    byte[] c = clampTensor(t);
+                    byte[] c = clampTensor(t, bounds);
                     if (c != null) clamped++;
                     writeLenField(out, 5, c != null ? c : t);
                     continue;
@@ -281,7 +311,7 @@ public final class OnnxPatcher {
                 System.arraycopy(b, r.pos, raw, 0, len);
                 r.pos += len;
                 Node n = parseNode(raw);
-                if ("Constant".equals(n.opType)) raw = clampConstant(raw);
+                if ("Constant".equals(n.opType)) raw = clampConstant(raw, !n.outputs.isEmpty() && bounds.contains(n.outputs.get(0)));
                 if ("MultiHeadAttention".equals(n.opType) && "com.microsoft".equals(n.domain)) {
                     attention(n, attributes(raw));
                 } else if ("SimplifiedLayerNormalization".equals(n.opType)) {
@@ -378,7 +408,7 @@ public final class OnnxPatcher {
         }
 
         /** A Constant node with its float values brought into fp16's range (counted), or as it was. */
-        private byte[] clampConstant(byte[] raw) throws IOException {
+        private byte[] clampConstant(byte[] raw, boolean bound) throws IOException {
             ByteArrayOutputStream nb = new ByteArrayOutputStream(raw.length);
             boolean changed = false;
             Reader r = new Reader(raw, 0, raw.length);
@@ -395,7 +425,7 @@ public final class OnnxPatcher {
                 byte[] attr = new byte[len];
                 System.arraycopy(raw, r.pos, attr, 0, len);
                 r.pos += len;
-                byte[] c = clampAttribute(attr);
+                byte[] c = clampAttribute(attr, bound);
                 if (c != null) changed = true;
                 writeLenField(nb, 5, c != null ? c : attr);
             }
@@ -499,25 +529,31 @@ public final class OnnxPatcher {
         return vi.toByteArray();
     }
 
-    /** fp16's largest finite value; constants beyond it become ±CLAMP. */
-    private static final float FP16_MAX = 65504f, CLAMP = 60000f;
+    /** fp16's largest finite value; a sentinel (±3.4e38, ±∞) used as data becomes ±SENTINEL. */
+    private static final float FP16_MAX = 65504f, SENTINEL = 1e4f;
     /** fp16's smallest normal number: tiny nonzero constants are raised to it (the NPU flushes smaller ones to 0). */
     private static final float FP16_MIN_NORMAL = 6.1035156e-5f;
 
-    private static float fp16Range(float v, boolean small) {
+    private static float fp16Range(float v, boolean small, boolean bound) {
         if (Float.isNaN(v)) return v;
-        if (v > FP16_MAX) return CLAMP;
-        if (v < -FP16_MAX) return -CLAMP;
+        if (Math.abs(v) >= 1e30f) return Math.copySign(bound ? FP16_MAX : SENTINEL, v);
+        if (Math.abs(v) > FP16_MAX) return Math.copySign(FP16_MAX, v);
         if (small && v != 0f && Math.abs(v) < FP16_MIN_NORMAL) return Math.copySign(FP16_MIN_NORMAL, v);
         return v;
     }
 
     /**
      * A float TensorProto stored in the file (raw_data or float_data, up to 4096 values) with its values brought
-     * into fp16's range — tiny ones too when it holds at most 16 (an ε); null when nothing changed.
+     * into fp16's range — tiny ones too when it holds at most 16 (an ε); null when nothing changed. It bounds a
+     * Clip, Min or Max when its name is in {@code bounds} or {@code bound} says so (a Constant's value).
      */
-    static byte[] clampTensor(byte[] t) throws IOException {
+    static byte[] clampTensor(byte[] t, java.util.Set<String> bounds) throws IOException {
+        return clampTensor(t, bounds, false);
+    }
+
+    static byte[] clampTensor(byte[] t, java.util.Set<String> bounds, boolean bound) throws IOException {
         int type = 0;
+        String name = "";
         byte[] data = null;
         boolean packed = false;
         java.util.List<Float> loose = new java.util.ArrayList<Float>();
@@ -537,6 +573,8 @@ public final class OnnxPatcher {
                 loose.add(Float.intBitsToFloat((t[r.pos] & 0xff) | (t[r.pos + 1] & 0xff) << 8 | (t[r.pos + 2] & 0xff) << 16
                         | (t[r.pos + 3] & 0xff) << 24));
                 r.pos += 4;
+            } else if (f == 8 && w == 2) {
+                name = r.string();
             } else if (f == 13) {
                 return null; // external data: weights, not constants
             } else {
@@ -556,7 +594,7 @@ public final class OnnxPatcher {
         if (v.length == 0 || v.length > 4096) return null;
         boolean changed = false;
         for (int i = 0; i < v.length; i++) {
-            float c = fp16Range(v[i], v.length <= 16);
+            float c = fp16Range(v[i], v.length <= 16, bound || bounds.contains(name));
             if (Float.floatToIntBits(c) != Float.floatToIntBits(v[i])) {
                 v[i] = c;
                 changed = true;
@@ -580,7 +618,7 @@ public final class OnnxPatcher {
     }
 
     /** A Constant's value / value_float / value_floats attribute brought into fp16's range; null if unchanged. */
-    static byte[] clampAttribute(byte[] a) throws IOException {
+    static byte[] clampAttribute(byte[] a, boolean bound) throws IOException {
         ByteArrayOutputStream out = new ByteArrayOutputStream(a.length);
         boolean changed = false;
         Reader r = new Reader(a, 0, a.length);
@@ -593,13 +631,13 @@ public final class OnnxPatcher {
                 byte[] t = new byte[len];
                 System.arraycopy(a, r.pos, t, 0, len);
                 r.pos += len;
-                byte[] c = clampTensor(t);
+                byte[] c = clampTensor(t, java.util.Collections.<String>emptySet(), bound);
                 if (c != null) changed = true;
                 writeLenField(out, 5, c != null ? c : t);
             } else if (f == 2 && w == 5) {
                 int bits = (a[r.pos] & 0xff) | (a[r.pos + 1] & 0xff) << 8 | (a[r.pos + 2] & 0xff) << 16 | (a[r.pos + 3] & 0xff) << 24;
                 r.pos += 4;
-                float v = Float.intBitsToFloat(bits), c = fp16Range(v, true);
+                float v = Float.intBitsToFloat(bits), c = fp16Range(v, true, bound);
                 if (Float.floatToIntBits(c) != bits) changed = true;
                 writeVarint(out, (2L << 3) | 5);
                 int cb = Float.floatToIntBits(c);
@@ -611,7 +649,7 @@ public final class OnnxPatcher {
                 float[] v = new float[fb.remaining()];
                 fb.get(v);
                 for (int i = 0; i < v.length; i++) {
-                    float c = fp16Range(v[i], v.length <= 16);
+                    float c = fp16Range(v[i], v.length <= 16, bound);
                     if (Float.floatToIntBits(c) != Float.floatToIntBits(v[i])) changed = true;
                     v[i] = c;
                 }
@@ -764,6 +802,146 @@ public final class OnnxPatcher {
                 return g.toByteArray();
             }
         });
+    }
+
+    /**
+     * Values of the graph's small constants (initializers stored in the file, Constant nodes; up to 16 values),
+     * by name: in a report they show what a sentinel, a scale or a shape is.
+     */
+    public static java.util.Map<String, double[]> smallConstants(File f) throws IOException {
+        java.util.Map<String, double[]> out = new java.util.HashMap<String, double[]>();
+        byte[] model = readAll(f);
+        Reader r = new Reader(model, 0, model.length);
+        while (r.more()) {
+            long key = r.varint();
+            int field = (int) (key >>> 3), wire = (int) (key & 7);
+            if (field != 7 || wire != 2) {
+                r.skip(wire);
+                continue;
+            }
+            int len = (int) r.varint();
+            Reader g = new Reader(model, r.pos, r.pos + len);
+            r.pos += len;
+            while (g.more()) {
+                long k = g.varint();
+                int gf = (int) (k >>> 3), gw = (int) (k & 7);
+                if (gw != 2 || (gf != 5 && gf != 1)) {
+                    g.skip(gw);
+                    continue;
+                }
+                int l = (int) g.varint();
+                byte[] b = new byte[l];
+                System.arraycopy(model, g.pos, b, 0, l);
+                g.pos += l;
+                if (gf == 5) {
+                    Object[] t = tensorValues(b);
+                    if (t != null) out.put((String) t[0], (double[]) t[1]);
+                    continue;
+                }
+                Node n = parseNode(b);
+                if (!"Constant".equals(n.opType) || n.outputs.isEmpty()) continue;
+                Reader nr = new Reader(b, 0, b.length);
+                while (nr.more()) {
+                    long nk = nr.varint();
+                    int nf = (int) (nk >>> 3), nw = (int) (nk & 7);
+                    if (nf != 5 || nw != 2) {
+                        nr.skip(nw);
+                        continue;
+                    }
+                    int al = (int) nr.varint();
+                    Reader a = new Reader(b, nr.pos, nr.pos + al);
+                    nr.pos += al;
+                    String an = "";
+                    java.util.List<Double> vals = new java.util.ArrayList<Double>();
+                    while (a.more()) {
+                        long ak = a.varint();
+                        int af = (int) (ak >>> 3), aw = (int) (ak & 7);
+                        if (af == 1 && aw == 2) {
+                            an = a.string();
+                        } else if (af == 2 && aw == 5) {
+                            vals.add((double) Float.intBitsToFloat((b[a.pos] & 0xff) | (b[a.pos + 1] & 0xff) << 8
+                                    | (b[a.pos + 2] & 0xff) << 16 | (b[a.pos + 3] & 0xff) << 24));
+                            a.pos += 4;
+                        } else if (af == 3 && aw == 0) {
+                            vals.add((double) a.varint());
+                        } else if (af == 5 && aw == 2) {
+                            int tl = (int) a.varint();
+                            byte[] tb = new byte[tl];
+                            System.arraycopy(b, a.pos, tb, 0, tl);
+                            a.pos += tl;
+                            Object[] t = tensorValues(tb);
+                            if (t != null) for (double d : (double[]) t[1]) vals.add(d);
+                        } else if (af == 7 && aw == 2) {
+                            int pl = (int) a.varint();
+                            java.nio.FloatBuffer fb = java.nio.ByteBuffer.wrap(b, a.pos, pl).order(java.nio.ByteOrder.LITTLE_ENDIAN).asFloatBuffer();
+                            a.pos += pl;
+                            while (fb.hasRemaining()) vals.add((double) fb.get());
+                        } else if (af == 8 && aw == 2) {
+                            int pl = (int) a.varint(), end = a.pos + pl;
+                            while (a.pos < end) vals.add((double) a.varint());
+                        } else {
+                            a.skip(aw);
+                        }
+                    }
+                    if (an.startsWith("value") && !vals.isEmpty() && vals.size() <= 16) {
+                        double[] d = new double[vals.size()];
+                        for (int i = 0; i < d.length; i++) d[i] = vals.get(i);
+                        out.put(n.outputs.get(0), d);
+                    }
+                }
+            }
+        }
+        return out;
+    }
+
+    /** {name, double[] values} of a TensorProto holding up to 16 float or integer values in the file; else null. */
+    private static Object[] tensorValues(byte[] t) throws IOException {
+        int type = 0;
+        String name = "";
+        byte[] raw = null;
+        java.util.List<Double> loose = new java.util.ArrayList<Double>();
+        Reader r = new Reader(t, 0, t.length);
+        while (r.more()) {
+            long k = r.varint();
+            int f = (int) (k >>> 3), w = (int) (k & 7);
+            if (f == 2 && w == 0) {
+                type = (int) r.varint();
+            } else if (f == 8 && w == 2) {
+                name = r.string();
+            } else if (f == 9 && w == 2) {
+                int l = (int) r.varint();
+                raw = new byte[l];
+                System.arraycopy(t, r.pos, raw, 0, l);
+                r.pos += l;
+            } else if (f == 4 && w == 2) {
+                int l = (int) r.varint();
+                java.nio.FloatBuffer fb = java.nio.ByteBuffer.wrap(t, r.pos, l).order(java.nio.ByteOrder.LITTLE_ENDIAN).asFloatBuffer();
+                r.pos += l;
+                while (fb.hasRemaining()) loose.add((double) fb.get());
+            } else if ((f == 5 || f == 7) && w == 2) {
+                int l = (int) r.varint(), end = r.pos + l;
+                while (r.pos < end) loose.add((double) r.varint());
+            } else if (f == 13) {
+                return null;
+            } else {
+                r.skip(w);
+            }
+        }
+        double[] v;
+        if (raw != null) {
+            java.nio.ByteBuffer bb = java.nio.ByteBuffer.wrap(raw).order(java.nio.ByteOrder.LITTLE_ENDIAN);
+            int size = type == TYPE_FLOAT || type == TYPE_INT32 ? 4 : type == TYPE_INT64 || type == TYPE_DOUBLE ? 8 : 0;
+            if (size == 0 || raw.length / size > 16) return null;
+            v = new double[raw.length / size];
+            for (int i = 0; i < v.length; i++) {
+                v[i] = type == TYPE_FLOAT ? bb.getFloat() : type == TYPE_INT32 ? bb.getInt() : type == TYPE_INT64 ? bb.getLong() : bb.getDouble();
+            }
+        } else {
+            if (loose.isEmpty() || loose.size() > 16) return null;
+            v = new double[loose.size()];
+            for (int i = 0; i < v.length; i++) v[i] = loose.get(i);
+        }
+        return new Object[]{name, v};
     }
 
     /** Element types and shapes of the graph's initializers, by name. */

@@ -119,6 +119,11 @@ public class QnnBuildTest {
         }
 
         @Override
+        public QnnLog lastLog() {
+            return null;
+        }
+
+        @Override
         public String canary() {
             return canaryFails ? "Error code - ORT_FAIL - message: Failed to finalize QNN graph." : null;
         }
@@ -285,11 +290,32 @@ public class QnnBuildTest {
         check(cmp.startsWith("на NPU первым портится " + broken + " — NPU max NaN") && cmp.contains("его делает Sqrt ")
                 && cmp.contains("вход ") && cmp.contains("за пределы fp16 (65504) даже на процессоре выходят: ничего"),
                 "the first NaN tensor, its node and inputs");
+        String traced = QnnBuild.compareRanges(watch, cpuR, npuR, nodes, vt, OnnxPatcher.smallConstants(vit));
+        check(traced.contains("откуда (вверх по графу; процессор / NPU):") && traced.contains("← Mul qnn3_/encoder/layers.1/post_layernorm/r2")
+                        && traced.contains("Div qnn3_/encoder/layers.1/post_layernorm/r_N"),
+                "the way up the graph from the first bad tensor");
         String same = QnnBuild.compareRanges(watch, cpuR, cpuR, nodes, vt);
         check(same.startsWith("NPU и процессор совпадают на всех " + watch.size()), "no difference: says so");
         String over = QnnBuild.compareRanges(watch, bigR, bigR, nodes, vt);
         check(over.contains("за пределы fp16 (65504) даже на процессоре выходят: [qnn0_/encoder/layers.0/input_layernorm/abs"),
                 "values beyond fp16 even in fp32 are listed: " + over.substring(over.indexOf("за пределы")));
+
+        // values beyond fp16's comfort even in fp32: the nodes that make or take them stay on the CPU
+        java.util.Set<String> over16 = QnnBuild.overflowNodes(nodes, bigR, 16000f);
+        boolean firstNorm = false, quiet = QnnBuild.overflowNodes(nodes, cpuR, 16000f).isEmpty();
+        for (String n : over16) firstNorm |= n.startsWith("qnn0_/encoder/layers.0/input_layernorm/abs");
+        check(firstNorm && quiet && over16.size() < nodes.size(), "nodes touching values > 16000 (×100000 input): " + over16.size()
+                + " of " + nodes.size() + ", none for normal input");
+        // on the NPU the attention cores are always watched, the rest sampled
+        List<String> nw = QnnBuild.npuWatchList(nodes, vt, 40);
+        int cores = 0;
+        for (String t : nw) if (t.matches("qnn\\d+_.*/(qk|probs|ctx)(_N\\d+N)?")) cores++;
+        check(cores == 6 && nw.size() <= 40 + 20, "NPU watch: attention cores of both layers (" + cores + ") among " + nw.size());
+        // small constants with their values, for the report
+        Map<String, double[]> mk = OnnxPatcher.smallConstants(new File(args[0]).getParentFile().toPath().resolve("mk.qnn.onnx").toFile());
+        check(mk.containsKey("fmin") && mk.get("fmin")[0] == -10000 && mk.get("pos_inf")[0] == 65504 && mk.get("heads").length == 4,
+                "small constants: fmin " + Arrays.toString(mk.get("fmin")) + ", pos_inf " + Arrays.toString(mk.get("pos_inf"))
+                        + ", heads " + Arrays.toString(mk.get("heads")));
 
         if (bad > 0) {
             System.out.println(bad + " FAILED");
