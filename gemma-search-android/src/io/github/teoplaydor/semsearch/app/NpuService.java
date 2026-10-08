@@ -1005,6 +1005,27 @@ public final class NpuService extends Service {
     }
 
     /**
+     * The nodes of the attention in parts a large graph was compiled with (the way that worked): QNN names its ops
+     * after them, and without them the profile counted attention as "?" (28% in 0.10.8). The graph of that way is
+     * gone after the compilation; made again here, only to be read.
+     */
+    private List<OnnxPatcher.Node> builtAttention(int patches) {
+        if (patches <= BIG_PATCHES) return new ArrayList<OnnxPatcher.Node>();
+        File tmp = new File(getCacheDir(), "npu-profile-att.onnx");
+        try {
+            int way = Integer.parseInt(readText(note(patches, WAY)).trim());
+            OnnxPatcher.chunkAttention(graph, tmp, BIG_WAYS[way][0]);
+            List<OnnxPatcher.Node> att = new ArrayList<OnnxPatcher.Node>();
+            for (OnnxPatcher.Node n : OnnxPatcher.nodes(tmp, new HashMap<String, Long>())) if (n.name.contains("/part")) att.add(n);
+            return att;
+        } catch (Exception e) {
+            return new ArrayList<OnnxPatcher.Node>();
+        } finally {
+            tmp.delete();
+        }
+    }
+
+    /**
      * QNN's own profile of two runs (a separate session: its detailed profiling slows the NPU down): where the
      * time on the NPU goes, by op (QnnLog.profile).
      */
@@ -1029,7 +1050,9 @@ public final class NpuService extends Service {
             List<String> lines = new ArrayList<String>(java.util.Arrays.asList(readText(csv).split("\n")));
             final Map<String, OnnxPatcher.TensorType> types = QnnBuild.tensorTypes(env, graph, dims(graph, patches));
             final Map<String, double[]> consts = OnnxPatcher.smallConstants(graph);
-            return QnnLog.profile(lines, OnnxPatcher.nodes(graph, new HashMap<String, Long>()), 2, new QnnLog.Describer() {
+            List<OnnxPatcher.Node> nodes = OnnxPatcher.nodes(graph, new HashMap<String, Long>());
+            nodes.addAll(builtAttention(patches));
+            return QnnLog.profile(lines, nodes, 2, new QnnLog.Describer() {
                 @Override
                 public String describe(OnnxPatcher.Node n) {
                     return QnnBuild.describe(n, types, consts);
