@@ -188,6 +188,12 @@ public final class NpuService extends Service {
      * @param deep  QNN's longest graph optimisation (faster runs), else its default
      */
     private OrtSession.SessionOptions options(File model, int patches, boolean log, boolean deep) throws Exception {
+        return options(model, patches, log, deep, Collections.<String, String>emptyMap());
+    }
+
+    /** @param extra more QNN provider options (its profiling) */
+    private OrtSession.SessionOptions options(File model, int patches, boolean log, boolean deep, Map<String, String> extra)
+            throws Exception {
         OrtSession.SessionOptions o = new OrtSession.SessionOptions();
         // basic optimisations only: later fusions would put back ops the NPU cannot run
         o.setOptimizationLevel(OrtSession.SessionOptions.OptLevel.BASIC_OPT);
@@ -204,6 +210,7 @@ public final class NpuService extends Service {
             qnn.put("enable_htp_fp16_precision", "1");
         }
         if (deep) qnn.put("htp_graph_finalization_optimization_mode", "3");
+        qnn.putAll(extra);
         o.addQnn(qnn);
         return o;
     }
@@ -284,7 +291,6 @@ public final class NpuService extends Service {
      * either, the error says where the NPU's result goes wrong (scanReport).
      */
     private OrtSession compile(final int patches, float[] pixels, long[] positions, int patchDim) throws Exception {
-        final File ctx = context(patches);
         note(patches, "precision").delete();
         // the reference sessions of other detail levels go: a compilation needs the memory (they come back on demand)
         for (Integer p : new ArrayList<Integer>(cpuSessions.keySet())) {
@@ -330,47 +336,48 @@ public final class NpuService extends Service {
         // QNN's compiler runs in this process: the reference session's memory goes back first
         OrtSession ref = cpuSessions.remove(patches);
         if (ref != null) ref.close();
-        for (int round = 0; round < 2; round++) {
-            bf16 = round == 1;
-            stage("сборка под " + patches + " фрагментов: QNN компилирует граф" + (bf16 ? " (BF16)" : ""));
-            QnnBuild.Outcome o;
+        boolean big = patches > BIG_PATCHES;
+        int way = big ? bigWay(patches, rep) : -1;
+        while (true) {
+            File source = graph;
+            boolean deepFirst = true;
+            Set<String> cpu = new LinkedHashSet<String>(start), borders = new LinkedHashSet<String>();
+            if (big) {
+                // a graph this large: attention in parts, maybe QNN's default optimisation and the graph in parts on
+                // the NPU (a Split kept on the CPU between them); noted before, so that a crash moves on to the next way
+                int[] w = BIG_WAYS[way];
+                source = new File(graph.getParentFile(), graph.getName().replace(".onnx", "") + ".att" + w[0] + ".onnx");
+                List<String> splits = OnnxPatcher.chunkAttention(graph, source, w[0]);
+                for (int i = 1; i < w[2] && !splits.isEmpty(); i++) borders.add(splits.get(i * splits.size() / w[2]));
+                cpu.addAll(borders);
+                deepFirst = w[1] == 1;
+                rep.append("способ сборки ").append(way + 1).append(" из ").append(BIG_WAYS.length).append(": ").append(wayText(w))
+                        .append(splits.isEmpty() ? " (внимание в графе не найдено — целиком)" : "").append('\n');
+                writeText(note(patches, "attempt"), String.valueOf(way));
+            }
             try {
-                o = QnnBuild.run(graph, start, npu(patches, ctx), COMPILE_BUDGET_MS);
+                OrtSession s = rounds(patches, source, cpu, borders, deepFirst, pixels, positions, patchDim, want, rep, way);
+                if (s != null) return s;
+                start = cpu;
+                start.removeAll(borders);
+                if (!big || way + 1 >= BIG_WAYS.length) break;
             } catch (Exception e) {
-                // what was done so far stays in the report
-                throw new Exception(rep + (e.getMessage() != null ? e.getMessage() : e.toString()), e);
-            }
-            rep.append(bf16 ? "BF16: " : "").append(o.report);
-            if (o.compiled != null && !o.compiled.equals(graph)) o.compiled.delete();
-            if (!o.ok) {
-                if (round == 0) {
-                    bf16 = false;
-                    writeText(note(patches, "qnn"), rep.toString());
-                    throw new Exception(rep.toString());
+                // QNN's own failure is in the report already; anything else is added (what was done so far stays there)
+                String m = e instanceof Reported ? "" : e.getMessage() != null ? e.getMessage() : e.toString();
+                if (!big || way + 1 >= BIG_WAYS.length) {
+                    String text = rep + m;
+                    writeText(note(patches, "qnn"), text);
+                    throw new Exception(text, e);
                 }
-                break;
+                rep.append(m.isEmpty() ? "" : "  не собралось: " + (m.length() > 300 ? m.substring(0, 300) + "…" : m)).append('\n');
+            } finally {
+                if (big) {
+                    note(patches, "attempt").delete(); // the process lived through this way
+                    source.delete();
+                }
             }
-            if (bf16 && o.log != null && (o.log.bf16Refused != null || o.log.supported == 0)) {
-                rep.append("\n  BF16 недоступен: ").append(o.log.bf16Refused != null ? o.log.bf16Refused : "QNN не взял ни одного узла");
-                ctx.delete();
-                break;
-            }
-            stage("сборка под " + patches + " фрагментов: проверка NPU против процессора");
-            OrtSession quiet = env.createSession(ctx.getPath(), options(graph, patches, false, true));
-            float c = cosine(encode(quiet, pixels, positions, patches, patchDim), want);
-            rep.append(String.format(java.util.Locale.ROOT, "\n  проверка на этой картинке: совпадение с процессором %.4f", c));
-            if (c >= MATCH) {
-                writeText(note(patches, "qnn"), rep.toString());
-                StringBuilder cpu = new StringBuilder();
-                for (String n : o.cpu) cpu.append(n).append('\n');
-                writeText(note(patches, "cpu"), cpu.toString());
-                writeText(note(patches, "precision"), bf16 ? "bf16" : "fp16");
-                return quiet;
-            }
-            quiet.close();
-            ctx.delete();
-            start = new LinkedHashSet<String>(o.cpu);
-            rep.append('\n');
+            way++;
+            writeText(note(patches, "way"), String.valueOf(way));
         }
         bf16 = false;
         String where;
@@ -387,6 +394,115 @@ public final class NpuService extends Service {
         String text = "NPU считает неверно — " + rep.toString().trim() + "\nГде NPU портит результат: " + where;
         writeText(note(patches, "qnn"), text);
         throw new Exception(text);
+    }
+
+    /**
+     * Patch counts above this compile in a lighter way (BIG_WAYS): QNN's compiler crashed the NPU process on the
+     * whole graph at 2520 patches (280 tokens), with attention of 12 × 2520² scores per layer.
+     */
+    static final int BIG_PATCHES = 1024;
+    /**
+     * Ways to compile a large graph, in order: {attention parts, QNN's longest optimisation (1) or its default (0),
+     * parts of the graph on the NPU}. A way that killed the process is not tried again; one that failed otherwise
+     * gives way to the next at once.
+     */
+    static final int[][] BIG_WAYS = {{4, 1, 1}, {4, 0, 1}, {4, 0, 4}, {8, 0, 8}};
+
+    static String wayText(int[] w) {
+        return "внимание по " + w[0] + " частям, " + (w[1] == 1 ? "оптимизация QNN 3" : "оптимизация QNN по умолчанию")
+                + (w[2] > 1 ? ", граф на NPU в " + w[2] + " частях" : "");
+    }
+
+    /**
+     * The way to compile this patch count now: a way still noted as started (attempt) killed the process — it goes
+     * into the crash list and the next way follows; the list goes into the report.
+     */
+    private int bigWay(int patches, StringBuilder rep) throws Exception {
+        int way = 0;
+        try {
+            way = Integer.parseInt(readText(note(patches, "way")).trim());
+        } catch (NumberFormatException ignored) {
+            // the first way
+        }
+        String started = readText(note(patches, "attempt")).trim();
+        if (!started.isEmpty()) {
+            int w = way;
+            try {
+                w = Integer.parseInt(started);
+            } catch (NumberFormatException ignored) {
+                // the one noted as current
+            }
+            if (w >= 0 && w < BIG_WAYS.length) {
+                String crashes = readText(note(patches, "crashes"));
+                writeText(note(patches, "crashes"), crashes + "способ " + (w + 1) + " (" + wayText(BIG_WAYS[w]) + ") уронил NPU-процесс\n");
+            }
+            way = Math.max(way, w + 1);
+            writeText(note(patches, "way"), String.valueOf(way));
+            note(patches, "attempt").delete();
+        }
+        String history = readText(note(patches, "crashes")).trim();
+        if (!history.isEmpty()) rep.append(history).append('\n');
+        if (way >= BIG_WAYS.length) {
+            throw new Exception("NPU не собирает граф под " + patches + " фрагментов: все способы сборки роняли NPU-процесс —\n" + history);
+        }
+        return way;
+    }
+
+    /** QNN could not compile: why is in the report already. */
+    private static final class Reported extends Exception {
+        Reported() {
+            super("QNN не собрал граф");
+        }
+    }
+
+    /**
+     * Compiles {@code source} (fp16, then BF16 when the NPU's features differ from the CPU's) and checks it: the
+     * session when it matches, null when the NPU's numbers are wrong in both; throws when QNN cannot compile it.
+     * {@code cpu} ends as the nodes the last compilation kept on the CPU.
+     */
+    private OrtSession rounds(int patches, File source, Set<String> cpu, Set<String> borders, boolean deepFirst, float[] pixels,
+                              long[] positions, int patchDim, float[] want, StringBuilder rep, int way) throws Exception {
+        File ctx = context(patches);
+        for (int round = 0; round < 2; round++) {
+            bf16 = round == 1;
+            stage("сборка под " + patches + " фрагментов: QNN компилирует граф" + (bf16 ? " (BF16)" : "")
+                    + (way >= 0 ? " — способ " + (way + 1) + ": " + wayText(BIG_WAYS[way]) : ""));
+            QnnBuild.Outcome o = QnnBuild.run(source, cpu, npu(patches, ctx), way >= 0 ? COMPILE_BUDGET_MS / 2 : COMPILE_BUDGET_MS,
+                    deepFirst);
+            rep.append(bf16 ? "BF16: " : "").append(o.report);
+            if (o.compiled != null && !o.compiled.equals(source)) o.compiled.delete();
+            if (!o.ok) {
+                if (round == 0) {
+                    bf16 = false;
+                    throw new Reported();
+                }
+                return null;
+            }
+            if (bf16 && o.log != null && (o.log.bf16Refused != null || o.log.supported == 0)) {
+                rep.append("\n  BF16 недоступен: ").append(o.log.bf16Refused != null ? o.log.bf16Refused : "QNN не взял ни одного узла");
+                ctx.delete();
+                return null;
+            }
+            stage("сборка под " + patches + " фрагментов: проверка NPU против процессора");
+            OrtSession quiet = env.createSession(ctx.getPath(), options(graph, patches, false, true));
+            float c = cosine(encode(quiet, pixels, positions, patches, patchDim), want);
+            rep.append(String.format(java.util.Locale.ROOT, "\n  проверка на этой картинке: совпадение с процессором %.4f", c));
+            if (c >= MATCH) {
+                writeText(note(patches, "qnn"), rep.toString());
+                StringBuilder names = new StringBuilder();
+                // the borders belong to the way (its graph), not to the model: a compilation of another size starts without them
+                for (String n : o.cpu) if (!borders.contains(n)) names.append(n).append('\n');
+                writeText(note(patches, "cpu"), names.toString());
+                writeText(note(patches, "precision"), bf16 ? "bf16" : "fp16");
+                return quiet;
+            }
+            quiet.close();
+            ctx.delete();
+            cpu.clear();
+            cpu.addAll(o.cpu);
+            rep.append('\n');
+        }
+        return null;
     }
 
     private QnnBuild.Npu npu(final int patches, final File ctx) {
@@ -502,7 +618,7 @@ public final class NpuService extends Service {
 
     /**
      * Another patch count of this graph whose compilation passed the check against the CPU (its precision note
-     * is there) and noted the nodes kept on the CPU; the largest one, or 0.
+     * is there) and noted the nodes kept on the CPU: the largest one compiled whole, else the largest; or 0.
      */
     private int checkedSibling(int patches) {
         String base = graph.getName().replace(".onnx", "") + ".p";
@@ -514,7 +630,10 @@ public final class NpuService extends Service {
             if (!n.startsWith(base) || !n.endsWith("_precision.txt")) continue;
             try {
                 int p = Integer.parseInt(n.substring(base.length(), n.length() - "_precision.txt".length()));
-                if (p != patches && p > best && note(p, "cpu").exists()) best = p;
+                if (p == patches || !note(p, "cpu").exists()) continue;
+                // a count compiled whole (its nodes found by the scan) before a large one; among those the largest
+                boolean small = p <= BIG_PATCHES, bestSmall = best > 0 && best <= BIG_PATCHES;
+                if (best == 0 || (small && !bestSmall) || (small == bestSmall && p > best)) best = p;
             } catch (NumberFormatException ignored) {
                 // another file
             }
@@ -776,12 +895,44 @@ public final class NpuService extends Service {
             encode(s, new float[patches * patchDim], positions, patches, patchDim);
             json = new File(s.endProfiling());
             String built = readText(note(patches, "qnn")).trim() + (fallbacks > 0 ? "\nснимков, пересчитанных на процессоре (NPU дал не числа): " + fallbacks : "");
-            return (built.isEmpty() ? "" : built + "\n") + OrtProfile.parse(json).summary(6);
+            return (built.isEmpty() ? "" : built + "\n") + OrtProfile.parse(json).summary(6) + "\nNPU изнутри (профиль QNN): "
+                    + qnnProfile(ctx.exists() ? ctx : graph, patches, patchDim, positions);
         } finally {
             s.close();
             if (json != null) json.delete();
             File[] left = getCacheDir().listFiles();
             if (left != null) for (File f : left) if (f.getName().startsWith("npu-profile")) f.delete();
+        }
+    }
+
+    /**
+     * QNN's own profile of two runs (a separate session: its detailed profiling slows the NPU down): where the
+     * time on the NPU goes, by op (QnnLog.profile).
+     */
+    private String qnnProfile(File model, int patches, int patchDim, long[] positions) {
+        File csv = new File(getCacheDir(), "npu-qnn-profile.csv");
+        csv.delete();
+        Map<String, String> extra = new HashMap<String, String>();
+        extra.put("profiling_level", "detailed");
+        extra.put("profiling_file_path", csv.getPath());
+        try {
+            OrtSession.SessionOptions o = options(graph, patches, false, true, extra);
+            try {
+                OrtSession s = env.createSession(model.getPath(), o);
+                try {
+                    for (int run = 0; run < 2; run++) encode(s, new float[patches * patchDim], positions, patches, patchDim);
+                } finally {
+                    s.close();
+                }
+            } finally {
+                o.close();
+            }
+            List<String> lines = new ArrayList<String>(java.util.Arrays.asList(readText(csv).split("\n")));
+            return QnnLog.profile(lines, OnnxPatcher.nodes(graph, new HashMap<String, Long>()), 2);
+        } catch (Exception e) {
+            return "не снят: " + e.getMessage();
+        } finally {
+            csv.delete();
         }
     }
 

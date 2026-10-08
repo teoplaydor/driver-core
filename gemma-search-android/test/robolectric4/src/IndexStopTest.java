@@ -129,6 +129,41 @@ public class IndexStopTest {
         System.out.println("run by the user: " + e.idxStatus.replace('\n', ' '));
         assertEquals(20, e.store().count(IndexStore.KIND_PHOTO));
         assertFalse(e.prefs().contains("qnn_crash"));
+
+        // 4. The NPU process dies compiling a large graph (280 tokens): the photos go back into the queue and a new
+        //    process compiles the next way — twice here, then it works and every photo is indexed, none failed.
+        e.store().clearMedia();
+        e.prefs().edit().putInt("photo_detail", 2).apply();
+        java.lang.reflect.Field pool = Engine.class.getDeclaredField("qnnPool");
+        pool.setAccessible(true);
+        pool.setInt(e, 3); // 280 tokens = 2520 patches
+        final int[] reloads = {0};
+        final String died = "NPU-процесс упал: сбой в машинном коде (ONNX Runtime или QNN); в это время: сборка под 2520 фрагментов: "
+                + "QNN компилирует граф";
+        Engine.reloadForTest = () -> {
+            reloads[0]++;
+            if (reloads[0] == 1) {
+                Breaking again = new Breaking();
+                again.error = npuCrash(died + " — способ 2");
+                return again;
+            }
+            return new Robo.FakeEmbedder("photo");
+        };
+        Breaking first = new Breaking();
+        first.error = npuCrash(died + " — способ 1");
+        e.attachModelForTest(first);
+        Robo.waitFor("ready", e::ready);
+        e.loadedAccel = Engine.ACCEL_NPU_QNN;
+        e.prefs().edit().putInt("batch", 4).apply();
+        e.startIndex(1000, 0);
+        Robo.waitFor("done", () -> !e.indexing && e.idxTotal > 0);
+        System.out.println("NPU restarted twice: " + e.idxStatus.replace('\n', ' '));
+        assertEquals(2, reloads[0]);
+        assertTrue(e.idxStatus, e.idxStatus.startsWith("Готово: 20 файлов"));
+        assertEquals(20, e.store().count(IndexStore.KIND_PHOTO));
+        assertTrue(e.prefs().getStringSet("failed_media", new java.util.HashSet<String>()).isEmpty());
+        assertFalse(e.prefs().contains("qnn_crash"));
+        Engine.reloadForTest = null;
         a.finish();
     }
 }

@@ -389,6 +389,32 @@ public class QnnBuildTest {
         }
         check(leaks.isEmpty(), "the NPU gets no boolean or position integer: " + (leaks.isEmpty() ? "none" : leaks.toString()));
 
+        // attention in parts along the queries (QNN's compiler crashed the NPU process on the whole attention at 2520
+        // patches): the same output, also with parts of unequal size (24 queries in 5); its Split kept on the CPU (a
+        // border between parts of the graph on the NPU) changes nothing either
+        int g4softmax = 0;
+        for (OnnxPatcher.Node nd : gn) if (nd.opType.equals("Softmax")) g4softmax++;
+        for (int parts : new int[]{4, 5}) {
+            File g4att = new File(dir, "g4.qnn.r4.att" + parts + ".onnx");
+            List<String> splits = OnnxPatcher.chunkAttention(g4, g4att, parts);
+            Map<String, Integer> opCount = new HashMap<String, Integer>();
+            for (OnnxPatcher.Node nd : OnnxPatcher.nodes(g4att, new HashMap<String, Long>())) {
+                opCount.put(nd.opType, opCount.containsKey(nd.opType) ? opCount.get(nd.opType) + 1 : 1);
+            }
+            float[] att = run(g4att, gfin, glin, gshapes);
+            check(splits.size() == g4softmax && opCount.get("Softmax") == parts * g4softmax && maxDiff(g4ref, att) / g4max < 1e-6,
+                    "attention in " + parts + " parts: " + splits.size() + " Split, " + opCount.get("Softmax") + " Softmax, relative difference "
+                            + maxDiff(g4ref, att) / g4max);
+            File border = new File(dir, "g4.qnn.r4.att" + parts + ".cpu.onnx");
+            List<String> unmovedSplit = OnnxPatcher.keepOnCpu(g4att, border, new HashSet<String>(splits), QnnBuild.tensorTypes(env, g4att, dims()));
+            float[] bordered = run(border, gfin, glin, gshapes);
+            check(unmovedSplit.isEmpty() && maxDiff(g4ref, bordered) / g4max < 1e-6,
+                    "its Split on the CPU as a border: relative difference " + maxDiff(g4ref, bordered) / g4max);
+        }
+        File noAtt = new File(dir, "zoo.att.onnx");
+        check(OnnxPatcher.chunkAttention(zoo, noAtt, 4).isEmpty() && OnnxPatcher.nodes(noAtt, new HashMap<String, Long>()).size()
+                == OnnxPatcher.nodes(zoo, new HashMap<String, Long>()).size(), "a graph without this attention is copied as it is");
+
         if (bad > 0) {
             System.out.println(bad + " FAILED");
             System.exit(1);

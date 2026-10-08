@@ -314,6 +314,41 @@ public class SpeedupsTest {
         }
         new File(vit.getParentFile(), "vit.qnn.p96_precision.txt").delete();
         new File(vit.getParentFile(), "vit.qnn.p96_cpu.txt").delete();
+        // A large graph (more than 1024 patches; 280 tokens are 2520) compiles in lighter ways. Way 1 is still noted
+        // as started — the process died in it: it goes into the report as a crash and the next ways are tried in
+        // turn (here each fails at once: no QNN in this ONNX Runtime).
+        writeText(new File(vit.getParentFile(), "vit.qnn.p1100_attempt.txt"), "0");
+        final Object[] bigRun = new Object[1];
+        Thread bt = new Thread(() -> {
+            io.github.teoplaydor.semsearch.core.VisionRunner v = null;
+            try {
+                java.lang.reflect.Constructor<?> k = Class.forName("io.github.teoplaydor.semsearch.app.NpuVision")
+                        .getDeclaredConstructor(Context.class, File.class, File.class);
+                k.setAccessible(true);
+                v = (io.github.teoplaydor.semsearch.core.VisionRunner) k.newInstance(a, q, vit);
+                long[] pos = new long[1100 * 2];
+                for (int i = 0; i < 1100; i++) {
+                    pos[2 * i] = i % 40;
+                    pos[2 * i + 1] = i / 40;
+                }
+                bigRun[0] = v.run(new float[1100 * 32], pos, 1, 1100, 32);
+            } catch (Exception x) {
+                bigRun[0] = x instanceof java.lang.reflect.InvocationTargetException ? x.getCause() : x;
+            } finally {
+                if (v != null) v.close();
+            }
+        });
+        bt.start();
+        Robo.waitFor("npu big run", () -> bigRun[0] != null);
+        String big = String.valueOf(((Exception) bigRun[0]).getMessage());
+        System.out.println("NPU process, 1100 patches: " + big);
+        assertTrue(big, big.contains("способ 1 (внимание по 4 частям, оптимизация QNN 3) уронил NPU-процесс")
+                && big.contains("способ сборки 2 из 4: внимание по 4 частям, оптимизация QNN по умолчанию (внимание в графе не найдено — целиком)")
+                && big.contains("способ сборки 4 из 4: внимание по 8 частям, оптимизация QNN по умолчанию, граф на NPU в 8 частях")
+                && !big.contains("способ сборки 1 из 4") && big.contains("QNN execution provider is not supported"));
+        assertFalse(new File(vit.getParentFile(), "vit.qnn.p1100_attempt.txt").exists());
+        assertFalse(new File(vit.getParentFile(), "vit.qnn.att4.onnx").exists());
+        assertEquals("3", new String(java.nio.file.Files.readAllBytes(new File(vit.getParentFile(), "vit.qnn.p1100_way.txt").toPath()), "UTF-8"));
         e.deleteQnn();
         Robo.waitFor("qnn deleted", () -> !new File(a.getFilesDir(), "qnn").exists());
         assertFalse(e.qnnInstalled());

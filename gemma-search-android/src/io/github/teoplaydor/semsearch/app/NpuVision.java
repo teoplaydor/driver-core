@@ -22,6 +22,7 @@ import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 
+import io.github.teoplaydor.semsearch.core.Tombstone;
 import io.github.teoplaydor.semsearch.core.VisionRunner;
 
 /**
@@ -232,6 +233,22 @@ final class NpuVision implements VisionRunner {
         if (d != null && !d.toString().trim().isEmpty()) r += " (" + d.toString().trim() + ")";
         long rss = (Long) c.getMethod("getRss").invoke(info);
         if (rss > 0) r += ", память процесса в конце " + (rss / 1024) + " МБ";
+        if (reason == 5) {
+            // the tombstone: signal, abort message, the crashing thread's stack, the last log lines
+            try {
+                java.io.InputStream in = (java.io.InputStream) c.getMethod("getTraceInputStream").invoke(info);
+                if (in != null) {
+                    try {
+                        Tombstone t = Tombstone.parse(Tombstone.readAll(in));
+                        if (t != null) r += "\n" + t.summary(8, 6);
+                    } finally {
+                        in.close();
+                    }
+                }
+            } catch (Exception ignored) {
+                // no tombstone for this process
+            }
+        }
         return r;
     }
 

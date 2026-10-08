@@ -116,6 +116,13 @@ public final class Engine {
     private volatile String stopError;
     /** The NPU process died during the run: the model is reloaded after it (a new process). */
     private boolean reloadAfterIndex;
+    /**
+     * The NPU process died while compiling a large graph: its photos go back into the queue and the model is
+     * reloaded within the run (a new process compiles the next way); restarts so far.
+     */
+    private boolean npuRestart;
+    private int npuRestarts;
+    private final List<Media.Entry> requeue = new ArrayList<Media.Entry>();
     /** Budgets the NPU compiled for in this run (its first photo of a budget waits for the compilation). */
     private final java.util.Set<Integer> qnnSeen = new java.util.HashSet<Integer>();
     /** The QNN vision graph in use and the pooling kernel (patches = budget × pool²), set by openQnn. */
@@ -438,120 +445,142 @@ public final class Engine {
         ml.submit(new Runnable() {
             @Override
             public void run() {
-                String step = "чтение списка файлов";
-                errorDetails = null;
-                boolean autoCheck = false;
-                closeModels(); // reload (e.g. new thread count): free the old sessions first
-                try {
-                    long t0 = System.currentTimeMillis();
-                    threads = threadCount();
-                    int pm = photoModel();
-                    String mediaSig, notesSig;
-                    if (pm == FastModel.GEMMA) {
-                        HfRepo.Plan plan = HfRepo.loadManifest(manifest);
-                        if (plan == null || !HfRepo.isComplete(plan, modelDir)) {
-                            noModel();
-                            return;
-                        }
-                        step = "инициализация";
-                        mark("загрузка EmbeddingGemma 2 (" + ACCEL_NAMES[accel()] + ")");
-                        model = loadGemma(plan, true);
-                        photo = model;
-                        mediaSig = notesSig = gemmaSig(plan);
-                        if (isNpu(loadedAccel) || isLiteRt(loadedAccel)) {
-                            // the NPU / LiteRT-LM compile on the first run: a driver crash there must not loop
-                            String probe = isNpu(loadedAccel) ? "npu_probe" : "litert_probe";
-                            step = "первый запуск (" + ACCEL_NAMES[loadedAccel] + ")";
-                            prefs.edit().putString(probe, String.valueOf(loadedAccel)).commit();
-                            photo.embedImage(new PatternSource(640, 480, 1), photoBudget());
-                            prefs.edit().remove(probe).commit();
-                        }
-                    } else {
-                        HfRepo.Plan plan = FastModel.plan(ctx, pm);
-                        if (plan == null || !HfRepo.isComplete(plan, FastModel.dir(ctx, pm))) {
-                            noModel();
-                            return;
-                        }
-                        step = "инициализация " + FastModel.NAMES[pm];
-                        mark("загрузка " + FastModel.NAMES[pm] + " (" + FastModel.accel(prefs, pm).label + ")");
-                        photo = openFast(pm, plan);
-                        mediaSig = "s|" + HfRepo.manifestRepo(FastModel.manifest(ctx, pm));
-                        HfRepo.Plan g = gemmaPlan();
-                        String gSig = g != null ? gemmaSig(g) : null;
-                        if (g != null && full) {
-                            step = "EmbeddingGemma 2 для заметок";
-                            mark("загрузка EmbeddingGemma 2 для заметок");
-                            try {
-                                model = loadGemma(g, false);
-                                notesSig = gSig;
-                            } catch (Throwable e) {
-                                android.util.Log.w("SemSearch", "notes model", e);
-                                model = photo;
-                                notesSig = mediaSig;
-                            }
-                        } else {
-                            model = photo;
-                            // A background run leaves notes with their EmbeddingGemma vectors alone.
-                            notesSig = gSig != null && gSig.equals(prefs.getString("notes_sig", "")) ? null : mediaSig;
-                        }
-                    }
-                    step = "пробный запуск";
-                    mark("пробный запуск " + FastModel.NAMES[pm]);
-                    photo.embedQuery("привет");
-                    mark("");
-                    prefs.edit().putInt("crash_streak", 0).apply();
-                    if (!mediaSig.equals(prefs.getString("media_sig", ""))) {
-                        // Different weights: old photo vectors are not comparable.
-                        store.clearMedia();
-                        prefs.edit().putString("media_sig", mediaSig).apply();
-                    }
-                    if (notesSig != null && !notesSig.equals(prefs.getString("notes_sig", ""))) {
-                        step = "переиндексация заметок";
-                        for (IndexStore.Item n : store.notes()) store.updateEmbedding(n, model.embedDocument(n.body));
-                        prefs.edit().putString("notes_sig", notesSig).apply();
-                    }
-                    notesUsable = notesSig != null;
-                    loadedFull = full;
-                    state = State.READY;
-                    status = "Модель готова (" + (System.currentTimeMillis() - t0) / 100 / 10.0 + " с): "
-                            + FastModel.NAMES[pm] + ", " + accelLabel
-                            + (pm == FastModel.GEMMA ? ", потоков: " + threads : "")
-                            + (photo.supportsImages() ? "" : " · только текст");
-                    autoCheck = pm != FastModel.GEMMA && full && !FastModel.checked(prefs, pm);
-                } catch (Throwable e) {
-                    mark("");
-                    closeModels();
-                    state = State.ERROR;
-                    String msg = e.getMessage() != null ? e.getMessage() : e.toString();
-                    status = "Не удалось загрузить модель (" + step + "): " + msg;
-                    java.io.StringWriter sw = new java.io.StringWriter();
-                    e.printStackTrace(new java.io.PrintWriter(sw));
-                    errorDetails = "SemSearch " + BuildInfo.version(ctx) + ", Android " + android.os.Build.VERSION.SDK_INT
-                            + ", " + android.os.Build.MANUFACTURER + " " + android.os.Build.MODEL + "\n" + status + "\n\n" + sw;
-                    android.util.Log.e("SemSearch", status, e);
-                }
-                notifyChanged();
-                if (autoCheck) checkFast(null); // first start of a fast model: find its best accelerator once
-                if (state == State.READY && full && photoModel() == FastModel.GEMMA) {
-                    boolean npuCheck = prefs.getBoolean("npu_check_pending", false) && gemmaFp32Vision() != null;
-                    if (npuCheck || prefs.getBoolean("speed_check_pending", false)) {
-                        // new accelerator files: compare everything once (the check reloads the model at its end)
-                        prefs.edit().putBoolean("npu_check_pending", false).putBoolean("speed_check_pending", false).apply();
-                        benchmark(new Callback<String>() {
-                            @Override
-                            public void done(String report, Exception e) {
-                                prefs.edit().putBoolean("g_report_unseen", true).apply();
-                                notifyChanged();
-                            }
-                        });
-                    } else if (prefs.getBoolean("reindex_pending", false) && AutoIndex.hasMediaAccess(ctx)) {
-                        // the index was cleared for a model with other vectors: rebuild it right away
-                        prefs.edit().putBoolean("reindex_pending", false).apply();
-                        startIndexFromPrefs(false);
-                    }
-                }
+                loadNow(full);
             }
         });
+    }
+
+    /** Test hook: what a reload loads instead of the model files (a stand-in model). */
+    public static volatile java.util.concurrent.Callable<Embedder> reloadForTest;
+
+    /** Loads the models on the {@code ml} thread (a run of indexing calls it directly after the NPU process died). */
+    private void loadNow(final boolean full) {
+        state = State.LOADING;
+        if (reloadForTest != null) {
+            closeModels();
+            try {
+                photo = model = reloadForTest.call();
+                state = State.READY;
+            } catch (Exception e) {
+                state = State.ERROR;
+                status = String.valueOf(e.getMessage());
+            }
+            notifyChanged();
+            return;
+        }
+        String step = "чтение списка файлов";
+        errorDetails = null;
+        boolean autoCheck = false;
+        closeModels(); // reload (e.g. new thread count): free the old sessions first
+        try {
+            long t0 = System.currentTimeMillis();
+            threads = threadCount();
+            int pm = photoModel();
+            String mediaSig, notesSig;
+            if (pm == FastModel.GEMMA) {
+                HfRepo.Plan plan = HfRepo.loadManifest(manifest);
+                if (plan == null || !HfRepo.isComplete(plan, modelDir)) {
+                    noModel();
+                    return;
+                }
+                step = "инициализация";
+                mark("загрузка EmbeddingGemma 2 (" + ACCEL_NAMES[accel()] + ")");
+                model = loadGemma(plan, true);
+                photo = model;
+                mediaSig = notesSig = gemmaSig(plan);
+                if (isNpu(loadedAccel) || isLiteRt(loadedAccel)) {
+                    // the NPU / LiteRT-LM compile on the first run: a driver crash there must not loop
+                    String probe = isNpu(loadedAccel) ? "npu_probe" : "litert_probe";
+                    step = "первый запуск (" + ACCEL_NAMES[loadedAccel] + ")";
+                    prefs.edit().putString(probe, String.valueOf(loadedAccel)).commit();
+                    photo.embedImage(new PatternSource(640, 480, 1), photoBudget());
+                    prefs.edit().remove(probe).commit();
+                }
+            } else {
+                HfRepo.Plan plan = FastModel.plan(ctx, pm);
+                if (plan == null || !HfRepo.isComplete(plan, FastModel.dir(ctx, pm))) {
+                    noModel();
+                    return;
+                }
+                step = "инициализация " + FastModel.NAMES[pm];
+                mark("загрузка " + FastModel.NAMES[pm] + " (" + FastModel.accel(prefs, pm).label + ")");
+                photo = openFast(pm, plan);
+                mediaSig = "s|" + HfRepo.manifestRepo(FastModel.manifest(ctx, pm));
+                HfRepo.Plan g = gemmaPlan();
+                String gSig = g != null ? gemmaSig(g) : null;
+                if (g != null && full) {
+                    step = "EmbeddingGemma 2 для заметок";
+                    mark("загрузка EmbeddingGemma 2 для заметок");
+                    try {
+                        model = loadGemma(g, false);
+                        notesSig = gSig;
+                    } catch (Throwable e) {
+                        android.util.Log.w("SemSearch", "notes model", e);
+                        model = photo;
+                        notesSig = mediaSig;
+                    }
+                } else {
+                    model = photo;
+                    // A background run leaves notes with their EmbeddingGemma vectors alone.
+                    notesSig = gSig != null && gSig.equals(prefs.getString("notes_sig", "")) ? null : mediaSig;
+                }
+            }
+            step = "пробный запуск";
+            mark("пробный запуск " + FastModel.NAMES[pm]);
+            photo.embedQuery("привет");
+            mark("");
+            prefs.edit().putInt("crash_streak", 0).apply();
+            if (!mediaSig.equals(prefs.getString("media_sig", ""))) {
+                // Different weights: old photo vectors are not comparable.
+                store.clearMedia();
+                prefs.edit().putString("media_sig", mediaSig).apply();
+            }
+            if (notesSig != null && !notesSig.equals(prefs.getString("notes_sig", ""))) {
+                step = "переиндексация заметок";
+                for (IndexStore.Item n : store.notes()) store.updateEmbedding(n, model.embedDocument(n.body));
+                prefs.edit().putString("notes_sig", notesSig).apply();
+            }
+            notesUsable = notesSig != null;
+            loadedFull = full;
+            state = State.READY;
+            status = "Модель готова (" + (System.currentTimeMillis() - t0) / 100 / 10.0 + " с): "
+                    + FastModel.NAMES[pm] + ", " + accelLabel
+                    + (pm == FastModel.GEMMA ? ", потоков: " + threads : "")
+                    + (photo.supportsImages() ? "" : " · только текст");
+            autoCheck = pm != FastModel.GEMMA && full && !FastModel.checked(prefs, pm);
+        } catch (Throwable e) {
+            mark("");
+            closeModels();
+            state = State.ERROR;
+            String msg = e.getMessage() != null ? e.getMessage() : e.toString();
+            status = "Не удалось загрузить модель (" + step + "): " + msg;
+            java.io.StringWriter sw = new java.io.StringWriter();
+            e.printStackTrace(new java.io.PrintWriter(sw));
+            errorDetails = "SemSearch " + BuildInfo.version(ctx) + ", Android " + android.os.Build.VERSION.SDK_INT
+                    + ", " + android.os.Build.MANUFACTURER + " " + android.os.Build.MODEL + "\n" + status + "\n\n" + sw;
+            android.util.Log.e("SemSearch", status, e);
+        }
+        notifyChanged();
+        if (indexing) return; // reloaded within a run of indexing: what follows a load waits for its end
+        if (autoCheck) checkFast(null); // first start of a fast model: find its best accelerator once
+        if (state == State.READY && full && photoModel() == FastModel.GEMMA) {
+            boolean npuCheck = prefs.getBoolean("npu_check_pending", false) && gemmaFp32Vision() != null;
+            if (npuCheck || prefs.getBoolean("speed_check_pending", false)) {
+                // new accelerator files: compare everything once (the check reloads the model at its end)
+                prefs.edit().putBoolean("npu_check_pending", false).putBoolean("speed_check_pending", false).apply();
+                benchmark(new Callback<String>() {
+                    @Override
+                    public void done(String report, Exception e) {
+                        prefs.edit().putBoolean("g_report_unseen", true).apply();
+                        notifyChanged();
+                    }
+                });
+            } else if (prefs.getBoolean("reindex_pending", false) && AutoIndex.hasMediaAccess(ctx)) {
+                // the index was cleared for a model with other vectors: rebuild it right away
+                prefs.edit().putBoolean("reindex_pending", false).apply();
+                startIndexFromPrefs(false);
+            }
+        }
     }
 
     private void noModel() {
@@ -1656,11 +1685,41 @@ public final class Engine {
         float cos = 1f;
         float[] emb;
         String error;
+        /** The NPU process crashes on the way (a large graph's compilation, tried again another way). */
+        String crashes = "";
     }
 
-    /** Embeds synthetic photos (after a warm-up) and returns the best of two timed runs. */
+    /** Times the NPU process may crash while compiling a large graph before the NPU gives up (each time another way). */
+    static final int MAX_NPU_RESTARTS = 3;
+
+    /** The NPU with a graph so large that it compiles in lighter ways, each tried in a new process after a crash. */
+    private static boolean bigNpu(int accel, int budget, int pool) {
+        return isQnn(accel) && budget * pool * pool > NpuService.BIG_PATCHES;
+    }
+
+    /**
+     * Embeds synthetic photos (after a warm-up) and returns the best of two timed runs. A large graph on the NPU
+     * whose compilation crashed the NPU process is measured again (a new process compiles it the next way).
+     */
     private Measure measure(ModelConfig cfg, HfTokenizer tok, HfRepo.Plan plan, int accel, int nThreads, int batch,
                             int budget, float[] reference) {
+        int pool = cfg != null ? Math.max(1, cfg.image.poolingKernelSize) : 1;
+        StringBuilder crashes = new StringBuilder();
+        for (int attempt = 0; ; attempt++) {
+            Measure r = measureOnce(cfg, tok, plan, accel, nThreads, batch, budget, reference);
+            boolean crashed = r.error != null && r.error.startsWith("NPU-процесс упал");
+            if (!crashed || !bigNpu(accel, budget, pool) || attempt >= MAX_NPU_RESTARTS) {
+                if (crashes.length() > 0) r.crashes = "\n  до этого NPU-процесс падал при сборке:" + crashes;
+                return r;
+            }
+            crashes.append("\n    ").append(attempt + 1).append(") ").append(r.error.replace("\n", "\n       "));
+            status = "NPU-процесс упал при сборке — новый процесс соберёт другим способом (попытка " + (attempt + 2) + ")…";
+            notifyChanged();
+        }
+    }
+
+    private Measure measureOnce(ModelConfig cfg, HfTokenizer tok, HfRepo.Plan plan, int accel, int nThreads, int batch,
+                                int budget, float[] reference) {
         Measure r = new Measure();
         Embedder m = null;
         try {
@@ -1721,6 +1780,7 @@ public final class Engine {
         else if (isLiteRt(c[0])) rep.append(String.format(java.util.Locale.ROOT, "%.2f с", o.perPhotoMs / 1000.0));
         else rep.append(String.format(java.util.Locale.ROOT, "%.2f с (%.2f + %.2f)", o.perPhotoMs / 1000.0,
                     o.visionMs / 1000.0, o.textMs / 1000.0));
+        rep.append(o.crashes);
     }
 
     /** {screenshots, all} of the last {@link #screenshotShare()}. */
@@ -1946,7 +2006,7 @@ public final class Engine {
                             }
                             if (isQnn(c[0]) && m.error == null && phase == 0) qnnMeasured = true;
                             if (m.error != null) {
-                                rep.append("• ").append(name).append(": не работает — ").append(m.error).append('\n');
+                                rep.append("• ").append(name).append(": не работает — ").append(m.error).append(m.crashes).append('\n');
                                 continue;
                             }
                             if (reference == null) reference = m.emb;
@@ -1961,6 +2021,8 @@ public final class Engine {
                                             m.visionMs / 1000.0, m.textMs / 1000.0),
                                     reference == m.emb ? "" : String.format(java.util.Locale.ROOT, ", совпадение %.3f", m.cos),
                                     ok ? "" : ownSpace ? " — векторы отличаются от ONNX-версии" : " — отклонено, результат расходится"));
+                            if (!m.crashes.isEmpty()) rep.setLength(rep.length() - 1);
+                            rep.append(m.crashes).append(m.crashes.isEmpty() ? "" : "\n");
                             if (ok) {
                                 okCands.add(c);
                                 okMs.add(m.perPhotoMs);
@@ -2669,6 +2731,9 @@ public final class Engine {
         failStreak.clear();
         stopError = null;
         reloadAfterIndex = false;
+        npuRestart = false;
+        npuRestarts = 0;
+        requeue.clear();
         qnnSeen.clear();
         sumWaitMs = sumVisionMs = sumTextMs = 0;
         timedPhotos = 0;
@@ -2769,6 +2834,21 @@ public final class Engine {
             int left = idxTotal - idxDone;
             idxStatus = String.format(java.util.Locale.ROOT, "%d из %d · %.2f с на файл · осталось ~%s",
                     idxDone, idxTotal, per, eta((long) (per * left))) + timingSplit();
+            if (npuRestart) {
+                // the NPU process died compiling a large graph: its photos again, with a new process (the next way)
+                npuRestart = false;
+                synchronized (queue) {
+                    queue.addAll(0, requeue);
+                }
+                idxProcessed -= requeue.size();
+                for (Media.Entry r : requeue) qnnSeen.remove(budgetFor(r));
+                requeue.clear();
+                idxStatus = idxDone + " из " + idxTotal + " · NPU-процесс упал при сборке — перезапускаю его, сборка пойдёт другим "
+                        + "способом (перезапуск " + npuRestarts + " из " + MAX_NPU_RESTARTS + ")";
+                notifyChanged();
+                loadNow(loadedFull);
+                if (state != State.READY || photo == null) stopError = "после падения NPU-процесса модель не загрузилась: " + status;
+            }
             notifyChanged();
             ml.submit(this);
         }
@@ -2821,7 +2901,7 @@ public final class Engine {
                 if (bitmaps.size() == 1 || npuProcessGone(batchError)) throw batchError;
                 // One bad photo (or a batch the encoder rejects) must not sink the others.
                 embs = new float[bitmaps.size()][];
-                for (int i = 0; i < bitmaps.size() && stopError == null; i++) {
+                for (int i = 0; i < bitmaps.size() && stopError == null && !npuRestart; i++) {
                     try {
                         embs[i] = embedPhotos(java.util.Collections.singletonList(bitmaps.get(i)), budgetFor(ok.get(i)))[0];
                     } catch (Throwable t) {
@@ -2873,6 +2953,21 @@ public final class Engine {
     private void modelFail(Media.Entry e, Throwable t) {
         if (stopError != null) return; // stopping: the file stays as it is
         String msg = t.getMessage() != null ? t.getMessage() : t.toString();
+        if (npuProcessGone(t) && e.kind == IndexStore.KIND_PHOTO && bigNpu(loadedAccel, budgetFor(e), qnnPool)
+                && (npuRestart || npuRestarts < MAX_NPU_RESTARTS)) {
+            // a large graph's compilation: a new process tries the next way
+            if (!npuRestart) {
+                npuRestart = true;
+                npuRestarts++;
+                android.util.Log.e("SemSearch", "index: NPU process gone, restart " + npuRestarts, t);
+            }
+            requeue.add(e);
+            return;
+        }
+        if (npuRestart) {
+            requeue.add(e); // the rest of the batch goes back with it
+            return;
+        }
         if (npuProcessGone(t)) {
             stopError = msg;
             reloadAfterIndex = true;

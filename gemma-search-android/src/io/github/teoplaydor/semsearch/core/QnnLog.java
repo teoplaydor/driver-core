@@ -207,6 +207,86 @@ public final class QnnLog {
         return hi - 1;
     }
 
+    /**
+     * QNN's own profile of the graph on the NPU ({@code profiling_level=detailed}: the CSV ONNX Runtime writes,
+     * "Msg Timestamp,Message,Time,Unit of Measurement,Timing Source,Event Level,Event Identifier"): the time of its
+     * ops by op type (the graph's node a QNN op is named after) and the slowest nodes, and its overall timings,
+     * per run.
+     */
+    public static String profile(List<String> csv, List<OnnxPatcher.Node> graph, int runs) {
+        Map<String, OnnxPatcher.Node> byName = new HashMap<String, OnnxPatcher.Node>();
+        for (OnnxPatcher.Node n : graph) {
+            if (n.name.isEmpty()) continue;
+            byName.put(n.name, n);
+            byName.put(sanitized(n.name), n);
+        }
+        Map<String, Double> perNode = new LinkedHashMap<String, Double>(), totals = new LinkedHashMap<String, Double>();
+        Map<String, String> units = new HashMap<String, String>();
+        String nodeUnit = "";
+        for (String line : csv) {
+            String[] f = line.split(",", 7);
+            if (f.length < 7 || f[0].startsWith("Msg Timestamp")) continue;
+            double v;
+            try {
+                v = Double.parseDouble(f[2].trim());
+            } catch (NumberFormatException e) {
+                continue;
+            }
+            String id = f[6].trim();
+            if ("NODE".equals(f[1].trim()) && !"NULL".equals(id)) {
+                perNode.put(id, (perNode.containsKey(id) ? perNode.get(id) : 0) + v);
+                nodeUnit = f[3].trim();
+            } else if (!"NODE".equals(f[1].trim()) && (!"NULL".equals(id) || "EXECUTE".equals(f[1].trim()))) {
+                String k = "NULL".equals(id) ? f[1].trim() : id;
+                totals.put(k, (totals.containsKey(k) ? totals.get(k) : 0) + v);
+                units.put(k, f[3].trim());
+            }
+        }
+        StringBuilder sb = new StringBuilder();
+        int r = Math.max(1, runs);
+        int shown = 0;
+        for (Map.Entry<String, Double> e : totals.entrySet()) {
+            if (shown++ >= 6) break;
+            sb.append(sb.length() > 0 ? "; " : "").append(e.getKey()).append(' ').append(Math.round(e.getValue() / r)).append(' ')
+                    .append(units.get(e.getKey()).toLowerCase(java.util.Locale.ROOT));
+        }
+        if (perNode.isEmpty()) return sb.length() > 0 ? sb.toString() : "QNN не дал профиля по операциям";
+        double all = 0;
+        Map<String, Double> byOp = new HashMap<String, Double>();
+        Map<String, String> opOf = new HashMap<String, String>();
+        for (Map.Entry<String, Double> e : perNode.entrySet()) {
+            OnnxPatcher.Node n = longestPrefix(byName, e.getKey());
+            if (n == null) n = longestPrefix(byName, sanitized(e.getKey()));
+            String op = n != null ? n.opType : "?";
+            opOf.put(e.getKey(), op);
+            byOp.put(op, (byOp.containsKey(op) ? byOp.get(op) : 0) + e.getValue());
+            all += e.getValue();
+        }
+        List<Map.Entry<String, Double>> ops = new ArrayList<Map.Entry<String, Double>>(byOp.entrySet()), nodes =
+                new ArrayList<Map.Entry<String, Double>>(perNode.entrySet());
+        java.util.Comparator<Map.Entry<String, Double>> desc = new java.util.Comparator<Map.Entry<String, Double>>() {
+            @Override
+            public int compare(Map.Entry<String, Double> a, Map.Entry<String, Double> b) {
+                return Double.compare(b.getValue(), a.getValue());
+            }
+        };
+        java.util.Collections.sort(ops, desc);
+        java.util.Collections.sort(nodes, desc);
+        sb.append(sb.length() > 0 ? "\n" : "").append("по операциям (").append(perNode.size()).append(" операций QNN, всего ")
+                .append(Math.round(all / r)).append(' ').append(nodeUnit.toLowerCase(java.util.Locale.ROOT)).append("): ");
+        for (int i = 0; i < ops.size() && i < 8; i++) {
+            sb.append(i > 0 ? ", " : "").append(ops.get(i).getKey()).append(' ')
+                    .append(Math.round(100 * ops.get(i).getValue() / Math.max(1e-9, all))).append('%');
+        }
+        sb.append("\nдольше всего: ");
+        for (int i = 0; i < nodes.size() && i < 5; i++) {
+            String id = nodes.get(i).getKey();
+            sb.append(i > 0 ? ", " : "").append(id.length() > 60 ? "…" + id.substring(id.length() - 59) : id).append(" (")
+                    .append(opOf.get(id)).append(") ").append(Math.round(100 * nodes.get(i).getValue() / Math.max(1e-9, all))).append('%');
+        }
+        return sb.toString();
+    }
+
     /** For the report: how much QNN took, what it refused and why, and its errors. */
     public String summary(int maxErrors) {
         StringBuilder sb = new StringBuilder();

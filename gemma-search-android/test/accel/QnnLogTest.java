@@ -120,6 +120,27 @@ public class QnnLogTest {
         cr.close();
         ct.close();
         cs.close();
+
+        // QNN's own profile of a run (profiling_level=detailed, the CSV ONNX Runtime 1.29 writes): ops by type,
+        // slowest nodes, overall timings — per run (two runs here)
+        String matmul = null;
+        for (OnnxPatcher.Node n : nodes) if (n.opType.equals("MatMul") && matmul == null) matmul = n.name;
+        List<String> csv = new java.util.ArrayList<String>();
+        csv.add("Msg Timestamp,Message,Time,Unit of Measurement,Timing Source,Event Level,Event Identifier");
+        for (int run = 0; run < 2; run++) {
+            csv.add("UNKNOWN,EXECUTE,3100,US,BACKEND,ROOT,NULL");
+            csv.add("UNKNOWN,BACKEND,2800,US,BACKEND,SUB-EVENT,Accelerator (execute) time");
+            csv.add("UNKNOWN,NODE,6000,CYCLES,BACKEND,SUB-EVENT," + matmul);
+            csv.add("UNKNOWN,NODE,3000,CYCLES,BACKEND,SUB-EVENT," + softmax + "_reshape");
+            csv.add("UNKNOWN,NODE,1000,CYCLES,BACKEND,SUB-EVENT,input_0_cast");
+        }
+        String prof = QnnLog.profile(csv, nodes, 2);
+        System.out.println("  " + prof.replace("\n", "\n  "));
+        check(prof.contains("EXECUTE 3100 us; Accelerator (execute) time 2800 us") && prof.contains("по операциям (3 операций QNN, всего 10000 cycles): MatMul 60%, Softmax 30%, ? 10%")
+                        && prof.contains("дольше всего: ") && prof.contains("(MatMul) 60%"),
+                "QNN's profile: ops by type (named after the graph's nodes), slowest nodes, per run");
+        check(QnnLog.profile(Arrays.asList("Msg Timestamp,Message,Time,Unit of Measurement,Timing Source,Event Level,Event Identifier"),
+                nodes, 1).equals("QNN не дал профиля по операциям"), "an empty profile says so");
         if (bad > 0) {
             System.out.println(bad + " FAILED");
             System.exit(1);

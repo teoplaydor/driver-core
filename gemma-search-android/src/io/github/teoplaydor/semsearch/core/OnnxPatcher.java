@@ -465,6 +465,131 @@ public final class OnnxPatcher {
     }
 
     /**
+     * Attention computed in {@code chunks} parts along the queries: for each MatMul(Q, Kᵀ) → [×scale] → Softmax →
+     * MatMul(·, V) the queries are split into rows (Split, ceil(n / chunks) rows each, the last part shorter), each
+     * part goes through its own MatMul → [×scale] → Softmax → MatMul with all keys and values, and the parts are
+     * joined again (Concat). Softmax runs along the keys, so the result is exactly the same; the largest tensors —
+     * the scores, heads × queries × keys — become {@code chunks} times smaller. QNN's compiler crashed the NPU
+     * process on the whole attention at 2520 patches (280 tokens): 12 × 2520² scores per layer.
+     *
+     * @return the Split node of each attention, in graph order (empty when the opset has no Split into equal parts
+     *         without sizes, before 18: then the graph is copied as it is)
+     */
+    public static java.util.List<String> chunkAttention(File in, File out, final int chunks) throws IOException {
+        java.util.Map<String, Long> opsets = new java.util.HashMap<String, Long>();
+        java.util.List<Node> nodes = nodes(in, opsets);
+        Long ai = opsets.get("ai.onnx");
+        final java.util.List<String> splits = new java.util.ArrayList<String>();
+        java.util.Map<String, Node> producer = new java.util.HashMap<String, Node>();
+        java.util.Map<String, java.util.List<Node>> users = new java.util.HashMap<String, java.util.List<Node>>();
+        int token = 0;
+        java.util.regex.Pattern tok = java.util.regex.Pattern.compile("_N(\\d+)N$");
+        for (Node n : nodes) {
+            for (String o : n.outputs) producer.put(o, n);
+            for (String i : n.inputs) {
+                if (!users.containsKey(i)) users.put(i, new java.util.ArrayList<Node>());
+                users.get(i).add(n);
+            }
+            java.util.regex.Matcher m = tok.matcher(n.name);
+            if (m.find()) token = Math.max(token, Integer.parseInt(m.group(1)) + 1);
+        }
+        // the pattern, keyed by its last node (where the parts are written, every input exists by then)
+        final java.util.Map<String, Node[]> byLast = new java.util.HashMap<String, Node[]>();
+        final java.util.Set<String> replaced = new java.util.HashSet<String>();
+        if (chunks > 1 && ai != null && ai >= 18) {
+            for (Node s : nodes) {
+                if (!"Softmax".equals(s.opType) || s.inputs.isEmpty() || s.outputs.isEmpty()) continue;
+                Node mul = producer.get(s.inputs.get(0)), qk;
+                if (mul != null && "Mul".equals(mul.opType) && producer.get(mul.inputs.get(0)) != null
+                        && "MatMul".equals(producer.get(mul.inputs.get(0)).opType)) {
+                    qk = producer.get(mul.inputs.get(0));
+                } else if (mul != null && "MatMul".equals(mul.opType)) {
+                    qk = mul;
+                    mul = null;
+                } else {
+                    continue;
+                }
+                java.util.List<Node> pu = users.get(s.outputs.get(0));
+                if (pu == null || pu.size() != 1 || !"MatMul".equals(pu.get(0).opType) || !pu.get(0).inputs.get(0).equals(s.outputs.get(0))) continue;
+                if (users.get(qk.outputs.get(0)).size() != 1 || (mul != null && users.get(mul.outputs.get(0)).size() != 1)) continue;
+                Node pv = pu.get(0);
+                byLast.put(pv.name, new Node[]{qk, mul, s, pv});
+                for (Node n : new Node[]{qk, mul, s, pv}) if (n != null) replaced.add(n.name);
+            }
+        }
+        final int firstToken = token;
+        editGraph(in, out, new GraphEdit() {
+            @Override
+            public byte[] apply(byte[] b, int from, int to) throws IOException {
+                ByteArrayOutputStream g = new ByteArrayOutputStream(to - from + 4096 * byLast.size());
+                int next = firstToken;
+                Reader r = new Reader(b, from, to);
+                while (r.more()) {
+                    int start = r.pos;
+                    long key = r.varint();
+                    int field = (int) (key >>> 3), wire = (int) (key & 7);
+                    if (field != 1 || wire != 2) {
+                        r.skip(wire);
+                        g.write(b, start, r.pos - start);
+                        continue;
+                    }
+                    int len = (int) r.varint();
+                    byte[] raw = new byte[len];
+                    System.arraycopy(b, r.pos, raw, 0, len);
+                    r.pos += len;
+                    Node n = parseNode(raw);
+                    if (!replaced.contains(n.name)) {
+                        writeLenField(g, 1, raw);
+                        continue;
+                    }
+                    Node[] a = byLast.get(n.name);
+                    if (a == null) continue; // written with its attention's last node
+                    Node qk = a[0], mul = a[1], sm = a[2], pv = a[3];
+                    String base = sm.name.replaceFirst("_N\\d+N$", "") + "/part";
+                    String[] q = new String[chunks], ctx = new String[chunks];
+                    for (int i = 0; i < chunks; i++) q[i] = base + i + "/q";
+                    String split = base + "_split_N" + next++ + "N";
+                    splits.add(split);
+                    writeLenField(g, 1, nodeWith("Split", new String[]{qk.inputs.get(0)}, q, split,
+                            attrInt("axis", -2), attrInt("num_outputs", chunks)));
+                    Object axis = sm.attrs.get("axis");
+                    for (int i = 0; i < chunks; i++) {
+                        String p = base + i;
+                        writeLenField(g, 1, nodeWith("MatMul", new String[]{q[i], qk.inputs.get(1)}, new String[]{p + "/qk"},
+                                p + "_qk_N" + next++ + "N"));
+                        String sc = p + "/qk";
+                        if (mul != null) {
+                            writeLenField(g, 1, nodeWith("Mul", new String[]{sc, mul.inputs.get(1)}, new String[]{p + "/scores"},
+                                    p + "_scores_N" + next++ + "N"));
+                            sc = p + "/scores";
+                        }
+                        writeLenField(g, 1, nodeWith("Softmax", new String[]{sc}, new String[]{p + "/probs"}, p + "_probs_N" + next++ + "N",
+                                attrInt("axis", axis instanceof Long ? (Long) axis : -1)));
+                        ctx[i] = p + "/ctx";
+                        writeLenField(g, 1, nodeWith("MatMul", new String[]{p + "/probs", pv.inputs.get(1)}, new String[]{ctx[i]},
+                                p + "_ctx_N" + next++ + "N"));
+                    }
+                    writeLenField(g, 1, nodeWith("Concat", ctx, new String[]{pv.outputs.get(0)}, base + "_concat_N" + next++ + "N",
+                            attrInt("axis", -2)));
+                }
+                return g.toByteArray();
+            }
+        });
+        return splits;
+    }
+
+    /** NodeProto (default domain) with these attributes. */
+    private static byte[] nodeWith(String op, String[] ins, String[] outs, String name, byte[]... attrs) {
+        ByteArrayOutputStream nb = new ByteArrayOutputStream();
+        for (String x : ins) writeLenField(nb, 1, x.getBytes(UTF8));
+        for (String y : outs) writeLenField(nb, 2, y.getBytes(UTF8));
+        writeLenField(nb, 3, name.getBytes(UTF8));
+        writeLenField(nb, 4, op.getBytes(UTF8));
+        for (byte[] a : attrs) writeLenField(nb, 5, a);
+        return nb.toByteArray();
+    }
+
+    /**
      * A tiny float graph — MatMul → Add → Softmax on [1, 64, 64], the ops of attention — to tell whether the NPU
      * compiles anything at all, when a whole model does not compile.
      */

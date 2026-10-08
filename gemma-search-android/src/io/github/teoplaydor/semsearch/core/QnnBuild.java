@@ -72,6 +72,11 @@ public final class QnnBuild {
      * @param budgetMs time for everything, the bisection included
      */
     public static Outcome run(File graph, Set<String> cpuStart, Npu npu, long budgetMs) throws Exception {
+        return run(graph, cpuStart, npu, budgetMs, true);
+    }
+
+    /** @param deepFirst start with QNN's longest optimisation (faster runs), else with its default (lighter) */
+    public static Outcome run(File graph, Set<String> cpuStart, Npu npu, long budgetMs, boolean deepFirst) throws Exception {
         Outcome out = new Outcome();
         long deadline = npu.nowMs() + budgetMs;
         List<OnnxPatcher.Node> nodes = OnnxPatcher.nodes(graph, new HashMap<String, Long>());
@@ -91,7 +96,7 @@ public final class QnnBuild {
         Map<String, Integer> cpuOps = new LinkedHashMap<String, Integer>();
         StringBuilder steps = new StringBuilder(), culprits = new StringBuilder();
         Failure first = null, last = null;
-        boolean deep = true, canaryDone = false;
+        boolean deep = deepFirst, canaryDone = false;
         File current = graph;
         try {
             for (int attempt = 1; attempt <= 8; attempt++) {
