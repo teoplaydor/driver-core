@@ -246,6 +246,52 @@ public class SpeedupsTest {
         assertTrue(String.valueOf(npu[0]), npu[0] instanceof java.io.IOException
                 && ((Exception) npu[0]).getMessage().startsWith("NPU: ") && ((Exception) npu[0]).getMessage().contains("libQnn"));
         System.out.println("NPU process with junk libraries: " + ((Exception) npu[0]).getMessage());
+        // With a real ONNX Runtime (the desktop build, which has no QNN) the process starts and a run fails inside
+        // ONNX Runtime, with its reason. After the last unbind Android makes a new service object in the same
+        // process, where the libraries are already loaded: that one must reach the runtime too (0.9.1 did not).
+        File fx = new File(System.getProperty("npu.fixture"));
+        for (String l : new String[]{"libonnxruntime.so", "libonnxruntime4j_jni.so", "libQnnSystem.so", "libQnnHtpPrepare.so",
+                "libQnnHtp.so", "libQnnHtpV81Stub.so"}) {
+            java.nio.file.Files.copy(new File(fx, l).toPath(), new File(q, l).toPath(), java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+        }
+        System.setProperty("onnxruntime.native.path", q.getAbsolutePath()); // where the desktop build looks
+        final File vit = new File(model, "onnx/vit.qnn.onnx");
+        java.nio.file.Files.copy(new File(fx, "vit.onnx").toPath(), vit.toPath());
+        java.lang.reflect.Field env = svc.getDeclaredField("env");
+        env.setAccessible(true);
+        for (int round = 0; round < 2; round++) {
+            android.app.Service s = service;
+            if (round == 1) {
+                @SuppressWarnings("unchecked")
+                android.app.Service fresh = Robolectric.buildService((Class<android.app.Service>) svc).create().get();
+                s = fresh;
+                org.robolectric.Shadows.shadowOf(a.getApplication()).setComponentNameAndServiceForBindService(
+                        new android.content.ComponentName(a, svc), s.onBind(new android.content.Intent(a, svc)));
+            }
+            final Object[] run = new Object[1];
+            Thread rt = new Thread(() -> {
+                io.github.teoplaydor.semsearch.core.VisionRunner v = null;
+                try {
+                    java.lang.reflect.Constructor<?> k = Class.forName("io.github.teoplaydor.semsearch.app.NpuVision")
+                            .getDeclaredConstructor(Context.class, File.class, File.class);
+                    k.setAccessible(true);
+                    v = (io.github.teoplaydor.semsearch.core.VisionRunner) k.newInstance(a, q, vit);
+                    run[0] = v.run(new float[24 * 32], new long[24 * 2], 1, 24, 32);
+                } catch (java.lang.reflect.InvocationTargetException x) {
+                    run[0] = x.getCause();
+                } catch (Exception x) {
+                    run[0] = x;
+                } finally {
+                    if (v != null) v.close();
+                }
+            });
+            rt.start();
+            Robo.waitFor("npu run " + round, () -> run[0] != null);
+            assertTrue(round + ": " + run[0], run[0] instanceof java.io.IOException && ((Exception) run[0]).getMessage().startsWith("NPU: ")
+                    && ((Exception) run[0]).getMessage().contains("QNN") && !((Exception) run[0]).getMessage().contains("null"));
+            assertNotNull("service object " + round + " has no ONNX Runtime", env.get(s));
+            System.out.println("NPU process, service object " + round + ": " + ((Exception) run[0]).getMessage().trim());
+        }
         e.deleteQnn();
         Robo.waitFor("qnn deleted", () -> !new File(a.getFilesDir(), "qnn").exists());
         assertFalse(e.qnnInstalled());

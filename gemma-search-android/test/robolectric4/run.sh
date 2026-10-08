@@ -5,7 +5,8 @@
 #   AppIndexingTest — MediaStore → decode → embed → SQLite with a stand-in model, Russian bridge
 #   AutoIndexTest   — background jobs: content triggers on MediaStore, the periodic safety net
 #   IdleIndexTest   — indexing while the phone rests: screen off/on, battery, wake lock, self-stop
-#   SpeedupsTest    — fp16 / LiteRT-LM: crash guard, fallbacks, download offer, move to LiteRT-LM and back
+#   SpeedupsTest    — fp16 / LiteRT-LM / QNN: crash guard, fallbacks, download offer, move to LiteRT-LM and
+#                     back, the NPU process with a real ONNX Runtime
 # Needs JDK 21 and Maven. androidx.test (Google Maven) is not used: a tiny API shim in shim/
 # stands in for the few classes Robolectric touches.
 # usage: test/robolectric4/run.sh [TestClass...]
@@ -61,6 +62,21 @@ ANDROID_JAR=${ANDROID_JAR:-/usr/lib/android-sdk/platforms/android-23/android.jar
 "$J21/javac" -nowarn -encoding UTF-8 -cp "$R/cls:$AA:${CP}build/classes:build/deps/ort-classes" -d "$R/cls" \
   $(find "$T/src" -name '*.java' ! -name FakeMediaStore.java)
 
+# The NPU process round trip with a real ONNX Runtime: the desktop build (no QNN in it) and stand-in QNN host
+# libraries, plus a small vision graph
+N="$R/npu"
+if [ ! -s "$N/vit.onnx" ]; then
+  mkdir -p "$N"
+  OJ=build/test/ort-desktop.jar
+  [ -s "$OJ" ] || { mkdir -p build/test && curl -fsSL --retry 8 --retry-delay 10 -o "$OJ" \
+    https://repo1.maven.org/maven2/com/microsoft/onnxruntime/onnxruntime/1.30.0/onnxruntime-1.30.0.jar; }
+  unzip -q -j -o "$OJ" 'ai/onnxruntime/native/linux-x64/*.so' -d "$N"
+  echo 'int qnn_stand_in = 1;' > "$N/stub.c"
+  for l in libQnnSystem libQnnHtpPrepare libQnnHtp libQnnHtpV81Stub; do gcc -shared -fPIC "$N/stub.c" -o "$N/$l.so"; done
+  python3 -c 'import onnx, numpy' 2>/dev/null || python3 -m pip install -q onnx numpy
+  python3 test/accel/make_vit_block.py "$N/vit.onnx"
+fi
+
 rm -rf build/shots
 TESTS=("$@")
 [ ${#TESTS[@]} -gt 0 ] || TESTS=(UiShots AppFlowTest AppIndexingTest AutoIndexTest IdleIndexTest SpeedupsTest)
@@ -68,5 +84,5 @@ TESTS=("$@")
 for t in "${TESTS[@]}"; do
   echo "-- $t"
   "$J21/java" -Dfile.encoding=UTF-8 -Dstdout.encoding=UTF-8 --add-opens=java.base/java.io=ALL-UNNAMED -Drobolectric.offline=true -Drobolectric.dependency.dir="$R/deps" \
-    -Dshot.dir=build/shots -cp "$R/cls:${CP}build/classes:build/deps/ort-classes:$AA" org.junit.runner.JUnitCore "$t"
+    -Dshot.dir=build/shots -Dnpu.fixture="$PWD/$N" -cp "$R/cls:${CP}build/classes:build/deps/ort-classes:$AA" org.junit.runner.JUnitCore "$t"
 done

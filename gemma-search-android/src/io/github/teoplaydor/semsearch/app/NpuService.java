@@ -38,8 +38,10 @@ public final class NpuService extends Service {
     static final int INIT = 1, RUN = 2, PROFILE = 3;
     static final int OK = 0, FAILED = 1;
 
+    // per process: Android makes a new service object for every bind after the last unbind, while the process
+    // (with the libraries loaded and ONNX Runtime's environment) stays
     private static boolean loaded;
-    private OrtEnvironment env;
+    private static OrtEnvironment env;
     private String libDir;
     private File graph;
     private final Map<Integer, OrtSession> sessions = new HashMap<Integer, OrtSession>();
@@ -99,34 +101,40 @@ public final class NpuService extends Service {
         super.onDestroy();
     }
 
+    private void init(String dir, File visionGraph) throws Exception {
+        synchronized (NpuService.class) {
+            if (!loaded) load(dir);
+        }
+        synchronized (this) {
+            if (graph != null && !graph.equals(visionGraph)) {
+                for (OrtSession s : sessions.values()) s.close();
+                sessions.clear();
+            }
+            libDir = dir;
+            graph = visionGraph;
+        }
+    }
+
     /**
      * Loads QNN's host libraries (its HTP backend opens them by name, which finds already-loaded ones), points
      * the DSP loader at this chip's skel, and then ONNX Runtime from the same directory.
      */
-    private synchronized void init(String dir, File visionGraph) throws Exception {
-        if (!loaded) {
-            android.system.Os.setenv("ADSP_LIBRARY_PATH", dir + ";/vendor/dsp/cdsp;/vendor/lib/rfsa/adsp;"
-                    + "/system/lib/rfsa/adsp;/dsp", true);
-            File[] files = new File(dir).listFiles();
-            if (files != null) {
-                for (String name : QnnRuntime.HOST_LIBS) System.load(new File(dir, name).getAbsolutePath());
-                for (File f : files) {
-                    if (f.getName().startsWith("libQnnHtpV") && f.getName().endsWith("Stub.so")) System.load(f.getAbsolutePath());
-                }
+    private static void load(String dir) throws Exception {
+        android.system.Os.setenv("ADSP_LIBRARY_PATH", dir + ";/vendor/dsp/cdsp;/vendor/lib/rfsa/adsp;"
+                + "/system/lib/rfsa/adsp;/dsp", true);
+        File[] files = new File(dir).listFiles();
+        if (files != null) {
+            for (String name : QnnRuntime.HOST_LIBS) System.load(new File(dir, name).getAbsolutePath());
+            for (File f : files) {
+                if (f.getName().startsWith("libQnnHtpV") && f.getName().endsWith("Stub.so")) System.load(f.getAbsolutePath());
             }
-            // ONNX Runtime's core library first, from here: the JNI library's dependency then resolves to it (an
-            // already-loaded soname) instead of the app's own build in the APK, whose symbol versions differ
-            System.load(new File(dir, "libonnxruntime.so").getAbsolutePath());
-            System.setProperty("onnxruntime.native.dir", dir);
-            env = OrtEnvironment.getEnvironment();
-            loaded = true;
         }
-        if (graph != null && !graph.equals(visionGraph)) {
-            for (OrtSession s : sessions.values()) s.close();
-            sessions.clear();
-        }
-        libDir = dir;
-        graph = visionGraph;
+        // ONNX Runtime's core library first, from here: the JNI library's dependency then resolves to it (an
+        // already-loaded soname) instead of the app's own build in the APK, whose symbol versions differ
+        System.load(new File(dir, "libonnxruntime.so").getAbsolutePath());
+        System.setProperty("onnxruntime.native.dir", dir);
+        env = OrtEnvironment.getEnvironment();
+        loaded = true;
     }
 
     private OrtSession.SessionOptions options(int patches) throws Exception {
