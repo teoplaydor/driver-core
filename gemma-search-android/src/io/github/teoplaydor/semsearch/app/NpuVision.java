@@ -42,8 +42,14 @@ final class NpuVision implements VisionRunner {
     private final ExecutorService caller = Executors.newSingleThreadExecutor();
     private final java.util.Set<Integer> compiled = new java.util.HashSet<Integer>();
     private volatile IBinder binder;
+    /**
+     * The process this object set up died. Android restarts a bound service, but the new process was never
+     * given the graph: it is not used, every later call reports the death instead.
+     */
+    private volatile boolean dead;
+    private volatile String death;
     private ServiceConnection conn;
-    private int pid;
+    private volatile int pid;
     private final File io;
     private RandomAccessFile raf;
     private MappedByteBuffer map;
@@ -62,6 +68,7 @@ final class NpuVision implements VisionRunner {
             @Override
             public void onServiceDisconnected(ComponentName name) {
                 binder = null;
+                if (pid > 0) dead = true;
             }
         };
         if (!ctx.bindService(new Intent(ctx, NpuService.class), conn, Context.BIND_AUTO_CREATE)) {
@@ -94,7 +101,7 @@ final class NpuVision implements VisionRunner {
             @Override
             public Parcel call() throws Exception {
                 IBinder b = binder;
-                if (b == null) throw new Crashed("NPU-процесс завершился");
+                if (dead || b == null) throw new Crashed(death());
                 Parcel data = Parcel.obtain(), reply = Parcel.obtain();
                 try {
                     data.writeInterfaceToken(NpuService.DESCRIPTOR);
@@ -102,7 +109,8 @@ final class NpuVision implements VisionRunner {
                     b.transact(code, data, reply, 0);
                 } catch (DeadObjectException e) {
                     reply.recycle();
-                    throw new Crashed("NPU-процесс упал (сбой драйвера NPU)");
+                    dead = true;
+                    throw new Crashed(death());
                 } finally {
                     data.recycle();
                 }
@@ -114,8 +122,11 @@ final class NpuVision implements VisionRunner {
             reply = f.get(timeoutSec, TimeUnit.SECONDS);
         } catch (TimeoutException e) {
             f.cancel(true);
+            String stage = stage();
             if (pid > 0) android.os.Process.killProcess(pid);
-            throw new IOException("NPU не ответил за " + timeoutSec + " с");
+            dead = true;
+            death = "NPU-процесс не ответил за " + timeoutSec + " с и остановлен" + (stage.isEmpty() ? "" : "; " + stage);
+            throw new Crashed(death);
         } catch (java.util.concurrent.ExecutionException e) {
             Throwable c = e.getCause();
             if (c instanceof IOException) throw (IOException) c;
@@ -129,6 +140,99 @@ final class NpuVision implements VisionRunner {
             throw new IOException("NPU: " + msg);
         }
         return reply;
+    }
+
+    /**
+     * Why the NPU process is gone: what Android recorded about its end (Android 11+: low memory, a native crash
+     * and its signal, its memory at the end) and what it was doing then (NpuService.stage).
+     */
+    private String death() {
+        // not under this object's lock: run() holds it while the caller thread gets here
+        synchronized (caller) {
+            if (death == null) death = newDeath();
+            return death;
+        }
+    }
+
+    private String newDeath() {
+        StringBuilder sb = new StringBuilder("NPU-процесс упал");
+        String why = exitReason();
+        if (!why.isEmpty()) sb.append(": ").append(why);
+        String stage = stage();
+        if (!stage.isEmpty()) sb.append("; в это время: ").append(stage);
+        return sb.toString();
+    }
+
+    private String stage() {
+        File f = NpuService.stageFile(ctx);
+        if (!f.exists()) return "";
+        try {
+            byte[] b = java.nio.file.Files.readAllBytes(f.toPath());
+            return new String(b, "UTF-8").trim();
+        } catch (Exception e) {
+            return "";
+        }
+    }
+
+    /** Android's record of how the NPU process ended (written shortly after the death, so waited for). */
+    private String exitReason() {
+        if (pid <= 0 || android.os.Build.VERSION.SDK_INT < 30) return "";
+        Object am = ctx.getSystemService(Context.ACTIVITY_SERVICE);
+        if (am == null) return "";
+        for (int i = 0; i < 20; i++) {
+            try {
+                // ActivityManager.getHistoricalProcessExitReasons (Android 11), by reflection: built against Android 6
+                java.util.List<?> l = (java.util.List<?>) am.getClass().getMethod("getHistoricalProcessExitReasons",
+                        String.class, int.class, int.class).invoke(am, ctx.getPackageName(), pid, 1);
+                if (l != null && !l.isEmpty()) return describe(l.get(0));
+            } catch (Exception e) {
+                return "";
+            }
+            try {
+                Thread.sleep(100);
+            } catch (InterruptedException e) {
+                break;
+            }
+        }
+        return "";
+    }
+
+    /** An ApplicationExitInfo in words (its REASON_* numbers). */
+    static String describe(Object info) throws Exception {
+        Class<?> c = info.getClass();
+        int reason = (Integer) c.getMethod("getReason").invoke(info);
+        int status = (Integer) c.getMethod("getStatus").invoke(info);
+        String r;
+        switch (reason) {
+            case 3: // REASON_LOW_MEMORY
+                r = "система закрыла его из-за нехватки памяти";
+                break;
+            case 5: // REASON_CRASH_NATIVE
+                r = "сбой в машинном коде (ONNX Runtime или QNN)";
+                break;
+            case 4: // REASON_CRASH
+                r = "исключение Java";
+                break;
+            case 2: // REASON_SIGNALED
+                r = "убит сигналом " + status + (status == 9 ? " (обычно — система, при нехватке памяти)" : "");
+                break;
+            case 1: // REASON_EXIT_SELF
+                r = "завершился сам, код " + status;
+                break;
+            case 6: // REASON_ANR
+                r = "завис (ANR)";
+                break;
+            case 9: // REASON_EXCESSIVE_RESOURCE_USAGE
+                r = "система закрыла его за чрезмерное потребление ресурсов";
+                break;
+            default:
+                r = "код причины " + reason + ", статус " + status;
+        }
+        Object d = c.getMethod("getDescription").invoke(info);
+        if (d != null && !d.toString().trim().isEmpty()) r += " (" + d.toString().trim() + ")";
+        long rss = (Long) c.getMethod("getRss").invoke(info);
+        if (rss > 0) r += ", память процесса в конце " + (rss / 1024) + " МБ";
+        return r;
     }
 
     private void ensure(long bytes) throws IOException {

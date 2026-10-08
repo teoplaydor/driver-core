@@ -777,6 +777,12 @@ public final class OnnxPatcher {
      * The graph with, for each of these tensors, its largest and mean magnitude as extra scalar outputs
      * ({@link #RANGE_MAX} / {@link #RANGE_MEAN} + name): run on the NPU and on the CPU, they show where the NPU's
      * fp16 first goes to infinity or NaN, and how large the values are there in fp32.
+     *
+     * <p>The measuring nodes go in in reverse order (the list is in graph order): ONNX Runtime orders the nodes by
+     * a depth-first walk up from the graph's last leaf first. With the first tensor's measure last, each tensor is
+     * measured right after it is made and freed; in graph order the whole graph ran first and every tensor lived
+     * to the end — a Gemma 4-sized encoder at 2520 patches (280 tokens) peaked at 13 GB instead of 1.3 GB, which
+     * killed the NPU process.
      */
     public static void withRanges(File in, File out, final java.util.List<String> tensors) throws IOException {
         editGraph(in, out, new GraphEdit() {
@@ -784,8 +790,8 @@ public final class OnnxPatcher {
             public byte[] apply(byte[] b, int from, int to) throws IOException {
                 ByteArrayOutputStream g = new ByteArrayOutputStream(to - from + 256 * tensors.size());
                 g.write(b, from, to - from);
-                int i = 0;
-                for (String t : tensors) {
+                for (int i = tensors.size() - 1; i >= 0; i--) {
+                    String t = tensors.get(i);
                     String abs = "range_abs_" + i, max = RANGE_MAX + t, mean = RANGE_MEAN + t;
                     writeLenField(g, 1, node("Abs", "", new String[]{t}, new String[]{abs}, abs, null, 0));
                     for (String[] r : new String[][]{{"ReduceMax", max}, {"ReduceMean", mean}}) {
@@ -797,7 +803,6 @@ public final class OnnxPatcher {
                         writeLenField(v, 1, o.getBytes(UTF8));
                         writeLenField(g, 12, v.toByteArray());
                     }
-                    i++;
                 }
                 return g.toByteArray();
             }

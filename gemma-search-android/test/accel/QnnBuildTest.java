@@ -275,6 +275,12 @@ public class QnnBuildTest {
         List<String> watch = QnnBuild.watchList(nodes, vt, 600);
         File scan = new File(dir, "vit.scan.onnx");
         OnnxPatcher.withRanges(vit, scan, watch);
+        // the first tensor's measure comes last: ONNX Runtime walks up from the last leaf first, so each tensor is
+        // measured as soon as it is made (in graph order every tensor lived to the end: 13 GB at 280 tokens)
+        List<OnnxPatcher.Node> scanNodes = OnnxPatcher.nodes(scan, new HashMap<String, Long>());
+        OnnxPatcher.Node lastMeasure = scanNodes.get(scanNodes.size() - 1);
+        check(lastMeasure.outputs.get(0).equals(OnnxPatcher.RANGE_MEAN + watch.get(0)),
+                "measures in reverse order: the last node measures the first tensor (" + lastMeasure.outputs + ")");
         Map<String, float[]> cpuR = ranges(scan, watch, px, mask);
         float[] big = new float[px.length];
         for (int i = 0; i < big.length; i++) big[i] = px[i] * 100000;

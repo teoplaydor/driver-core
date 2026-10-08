@@ -76,6 +76,14 @@ public final class NpuService extends Service {
     private static final float SAFE_FP16 = 16000f;
     /** The NPU's features must match the CPU's this closely (cosine), or they are not used. */
     private static final float MATCH = 0.98f;
+    /**
+     * Patch counts above this skip the search for where the NPU goes wrong (scanReport): one more compilation of
+     * the whole graph with hundreds of extra outputs, minutes at 280 tokens — the search at 70 tokens shows the
+     * same nodes.
+     */
+    private static final int SCAN_MAX_PATCHES = 1024;
+    /** Patch counts whose compilation failed in this service object: the same error again at once, not another try. */
+    private final Map<Integer, String> failures = new HashMap<Integer, String>();
 
     private final Binder binder = new Binder() {
         @Override
@@ -144,6 +152,7 @@ public final class NpuService extends Service {
                 sessions.clear();
                 for (OrtSession s : cpuSessions.values()) s.close();
                 cpuSessions.clear();
+                failures.clear();
             }
             libDir = dir;
             graph = visionGraph;
@@ -219,6 +228,8 @@ public final class NpuService extends Service {
     private synchronized OrtSession session(int patches, float[] pixels, long[] positions, int patchDim) throws Exception {
         OrtSession s = sessions.get(patches);
         if (s != null) return s;
+        if (graph == null) throw new IllegalStateException("NPU-процесс перезапущен без графа");
+        if (failures.containsKey(patches)) throw new Exception(failures.get(patches));
         // next to the graph, so whatever stays on the CPU still finds its weights in the external data file
         File ctx = context(patches);
         if (ctx.exists() && ctx.lastModified() < graph.lastModified()) ctx.delete(); // made from an older graph
@@ -227,14 +238,24 @@ public final class NpuService extends Service {
         if (ctx.exists() && !note(patches, "precision").exists()) ctx.delete();
         if (ctx.exists()) {
             bf16 = "bf16".equals(readText(note(patches, "precision")).trim());
+            stage("загрузка готовой сборки под " + patches + " фрагментов");
             try {
                 s = env.createSession(ctx.getPath(), options(graph, patches, false, true));
             } catch (Exception stale) {
                 ctx.delete();
             }
         }
-        if (s == null) s = compile(patches, pixels, positions, patchDim);
+        if (s == null) {
+            try {
+                s = compile(patches, pixels, positions, patchDim);
+            } catch (Exception e) {
+                failures.put(patches, e.getMessage() != null ? e.getMessage() : e.toString());
+                stage("сборка под " + patches + " фрагментов не удалась");
+                throw e;
+            }
+        }
         sessions.put(patches, s);
+        stage("прогоны на NPU, " + patches + " фрагментов (сборка готова)");
         return s;
     }
 
@@ -265,33 +286,60 @@ public final class NpuService extends Service {
     private OrtSession compile(final int patches, float[] pixels, long[] positions, int patchDim) throws Exception {
         final File ctx = context(patches);
         note(patches, "precision").delete();
+        // the reference sessions of other detail levels go: a compilation needs the memory (they come back on demand)
+        for (Integer p : new ArrayList<Integer>(cpuSessions.keySet())) {
+            if (p != patches) cpuSessions.remove(p).close();
+        }
         StringBuilder rep = new StringBuilder();
         Set<String> start = new LinkedHashSet<String>();
         for (String l : readText(note(patches, "cpu")).split("\n")) if (!l.trim().isEmpty()) start.add(l.trim());
+        stage("сборка под " + patches + " фрагментов: типы тензоров");
         Map<String, OnnxPatcher.TensorType> types = QnnBuild.tensorTypes(env, graph, dims(graph, patches));
         List<OnnxPatcher.Node> nodes = OnnxPatcher.nodes(graph, new HashMap<String, Long>());
-        // the patch positions' integer and boolean logic (padding, the attention mask, RoPE angles, position
-        // embeddings) is computed on the CPU: the NPU got the mask wrong
-        Set<String> positional = QnnBuild.positionOnlyNodes(nodes, types, OnnxPatcher.inputDims(graph).keySet());
-        positional.removeAll(start);
-        if (!positional.isEmpty()) {
-            start.addAll(positional);
-            rep.append("на процессоре счёт по позициям фрагментов (маска, RoPE, позиционные эмбеддинги): ")
-                    .append(opCounts(nodes, positional)).append('\n');
+        // A compilation for another detail level that passed the check already knows which nodes the CPU keeps
+        // (the same graph, other sizes): no scan of every tensor on the CPU, which at 280 tokens holds gigabytes
+        int donor = start.isEmpty() ? checkedSibling(patches) : 0;
+        if (donor > 0) {
+            for (String l : readText(note(donor, "cpu")).split("\n")) if (!l.trim().isEmpty()) start.add(l.trim());
+            String counts = opCounts(nodes, start);
+            rep.append("на процессоре — как в проверенной сборке под ").append(donor).append(" фрагментов")
+                    .append(counts.isEmpty() ? "" : ": " + counts).append(" (замер значений пропущен)\n");
+        } else {
+            // the patch positions' integer and boolean logic (padding, the attention mask, RoPE angles, position
+            // embeddings) is computed on the CPU: the NPU got the mask wrong
+            Set<String> positional = QnnBuild.positionOnlyNodes(nodes, types, OnnxPatcher.inputDims(graph).keySet());
+            positional.removeAll(start);
+            if (!positional.isEmpty()) {
+                start.addAll(positional);
+                rep.append("на процессоре счёт по позициям фрагментов (маска, RoPE, позиционные эмбеддинги): ")
+                        .append(opCounts(nodes, positional)).append('\n');
+            }
+            stage("сборка под " + patches + " фрагментов: замер значений всех тензоров на процессоре (fp32)");
+            Map<String, float[]> onCpu = ranges(graph, cpuOptions(patches), QnnBuild.watchList(nodes, types, Integer.MAX_VALUE),
+                    patches, patchDim, pixels, positions);
+            Set<String> big = QnnBuild.overflowNodes(nodes, onCpu, SAFE_FP16);
+            big.removeAll(start);
+            if (!big.isEmpty()) {
+                start.addAll(big);
+                rep.append("на процессоре из-за значений больше ").append((int) SAFE_FP16).append(" (в fp16 — до 65504): ")
+                        .append(opCounts(nodes, big)).append('\n');
+            }
         }
-        Map<String, float[]> onCpu = ranges(graph, cpuOptions(patches), QnnBuild.watchList(nodes, types, Integer.MAX_VALUE),
-                patches, patchDim, pixels, positions);
-        Set<String> big = QnnBuild.overflowNodes(nodes, onCpu, SAFE_FP16);
-        big.removeAll(start);
-        if (!big.isEmpty()) {
-            start.addAll(big);
-            rep.append("на процессоре из-за значений больше ").append((int) SAFE_FP16).append(" (в fp16 — до 65504): ")
-                    .append(opCounts(nodes, big)).append('\n');
-        }
+        stage("сборка под " + patches + " фрагментов: эталон на процессоре (fp32)");
         float[] want = encode(cpuSession(patches), pixels, positions, patches, patchDim);
+        // QNN's compiler runs in this process: the reference session's memory goes back first
+        OrtSession ref = cpuSessions.remove(patches);
+        if (ref != null) ref.close();
         for (int round = 0; round < 2; round++) {
             bf16 = round == 1;
-            QnnBuild.Outcome o = QnnBuild.run(graph, start, npu(patches, ctx), COMPILE_BUDGET_MS);
+            stage("сборка под " + patches + " фрагментов: QNN компилирует граф" + (bf16 ? " (BF16)" : ""));
+            QnnBuild.Outcome o;
+            try {
+                o = QnnBuild.run(graph, start, npu(patches, ctx), COMPILE_BUDGET_MS);
+            } catch (Exception e) {
+                // what was done so far stays in the report
+                throw new Exception(rep + (e.getMessage() != null ? e.getMessage() : e.toString()), e);
+            }
             rep.append(bf16 ? "BF16: " : "").append(o.report);
             if (o.compiled != null && !o.compiled.equals(graph)) o.compiled.delete();
             if (!o.ok) {
@@ -307,6 +355,7 @@ public final class NpuService extends Service {
                 ctx.delete();
                 break;
             }
+            stage("сборка под " + patches + " фрагментов: проверка NPU против процессора");
             OrtSession quiet = env.createSession(ctx.getPath(), options(graph, patches, false, true));
             float c = cosine(encode(quiet, pixels, positions, patches, patchDim), want);
             rep.append(String.format(java.util.Locale.ROOT, "\n  проверка на этой картинке: совпадение с процессором %.4f", c));
@@ -325,10 +374,15 @@ public final class NpuService extends Service {
         }
         bf16 = false;
         String where;
-        try {
-            where = scanReport(patches, patchDim, pixels, positions, start, types);
-        } catch (Exception e) {
-            where = "не вышло: " + e.getMessage();
+        if (patches > SCAN_MAX_PATCHES) {
+            where = "при " + patches + " фрагментах не ищется (слишком долго) — подробный разбор даёт проверка на 70 токенах";
+        } else {
+            try {
+                stage("сборка под " + patches + " фрагментов: поиск, где NPU портит результат");
+                where = scanReport(patches, patchDim, pixels, positions, start, types);
+            } catch (Exception e) {
+                where = "не вышло: " + e.getMessage();
+            }
         }
         String text = "NPU считает неверно — " + rep.toString().trim() + "\nГде NPU портит результат: " + where;
         writeText(note(patches, "qnn"), text);
@@ -444,6 +498,54 @@ public final class NpuService extends Service {
         } finally {
             f.delete();
         }
+    }
+
+    /**
+     * Another patch count of this graph whose compilation passed the check against the CPU (its precision note
+     * is there) and noted the nodes kept on the CPU; the largest one, or 0.
+     */
+    private int checkedSibling(int patches) {
+        String base = graph.getName().replace(".onnx", "") + ".p";
+        File[] files = graph.getParentFile().listFiles();
+        int best = 0;
+        if (files == null) return 0;
+        for (File f : files) {
+            String n = f.getName();
+            if (!n.startsWith(base) || !n.endsWith("_precision.txt")) continue;
+            try {
+                int p = Integer.parseInt(n.substring(base.length(), n.length() - "_precision.txt".length()));
+                if (p != patches && p > best && note(p, "cpu").exists()) best = p;
+            } catch (NumberFormatException ignored) {
+                // another file
+            }
+        }
+        return best;
+    }
+
+    /** Where the NPU process writes what it is doing: after a crash the app reads it (NpuVision). */
+    static File stageFile(android.content.Context c) {
+        return new File(c.getCacheDir(), "npu-stage.txt");
+    }
+
+    /** What the process is doing now, with its memory (resident, and the peak so far). */
+    private void stage(String what) {
+        long[] mem = memoryMb();
+        writeText(stageFile(this), what + (mem[0] > 0 ? " · память процесса " + mem[0] + " МБ, пик " + mem[1] + " МБ" : ""));
+    }
+
+    /** {resident, peak resident} of this process in MB, from /proc/self/status (0 when unreadable). */
+    static long[] memoryMb() {
+        long[] out = new long[2];
+        for (String l : readText(new File("/proc/self/status")).split("\n")) {
+            int i = l.startsWith("VmRSS:") ? 0 : l.startsWith("VmHWM:") ? 1 : -1;
+            if (i < 0) continue;
+            try {
+                out[i] = Long.parseLong(l.replaceAll("[^0-9]", "")) / 1024;
+            } catch (NumberFormatException ignored) {
+                // left at 0
+            }
+        }
+        return out;
     }
 
     private File context(int patches) {

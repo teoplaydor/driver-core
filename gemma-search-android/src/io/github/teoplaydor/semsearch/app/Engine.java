@@ -106,6 +106,21 @@ public final class Engine {
     private final List<Media.Entry> queue = new ArrayList<Media.Entry>();
     private long idxStarted;
     private int idxProcessed;
+    /**
+     * Files the model failed on one after another, with no success between: after FAIL_STREAK_STOP of them the
+     * model is broken, not the files — the run stops, and they are not remembered as failed.
+     */
+    private final List<Media.Entry> failStreak = new ArrayList<Media.Entry>();
+    static final int FAIL_STREAK_STOP = 8;
+    /** Why the run stops before its end (the model broke); the files left stay as they are. */
+    private volatile String stopError;
+    /** The NPU process died during the run: the model is reloaded after it (a new process). */
+    private boolean reloadAfterIndex;
+    /** Budgets the NPU compiled for in this run (its first photo of a budget waits for the compilation). */
+    private final java.util.Set<Integer> qnnSeen = new java.util.HashSet<Integer>();
+    /** The QNN vision graph in use and the pooling kernel (patches = budget × pool²), set by openQnn. */
+    private volatile File qnnGraphFile;
+    private volatile int qnnPool = 1;
 
     public static synchronized Engine get(Context c) {
         if (instance == null) instance = new Engine(c.getApplicationContext());
@@ -1232,9 +1247,12 @@ public final class Engine {
         try {
             return photo.embedImages(src, budget);
         } catch (Exception e) {
-            if (budget == photo.defaultImageTokens()) throw e;
+            // only an encoder exported for one fixed budget rejects the others (by the input's size); the NPU graph
+            // is compiled for the budget it gets, and its errors are something else — they must not change the detail
+            if (budget == photo.defaultImageTokens() || isQnn(loadedAccel) || npuProcessGone(e)) throw e;
+            float[][] r = photo.embedImages(src, 0);
             prefs.edit().putInt("photo_detail", PHOTO_BUDGETS.length - 1).apply();
-            return photo.embedImages(src, 0);
+            return r;
         }
     }
 
@@ -1518,6 +1536,8 @@ public final class Engine {
             OnnxPatcher.forQnn(fp32, graph);
         }
         File text = graphFile(plan.textModel, true);
+        qnnGraphFile = graph;
+        qnnPool = Math.max(1, cfg.image.poolingKernelSize);
         NpuVision vision = new NpuVision(ctx, qnn().libDir(), graph);
         try {
             return new EmbeddingGemma2(cfg, tok, text, vision, nThreads);
@@ -2646,6 +2666,10 @@ public final class Engine {
         idxDone = 0;
         idxErrors = 0;
         idxFirstError = null;
+        failStreak.clear();
+        stopError = null;
+        reloadAfterIndex = false;
+        qnnSeen.clear();
         sumWaitMs = sumVisionMs = sumTextMs = 0;
         timedPhotos = 0;
         idxTotal = 0;
@@ -2659,6 +2683,12 @@ public final class Engine {
                     ContentResolver cr = ctx.getContentResolver();
                     if (pruneDeleted(cr) > 0) notifyChanged();
                     boolean background = backgroundRun;
+                    if (background && isQnn(loadedAccel) && prefs.contains("qnn_crash")) {
+                        // the NPU process died in the last run: no new crash in the background — a run the user starts tries again
+                        finishIndex("Фоновая индексация пропущена: в прошлый раз упал NPU-процесс — " + prefs.getString("qnn_crash", ""));
+                        return;
+                    }
+                    if (!background) prefs.edit().remove("qnn_crash").apply();
                     if (!background) clearFailed(); // a run the user started retries what failed before
                     synchronized (queue) {
                         queue.clear();
@@ -2702,10 +2732,17 @@ public final class Engine {
         public void run() {
             List<Media.Entry> batch = new ArrayList<Media.Entry>();
             synchronized (queue) {
-                if (cancelIndex || queue.isEmpty() || model == null) {
+                if (cancelIndex || stopError != null || queue.isEmpty() || model == null) {
                     for (Future<Bitmap> f : prefetched.values()) f.cancel(false);
                     prefetched.clear();
                     String err = timingSplit() + (idxFirstError != null ? "\nПервая ошибка: " + idxFirstError : "");
+                    if (stopError != null) {
+                        finishIndex("Индексация остановлена: " + stopError + "\nВ индекс добавлено " + (idxDone - idxErrors) + " из "
+                                + idxTotal + (idxErrors > 0 ? ", пропущено " + idxErrors : "")
+                                + "; остальные файлы не помечены как ошибочные — следующий запуск возьмёт их снова" + err);
+                        if (reloadAfterIndex) loadModel(loadedFull); // a new NPU process for the next run
+                        return;
+                    }
                     finishIndex((cancelIndex ? "Остановлено: " + idxDone + " из " + idxTotal
                             : "Готово: " + (idxDone - idxErrors) + " файлов" + (idxErrors > 0 ? ", пропущено " + idxErrors : ""))
                             + err);
@@ -2768,19 +2805,27 @@ public final class Engine {
         }
         long waited = System.currentTimeMillis() - w0;
         if (ok.isEmpty()) return;
+        int budget = budgetFor(ok.get(0));
+        boolean compiles = qnnCompiles(budget);
+        if (compiles) {
+            idxStatus = idxDone + " из " + idxTotal + " · NPU Snapdragon: первая сборка модели под " + budget
+                    + " токенов — несколько минут, дальше быстро";
+            notifyChanged();
+        }
+        long e0 = System.currentTimeMillis();
         try {
             float[][] embs;
             try {
-                embs = embedPhotos(bitmaps, budgetFor(ok.get(0)));
+                embs = embedPhotos(bitmaps, budget);
             } catch (Throwable batchError) {
-                if (bitmaps.size() == 1) throw batchError;
+                if (bitmaps.size() == 1 || npuProcessGone(batchError)) throw batchError;
                 // One bad photo (or a batch the encoder rejects) must not sink the others.
                 embs = new float[bitmaps.size()][];
-                for (int i = 0; i < bitmaps.size(); i++) {
+                for (int i = 0; i < bitmaps.size() && stopError == null; i++) {
                     try {
                         embs[i] = embedPhotos(java.util.Collections.singletonList(bitmaps.get(i)), budgetFor(ok.get(i)))[0];
                     } catch (Throwable t) {
-                        fail(ok.get(i), t);
+                        modelFail(ok.get(i), t);
                     }
                 }
             }
@@ -2794,11 +2839,56 @@ public final class Engine {
                 Media.Entry e = ok.get(i);
                 store.add(e.kind, e.id, e.uri.toString(), e.name, null, e.date, embs[i]);
                 idxDone++;
+                failStreak.clear();
             }
         } catch (Throwable t) {
-            for (Media.Entry e : ok) fail(e, t);
+            for (Media.Entry e : ok) modelFail(e, t);
         } finally {
             for (Bitmap b : bitmaps) b.recycle();
+            // the compilation is a one-off: it does not count in the time per file
+            if (compiles) idxStarted += System.currentTimeMillis() - e0;
+        }
+    }
+
+    /** The NPU has no checked compilation for this budget yet: the next photo waits for one (minutes). */
+    private boolean qnnCompiles(int budget) {
+        File g = qnnGraphFile;
+        if (!isQnn(loadedAccel) || g == null || !qnnSeen.add(budget)) return false;
+        int patches = budget * qnnPool * qnnPool;
+        return !new File(g.getParentFile(), g.getName().replace(".onnx", "") + ".p" + patches + "_precision.txt").exists();
+    }
+
+    /** The NPU process is gone (crashed or stopped): every later photo would fail the same way. */
+    static boolean npuProcessGone(Throwable t) {
+        for (int depth = 0; t != null && depth < 8; depth++, t = t.getCause()) {
+            if (t instanceof NpuVision.Crashed) return true;
+        }
+        return false;
+    }
+
+    /**
+     * The model failed on this file. The NPU process gone, or the same failure on file after file, means the
+     * model is broken: the run stops, and the files are not remembered as failed (the next run takes them).
+     */
+    private void modelFail(Media.Entry e, Throwable t) {
+        if (stopError != null) return; // stopping: the file stays as it is
+        String msg = t.getMessage() != null ? t.getMessage() : t.toString();
+        if (npuProcessGone(t)) {
+            stopError = msg;
+            reloadAfterIndex = true;
+            prefs.edit().putString("qnn_crash", msg.length() > 300 ? msg.substring(0, 300) + "…" : msg).apply();
+            android.util.Log.e("SemSearch", "index: NPU process gone", t);
+            return;
+        }
+        fail(e, t);
+        failStreak.add(e);
+        if (failStreak.size() >= FAIL_STREAK_STOP) {
+            for (Media.Entry f : failStreak) unmarkFailed(f);
+            idxErrors -= failStreak.size();
+            idxDone -= failStreak.size();
+            if (idxErrors == 0) idxFirstError = null;
+            stopError = "модель не обработала " + failStreak.size() + " файлов подряд — " + msg;
+            failStreak.clear();
         }
     }
 
@@ -2816,7 +2906,8 @@ public final class Engine {
                 for (Bitmap f : frames) f.recycle();
             }
         } catch (Throwable t) {
-            fail(e, t);
+            if (npuProcessGone(t)) modelFail(e, t);
+            else fail(e, t); // a video that cannot be read is the file's fault
         }
     }
 
@@ -2837,6 +2928,11 @@ public final class Engine {
     private synchronized void markFailed(Media.Entry e) {
         failedBefore(e);
         if (failed.add(e.kind + ":" + e.id)) prefs.edit().putStringSet("failed_media", new java.util.HashSet<String>(failed)).apply();
+    }
+
+    private synchronized void unmarkFailed(Media.Entry e) {
+        failedBefore(e);
+        if (failed.remove(e.kind + ":" + e.id)) prefs.edit().putStringSet("failed_media", new java.util.HashSet<String>(failed)).apply();
     }
 
     private synchronized void clearFailed() {

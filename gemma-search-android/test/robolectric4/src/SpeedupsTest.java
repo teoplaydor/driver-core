@@ -268,7 +268,13 @@ public class SpeedupsTest {
                 org.robolectric.Shadows.shadowOf(a.getApplication()).setComponentNameAndServiceForBindService(
                         new android.content.ComponentName(a, svc), s.onBind(new android.content.Intent(a, svc)));
             }
-            final Object[] run = new Object[1];
+            if (round == 1) {
+                // a compilation for another detail level passed the check: its nodes kept on the CPU are taken over,
+                // without the scan of every tensor on the CPU (gigabytes at 280 tokens)
+                writeText(new File(vit.getParentFile(), "vit.qnn.p96_precision.txt"), "fp16");
+                writeText(new File(vit.getParentFile(), "vit.qnn.p96_cpu.txt"), "nothing_by_this_name\n");
+            }
+            final Object[] run = new Object[2];
             Thread rt = new Thread(() -> {
                 io.github.teoplaydor.semsearch.core.VisionRunner v = null;
                 try {
@@ -276,22 +282,38 @@ public class SpeedupsTest {
                             .getDeclaredConstructor(Context.class, File.class, File.class);
                     k.setAccessible(true);
                     v = (io.github.teoplaydor.semsearch.core.VisionRunner) k.newInstance(a, q, vit);
-                    run[0] = v.run(new float[24 * 32], new long[24 * 2], 1, 24, 32);
+                    for (int i = 0; i < 2; i++) {
+                        try {
+                            run[i] = v.run(new float[24 * 32], new long[24 * 2], 1, 24, 32);
+                        } catch (Exception x) {
+                            run[i] = x;
+                        }
+                    }
                 } catch (java.lang.reflect.InvocationTargetException x) {
-                    run[0] = x.getCause();
+                    run[0] = run[1] = x.getCause();
                 } catch (Exception x) {
-                    run[0] = x;
+                    run[0] = run[1] = x;
                 } finally {
                     if (v != null) v.close();
                 }
             });
             rt.start();
-            Robo.waitFor("npu run " + round, () -> run[0] != null);
+            Robo.waitFor("npu run " + round, () -> run[1] != null);
             assertTrue(round + ": " + run[0], run[0] instanceof java.io.IOException && ((Exception) run[0]).getMessage().startsWith("NPU: ")
                     && ((Exception) run[0]).getMessage().contains("QNN") && !((Exception) run[0]).getMessage().contains("null"));
             assertNotNull("service object " + round + " has no ONNX Runtime", env.get(s));
             System.out.println("NPU process, service object " + round + ": " + ((Exception) run[0]).getMessage().trim());
+            // the next photo gets the same error at once (in 0.9.9 every photo compiled again)
+            assertEquals(((Exception) run[0]).getMessage(), ((Exception) run[1]).getMessage());
+            boolean donor = ((Exception) run[0]).getMessage().contains("как в проверенной сборке под 96 фрагментов");
+            assertEquals(String.valueOf(run[0]), round == 1, donor);
+            // what the process was doing, for the app when it dies (with the process's memory)
+            String stage = new String(java.nio.file.Files.readAllBytes(new File(a.getCacheDir(), "npu-stage.txt").toPath()), "UTF-8");
+            System.out.println("NPU process stage: " + stage);
+            assertTrue(stage, stage.startsWith("сборка под 24 фрагментов не удалась · память процесса "));
         }
+        new File(vit.getParentFile(), "vit.qnn.p96_precision.txt").delete();
+        new File(vit.getParentFile(), "vit.qnn.p96_cpu.txt").delete();
         e.deleteQnn();
         Robo.waitFor("qnn deleted", () -> !new File(a.getFilesDir(), "qnn").exists());
         assertFalse(e.qnnInstalled());
