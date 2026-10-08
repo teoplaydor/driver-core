@@ -129,6 +129,25 @@ public class SpeedupsTest {
         File lrt = liteRt(a);
         assertFalse(e.speedupsMissing());
         assertTrue(e.liteRtInstalled());
+        // a bundle that did not take the detail asked is not loaded by the check again (in 0.10.9 the CPU slowed
+        // several times over right after LiteRT-LM was loaded only to say so); another bundle or detail is tried
+        java.lang.reflect.Method key = Engine.class.getDeclaredMethod("liteRtKey");
+        key.setAccessible(true);
+        String lrtKey = (String) key.invoke(e);
+        assertTrue(lrtKey, lrtKey != null && lrtKey.startsWith("embeddinggemma-2-440m.litertlm:" + (1 << 20) + ":"));
+        java.lang.reflect.Method once = null;
+        for (java.lang.reflect.Method mm : Engine.class.getDeclaredMethods()) if (mm.getName().equals("measureOnce")) once = mm;
+        once.setAccessible(true);
+        e.prefs().edit().putString("litert_fixed", lrtKey).apply();
+        Object skipped = once.invoke(e, null, null, null, Engine.ACCEL_LITERT_CPU, 2, 1, 280, null, false);
+        String skipError = (String) Robo.field(skipped, "error");
+        assertTrue(skipError, skipError.contains("известно с прошлой проверки, не загружаю"));
+        e.prefs().edit().putString("litert_fixed", lrtKey + "0").apply();
+        Object tried = once.invoke(e, null, null, null, Engine.ACCEL_LITERT_CPU, 2, 1, 280, null, false);
+        String triedError = String.valueOf(Robo.field(tried, "error"));
+        System.out.println("LiteRT-LM in the check: known " + skipError + "; other key " + triedError);
+        assertFalse(triedError, triedError.contains("не загружаю"));
+        e.prefs().edit().remove("litert_fixed").remove("litert_probe").apply();
         e.prefs().edit().putInt("accel", Engine.ACCEL_GPU_FP16).apply();
         assertEquals(Engine.ACCEL_GPU_FP16, e.accel());
         e.prefs().edit().putInt("accel", Engine.ACCEL_LITERT_CPU).apply();

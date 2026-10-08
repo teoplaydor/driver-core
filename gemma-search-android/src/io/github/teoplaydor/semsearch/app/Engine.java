@@ -1641,6 +1641,31 @@ public final class Engine {
     /** The last LiteRT-LM engine had to be created with the bundle's own detail (no signature for maxBudget()). */
     static volatile boolean liteRtBudgetFixed;
 
+    /** The installed LiteRT-LM bundle and the detail asked of it, when that bundle did not take the detail. */
+    private static final String LITERT_FIXED = "litert_fixed";
+
+    /** "bundle file:size:detail" of the installed LiteRT-LM bundle; null when none is installed. */
+    private String liteRtKey() {
+        try {
+            LiteRtRuntime rt = liteRt();
+            LiteRtRuntime.Installed i = rt.installed();
+            if (i == null) return null;
+            File f = rt.modelFile(i);
+            return f.getName() + ":" + f.length() + ":" + maxBudget();
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    /**
+     * This bundle is known not to take the detail asked (a check found it): the check does not load it again. In
+     * 0.10.9 the CPU slowed several times over right after LiteRT-LM was loaded on the CPU only to say so.
+     */
+    private boolean liteRtKnownFixed() {
+        String key = liteRtKey();
+        return key != null && key.equals(prefs.getString(LITERT_FIXED, null));
+    }
+
     /** EmbeddingGemma 2 on LiteRT-LM: loads its native libraries once per process, under the crash probe. */
     private Embedder openLiteRt(int accel, int nThreads, int batch) throws Exception {
         LiteRtRuntime rt = liteRt();
@@ -1662,9 +1687,12 @@ public final class Engine {
             try {
                 LiteRtEmbedder m = new LiteRtEmbedder(rt.modelFile(i), backend, nThreads, maxBudget(), cache, batch, JPEG);
                 liteRtBudgetFixed = false;
+                prefs.edit().remove(LITERT_FIXED).apply();
                 return m;
             } catch (RuntimeException noSuchBudget) {
                 liteRtBudgetFixed = true;
+                String key = liteRtKey();
+                if (key != null) prefs.edit().putString(LITERT_FIXED, key).apply();
                 // a bundle without a signature for this many picture tokens: its own default for every picture
                 android.util.Log.w("SemSearch", "LiteRT-LM with " + maxBudget() + " tokens", noSuchBudget);
                 return new LiteRtEmbedder(rt.modelFile(i), backend, nThreads, 0, cache, batch, JPEG);
@@ -1881,6 +1909,13 @@ public final class Engine {
         Measure r = new Measure();
         Embedder m = null;
         try {
+            if (isLiteRt(accel) && liteRtKnownFixed()) {
+                liteRtBudgetFixed = true;
+                r.error = "сборка не принимает " + maxBudget() + " токенов — работает только со своей детализацией (известно с прошлой "
+                        + "проверки, не загружаю)";
+                Journal.add(ctx, "app", "  LiteRT-LM не загружаю: эта сборка уже не приняла " + maxBudget() + " токенов");
+                return r;
+            }
             benchDoing(isLiteRt(accel) ? "загружаю модель LiteRT-LM" : isQnn(accel) ? "запускаю NPU-процесс" : "загружаю модель");
             m = createModel(cfg, tok, plan, accel, nThreads, batch);
             if (m instanceof LiteRtEmbedder && ((LiteRtEmbedder) m).budgetFixed()) {
