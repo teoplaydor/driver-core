@@ -36,7 +36,7 @@ final class SettingsPanel extends FrameLayout implements Engine.Listener {
     private ProgressLine modelProgress, indexProgress;
     private Toggle autoToggle, idleToggle, batteryToggle, adultToggle;
     private TextView adultLevelValue, hiddenValue, adultNote;
-    private TextView facesValue, facesNote, facesButton, facesDelete;
+    private TextView facesValue, facesNote, facesButton, facesDelete, faceLevelValue, hiddenFacesValue;
     private ProgressLine facesProgress;
     private View batteryRow;
     private TextView unrestrictedValue;
@@ -829,6 +829,34 @@ final class SettingsPanel extends FrameLayout implements Engine.Listener {
                 onEngineChanged();
             }
         });
+        faceLevelValue = row(card, "Строгость узнавания", "строже — меньше чужих в одной группе, но один человек чаще в двух", new Runnable() {
+            @Override
+            public void run() {
+                Sheet.choose(root(), "Строгость узнавания", new String[]{"Мягко", "Обычно", "Строго"},
+                        new String[]{"больше фото человека, иногда и чужие", "рекомендуется",
+                                "только явное сходство; человек может оказаться в двух группах — назовите обе одним именем"},
+                        e.faceLevel(), new Sheet.Choice() {
+                            @Override
+                            public void chosen(int i) {
+                                e.setFaceLevel(i);
+                                onEngineChanged();
+                            }
+                        });
+            }
+        });
+        hiddenFacesValue = row(card, "Скрытые лица", "лица, которые не нужно узнавать", new Runnable() {
+            @Override
+            public void run() {
+                if (e.facesHidden() == 0) return;
+                Sheet.confirm(root(), "Вернуть скрытые лица?", "Они снова появятся на фото и в группах «Кто это?».", "Вернуть",
+                        new Runnable() {
+                            @Override
+                            public void run() {
+                                e.showHiddenFaces(null);
+                            }
+                        });
+            }
+        });
         facesDelete = quiet(card, "Удалить модели лиц", Ui.TEXT2, new Runnable() {
             @Override
             public void run() {
@@ -841,8 +869,8 @@ final class SettingsPanel extends FrameLayout implements Engine.Listener {
                 });
             }
         });
-        TextView how = Ui.text(getContext(), "Назвать человека или отметить питомца: откройте фото → «Кто это». Люди и питомцы — в "
-                + "«Альбомах» на боковой панели.", 12.5f, Ui.TEXT3, Ui.REGULAR);
+        TextView how = Ui.text(getContext(), "Лица видны прямо на фото в просмотре: нажмите — назвать, значок глаза — скрыть. Питомца — «Отметить». "
+                + "Люди и питомцы — в «Альбомах» на боковой панели.", 12.5f, Ui.TEXT3, Ui.REGULAR);
         how.setPadding(Ui.dp(getContext(), 18), Ui.dp(getContext(), 4), Ui.dp(getContext(), 18), Ui.dp(getContext(), 10));
         card.addView(how);
     }
@@ -880,6 +908,7 @@ final class SettingsPanel extends FrameLayout implements Engine.Listener {
         hiddenValue = row(card, "Скрытое", "откроется вместо галереи; вернуть файл — «Вернуть» в просмотре", new Runnable() {
             @Override
             public void run() {
+                a.leave(MainActivity.OVER_SETTINGS); // «Назад» from the folder: the settings again
                 close();
                 a.showHidden();
             }
@@ -1013,6 +1042,11 @@ final class SettingsPanel extends FrameLayout implements Engine.Listener {
         facesNote.setTextColor(e.faceDlError != null && !faces ? Ui.DANGER : Ui.TEXT2);
         facesButton.setVisibility(!faces && !e.faceDownloading ? VISIBLE : GONE);
         facesDelete.setVisibility(faces && !e.faceDownloading && Engine.facesForTest == null ? VISIBLE : GONE);
+        rowOf(faceLevelValue).setVisibility(faces ? VISIBLE : GONE);
+        faceLevelValue.setText(Engine.FACE_LEVELS[e.faceLevel()]);
+        int hiddenFaces = e.facesHidden();
+        rowOf(hiddenFacesValue).setVisibility(hiddenFaces > 0 ? VISIBLE : GONE);
+        hiddenFacesValue.setText(hiddenFaces + " · вернуть");
         if (facesDelete.getVisibility() == VISIBLE) facesDelete.setText(String.format(Locale.ROOT, "Удалить модели лиц (%d МБ)", e.facesBytes() >> 20));
         boolean adult = e.hideAdult();
         if (adultToggle.isOn() != adult) adultToggle.setOn(adult, false);

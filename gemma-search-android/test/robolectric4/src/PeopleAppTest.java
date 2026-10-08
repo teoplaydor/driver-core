@@ -35,11 +35,12 @@ import io.github.teoplaydor.semsearch.core.FaceModel;
 
 /**
  * People and pets through the app: after indexing, faces are looked for in every photo (a stand-in for the face models
- * reads who is on a photo from its colour); the unnamed come grouped in «Альбомы»; «Кто это» in the viewer names a
- * face — every photo of that person is in their album, a photo of two people in both, and the viewer lists all the
- * albums a photo is in; someone unnamed gets a name from the line above their photos; a lookalike taken for a
- * person goes once one of their faces is said not to be them; a pet marked on one photo gathers its photos, and a
- * photo taken out of it leaves with the ones like it.
+ * reads who is on a photo from its colour); the unnamed come grouped in «Альбомы»; the faces are right on the photo in
+ * the viewer, and one tapped gets a name — every photo of that person is in their album, a photo of two people in
+ * both, and the viewer lists all the albums a photo is in; a face nobody needs to name is hidden with the button
+ * beside «Кто это?»; someone unnamed gets a name from the line above their photos; a lookalike taken for a person
+ * goes once one of their faces is said not to be them; «Назад» from an album opened in the viewer comes back to the
+ * viewer; a pet marked on one photo gathers its photos, and a photo taken out of it leaves with the ones like it.
  */
 @RunWith(RobolectricTestRunner.class)
 @Config(sdk = 34, qualifiers = "ru-w411dp-h891dp-night-xxhdpi")
@@ -170,18 +171,39 @@ public class PeopleAppTest {
         return s;
     }
 
-    /** Opens the viewer on the grid's photo with this title and taps «Кто это». */
-    static View whoIsThis(MainActivity a, View root, String title) throws Exception {
+    /** Opens the viewer on the grid's photo with this title; its faces (and «Отметить») shown on it. */
+    static View viewer(MainActivity a, View root, String title) throws Exception {
         int at = -1;
         List<IndexStore.Item> g = grid(a);
         for (int i = 0; i < g.size(); i++) if (title.equals(g.get(i).title)) at = i;
         assertTrue(title + " in the grid", at >= 0);
         Robo.call(a, "openViewer", at);
         Robo.settle(700);
-        View viewer = Robo.byName(root, "Viewer");
-        ((View) Robo.textView((View) Robo.field(viewer, "actions"), "Кто это").getParent()).performClick();
-        Robo.settle(500);
+        final View viewer = Robo.byName(root, "Viewer");
+        Robo.waitFor("faces on the photo", () -> Robo.textView(faces(viewer), "Отметить") != null);
+        Robo.settle(300);
         return viewer;
+    }
+
+    static View faces(View viewer) throws Exception {
+        return (View) Robo.field(viewer, "facesRow");
+    }
+
+    /** The names on the photo's faces, left to right. */
+    static List<String> faceNames(View viewer) throws Exception {
+        ViewGroup row = (ViewGroup) faces(viewer);
+        List<String> out = new ArrayList<String>();
+        for (int i = 0; i < row.getChildCount() - 1; i++) {
+            for (View v : Robo.views(row.getChildAt(i), new ArrayList<View>())) if (v instanceof TextView) out.add(String.valueOf(((TextView) v).getText()));
+        }
+        return out;
+    }
+
+    static void tapFace(View viewer, String name) throws Exception {
+        TextView t = Robo.textView(faces(viewer), name);
+        assertNotNull(name + " on the photo: " + faceNames(viewer), t);
+        ((View) t.getParent()).performClick();
+        Robo.settle(500);
     }
 
     @Test
@@ -228,23 +250,18 @@ public class PeopleAppTest {
             assertTrue(sb.toString(), all.size() >= 4);
             for (Engine.Album al : all) assertEquals(Engine.Album.UNNAMED, al.kind);
 
-            // «Кто это» on a photo of A: name the face «Маша»
-            a.onBackPressed();
-            Robo.settle(300);
-            whoIsThis(a, root, "IMG_0.png");
-            Robo.waitFor("faces of the photo", () -> Robo.textView(topSheet(root), "Кто это?") != null);
-            UiShots.shot(a, "07f-who");
-            rowOf(topSheet(root), "Кто это?").performClick();
-            Robo.settle(500);
+            // the faces on a photo of A in the viewer: the one tapped gets the name «Маша»
+            View v = viewer(a, root, "IMG_0.png");
+            assertEquals(Arrays.asList("Кто это?"), faceNames(v));
+            UiShots.shot(a, "07f-viewer-faces");
+            tapFace(v, "Кто это?");
             rowOf(topSheet(root), "Новый человек…").performClick();
             typeName(root, "Маша");
-            Robo.waitFor("named", () -> Robo.textView(topSheet(root), "Маша") != null);
-            Robo.settle(300);
-            System.out.println("who, after naming: " + Robo.allText(topSheet(root)).replace('\n', ' '));
-            a.onBackPressed();
-            Robo.settle(400);
+            final View v0 = v;
+            Robo.waitFor("named on the photo", () -> faceNames(v0).contains("Маша"));
             a.onBackPressed();
             Robo.settle(600);
+            assertNull(Robo.byName(root, "Viewer"));
 
             all = people(e);
             Engine.Album masha = album(all, "Маша");
@@ -256,22 +273,37 @@ public class PeopleAppTest {
             assertTrue("no one else's but the lookalike's", withLook.containsAll(names(masha.items)));
 
             // the lookalike: one of their faces is not Маша — all of theirs go
-            whoIsThis(a, root, "IMG_19.png");
-            Robo.waitFor("faces of the lookalike", () -> Robo.textView(topSheet(root), "Маша") != null
-                    || Robo.textView(topSheet(root), "Кто это?") != null);
-            if (Robo.textView(topSheet(root), "Маша") != null) {
-                rowOf(topSheet(root), "Маша").performClick();
-                Robo.settle(500);
+            v = viewer(a, root, "IMG_19.png");
+            System.out.println("the lookalike's photo: " + faceNames(v));
+            if (faceNames(v).contains("Маша")) {
+                tapFace(v, "Маша");
                 rowOf(topSheet(root), "Это не Маша").performClick();
-                Robo.waitFor("not Маша", () -> Robo.textView(topSheet(root), "Кто это?") != null);
+                final View v19 = v;
+                Robo.waitFor("not Маша", () -> faceNames(v19).contains("Кто это?"));
             }
-            a.onBackPressed();
-            Robo.settle(400);
             a.onBackPressed();
             Robo.settle(600);
             masha = album(people(e), "Маша");
             System.out.println("Маша, after «это не Маша» on the lookalike: " + masha.items.size() + " photos");
             assertEquals(photosOf("A"), names(masha.items));
+
+            // a face nobody needs to name: hidden with the button beside «Кто это?» — C, in three photos, is no longer offered
+            int unnamedBefore = 0;
+            for (Engine.Album al : people(e)) if (al.kind == Engine.Album.UNNAMED) unnamedBefore++;
+            v = viewer(a, root, "IMG_13.png");
+            View hide = null;
+            for (View x : Robo.views(faces(v), new ArrayList<View>())) if ("Скрыть лицо".contentEquals(String.valueOf(x.getContentDescription()))) hide = x;
+            assertNotNull("a hide button beside «Кто это?»", hide);
+            hide.performClick();
+            final View v13 = v;
+            Robo.waitFor("the face hidden", () -> faceNames(v13).isEmpty());
+            a.onBackPressed();
+            Robo.settle(600);
+            int unnamedAfter = 0;
+            for (Engine.Album al : people(e)) if (al.kind == Engine.Album.UNNAMED) unnamedAfter++;
+            System.out.println("unnamed: " + unnamedBefore + " → " + unnamedAfter + " after hiding one of C's faces");
+            assertEquals(unnamedBefore - 1, unnamedAfter);
+            assertEquals(1, e.facesHidden());
 
             // the albums sheet: Маша, the unnamed; B opened and named «Петя» from the line above the grid
             Robo.call(a, "showAlbums");
@@ -279,11 +311,11 @@ public class PeopleAppTest {
             Robo.settle(400);
             UiShots.shot(a, "07g-albums-people");
             System.out.println("albums sheet: " + Robo.allText(topSheet(root)).replace('\n', ' '));
+            a.onBackPressed();
+            Robo.settle(500);
             Engine.Album b = null;
             for (Engine.Album al : people(e)) if (al.kind == Engine.Album.UNNAMED && names(al.items).equals(photosOf("B"))) b = al;
             assertNotNull("B among the unnamed", b);
-            a.onBackPressed();
-            Robo.settle(500);
             Robo.call(a, "showAlbum", b);
             Robo.settle(700);
             System.out.println("someone unnamed: " + section(a));
@@ -296,11 +328,9 @@ public class PeopleAppTest {
             assertEquals(photosOf("B"), names(petya.items));
             // a photo of both: in both albums, and the viewer lists them
             assertTrue(names(album(people(e), "Маша").items).contains("IMG_10.png") && names(petya.items).contains("IMG_10.png"));
-            int both = -1;
-            for (int i = 0; i < grid(a).size(); i++) if ("IMG_10.png".equals(grid(a).get(i).title)) both = i;
-            Robo.call(a, "openViewer", both);
-            Robo.settle(700);
-            final View viewer = Robo.byName(root, "Viewer");
+            v = viewer(a, root, "IMG_10.png");
+            assertEquals(Arrays.asList("Маша", "Петя"), faceNames(v));
+            final View viewer = v;
             ((View) Robo.textView((View) Robo.field(viewer, "actions"), "Что на фото").getParent()).performClick();
             Robo.waitFor("albums of the photo", () -> ((ViewGroup) Robo.field(viewer, "albumsRow")).getChildCount() >= 2);
             Robo.settle(300);
@@ -310,13 +340,22 @@ public class PeopleAppTest {
             System.out.println("albums of a photo of both: " + chips);
             UiShots.shot(a, "07h-viewer-albums");
             assertTrue(chips.toString(), chips.contains("Маша") && chips.contains("Петя"));
-            // a chip opens its album
+            // a chip opens its album; «Назад» — the viewer again, on the same photo, over Петя's photos
             row.getChildAt(chips.indexOf("Маша")).performClick();
             Robo.settle(800);
             assertNull(Robo.byName(root, "Viewer"));
             assertEquals("Маша · " + photosOf("A").size(), section(a));
             a.onBackPressed();
+            Robo.settle(900);
+            View again = Robo.byName(root, "Viewer");
+            assertNotNull("«Назад» from the album: the viewer it was opened from", again);
+            assertEquals("IMG_10.png", ((IndexStore.Item) Robo.call(again, "current")).title);
+            assertEquals("Петя · 7", section(a));
+            a.onBackPressed();
             Robo.settle(600);
+            a.onBackPressed();
+            Robo.settle(600);
+            assertNull("then the gallery", Robo.field(a, "resultsLabel"));
 
             // a pet: one photo of a cat on a sofa marked «Барсик» — its cats come; a cat in the garden taken out goes with
             // the other garden cats
@@ -328,7 +367,9 @@ public class PeopleAppTest {
             }
             sofa = sofas.iterator().next();
             garden = gardens.iterator().next();
-            whoIsThis(a, root, sofa);
+            v = viewer(a, root, sofa);
+            ((View) Robo.textView(faces(v), "Отметить").getParent()).performClick();
+            Robo.settle(500);
             rowOf(topSheet(root), "Отметить питомца или что-то ещё").performClick();
             Robo.settle(500);
             rowOf(topSheet(root), "Новое…").performClick();
@@ -343,7 +384,8 @@ public class PeopleAppTest {
             cats.addAll(gardens);
             assertEquals(cats, names(cat.items));
             assertEquals(sofa, cat.items.get(0).title);
-            whoIsThis(a, root, garden);
+            v = viewer(a, root, garden);
+            ((View) Robo.textView(faces(v), "Отметить").getParent()).performClick();
             Robo.waitFor("its albums", () -> Robo.textView(topSheet(root), "Убрать из «Барсик»") != null);
             rowOf(topSheet(root), "Убрать из «Барсик»").performClick();
             Robo.settle(600);
@@ -360,6 +402,7 @@ public class PeopleAppTest {
             String note = String.valueOf(((TextView) Robo.field(settings, "facesNote")).getText());
             System.out.println("settings: " + ((TextView) Robo.field(settings, "facesValue")).getText() + " · " + note);
             assertEquals("Найдено лиц: " + expectFaces + " на " + WHO.length + " фото", note);
+            assertEquals("1 · вернуть", String.valueOf(((TextView) Robo.field(settings, "hiddenFacesValue")).getText()));
             a.finish();
         } finally {
             Engine.facesForTest = null;

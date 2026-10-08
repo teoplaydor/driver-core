@@ -78,6 +78,25 @@ public final class MainActivity extends Activity implements Engine.Listener, Vie
 
     /** What the grid shows: the recent gallery, or results of the last search (label). */
     private String resultsLabel;
+
+    /** Where the user was — the grid and what was open over it — to come back to with «Назад», newest last. */
+    private static final class Place {
+        String label, section, query;
+        List<IndexStore.Item> items, more;
+        Engine.Album album;
+        boolean search;
+        /** The viewer was open on this picture. */
+        IndexStore.Item viewerAt;
+        int over;
+    }
+
+    static final int OVER_NONE = 0, OVER_ALBUMS = 1, OVER_SETTINGS = 2;
+    private final ArrayList<Place> places = new ArrayList<Place>();
+    /** The grid holds the results of the typed query (typing on refines them: no new place). */
+    private boolean searchShown;
+    /** A place was just left for a search about to run (a word in the viewer). */
+    private boolean searchLeft;
+    private boolean restoring;
     private Intent pendingShare;
     private int lastIndexed = -1;
     /** IndexStore.hiddenVersion the grid shows. */
@@ -180,6 +199,10 @@ public final class MainActivity extends Activity implements Engine.Listener, Vie
         }
         if (settings != null && !settings.isClosing()) {
             settings.close();
+            return;
+        }
+        if (!places.isEmpty()) {
+            back(places.remove(places.size() - 1));
             return;
         }
         if (query.getText().length() > 0 || resultsLabel != null) {
@@ -331,6 +354,7 @@ public final class MainActivity extends Activity implements Engine.Listener, Vie
                 if (has && clear.getVisibility() != View.VISIBLE) Ui.fadeIn(clear, 150);
                 if (!has && clear.getVisibility() == View.VISIBLE) Ui.fadeOut(clear, 150);
                 rail.setSearchActive(has);
+                if (restoring) return; // a place come back to brings its own results
                 ui.removeCallbacks(debounced);
                 if (has) ui.postDelayed(debounced, 550);
                 else if (resultsLabel != null) showRecent(true);
@@ -525,9 +549,66 @@ public final class MainActivity extends Activity implements Engine.Listener, Vie
 
     // ------------------------------------------------------------------ content
 
+    /**
+     * Remembers where the user is before the grid shows something else: the grid, the query, and what is open over it —
+     * the viewer, or (by the caller) the albums sheet or the settings.
+     */
+    void leave(int over) {
+        Place p = new Place();
+        p.label = resultsLabel;
+        p.section = section.getVisibility() == View.VISIBLE ? section.getText().toString() : null;
+        p.items = resultsLabel == null ? null : new ArrayList<IndexStore.Item>(gallery.items());
+        p.more = moreResults;
+        p.album = shownAlbum;
+        p.search = searchShown;
+        p.query = query.getText().toString();
+        p.viewerAt = viewer != null && !viewer.isClosing() ? viewer.current() : null;
+        p.over = over;
+        places.add(p);
+        if (places.size() > 30) places.remove(0);
+    }
+
+    /** «Назад»: the place before — its grid, its query, and the viewer, the albums or the settings open as they were. */
+    private void back(final Place p) {
+        restoring = true;
+        try {
+            query.setText(p.query);
+            query.setSelection(p.query.length());
+            if (p.query.isEmpty()) hideSearch();
+            if (p.label == null) {
+                showRecent(false);
+            } else {
+                resultsLabel = p.label;
+                shownAlbum = p.album;
+                shownResults = p.items;
+                moreResults = p.more;
+                setItems(p.items, false);
+                if (p.section != null) sectionText(p.section);
+                updateEmpty();
+            }
+            searchShown = p.search;
+        } finally {
+            restoring = false;
+        }
+        if (p.viewerAt != null) {
+            ui.post(new Runnable() {
+                @Override
+                public void run() {
+                    int pos = gallery.items().indexOf(p.viewerAt);
+                    if (pos >= 0) openViewer(pos);
+                }
+            });
+        } else if (p.over == OVER_ALBUMS) {
+            showAlbums();
+        } else if (p.over == OVER_SETTINGS) {
+            openSettings();
+        }
+    }
+
     private void showRecent(boolean animate) {
         resultsLabel = null;
         shownAlbum = null;
+        searchShown = false;
         if (aspects == null) {
             // lay the gallery out once picture proportions are known, so nothing jumps
             recentWaits = true;
@@ -607,12 +688,17 @@ public final class MainActivity extends Activity implements Engine.Listener, Vie
         }
         if (fromKeyboard) hideKeyboard();
         ui.removeCallbacks(debounced);
+        // a new search leaves the place before it; typing on refines the same one
+        if (!searchShown && !searchLeft) leave(OVER_NONE);
+        searchLeft = false;
+        searchShown = true;
         sectionText("Ищу…");
         engine.search(q, photos(), videos(), notes(), new Engine.Callback<Engine.SearchResult>() {
             @Override
             public void done(Engine.SearchResult r, Exception e) {
                 if (!q.equals(query.getText().toString().trim())) return; // typed on: a newer search follows
                 showResults(r, e, "«" + q + "»");
+                searchShown = true;
             }
         });
     }
@@ -622,6 +708,8 @@ public final class MainActivity extends Activity implements Engine.Listener, Vie
             toast("Для поиска по фото нужен визуальный энкодер");
             return;
         }
+        leave(OVER_NONE);
+        searchShown = false;
         sectionText("Смотрю на фото…");
         engine.searchByImage(uri, photos(), videos(), notes(), new Engine.Callback<Engine.SearchResult>() {
             @Override
@@ -656,6 +744,7 @@ public final class MainActivity extends Activity implements Engine.Listener, Vie
         for (IndexStore.Hit h : r.more) more.add(h.item);
         resultsLabel = label;
         shownAlbum = null;
+        searchShown = false;
         shownResults = list;
         moreResults = more.isEmpty() ? null : more;
         setItems(list, true);
@@ -734,7 +823,7 @@ public final class MainActivity extends Activity implements Engine.Listener, Vie
         s.body().addView(header("Питомцы и другое"));
         for (Engine.Album a : things) s.body().addView(albumRow(s, a));
         if (things.isEmpty()) {
-            s.body().addView(hint("Откройте фото → «Кто это» → «Питомец или что-то ещё»: похожие фото соберутся здесь"));
+            s.body().addView(hint("Откройте фото → «Отметить» → «Отметить питомца или что-то ещё»: похожие фото соберутся здесь"));
         }
         s.body().addView(header("По смыслу"));
         if (failed != null) s.body().addView(hint("Не получилось: " + failed.getMessage()));
@@ -803,6 +892,7 @@ public final class MainActivity extends Activity implements Engine.Listener, Vie
         row.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {
+                leave(OVER_ALBUMS);
                 s.dismiss();
                 showAlbum(a);
             }
@@ -841,6 +931,7 @@ public final class MainActivity extends Activity implements Engine.Listener, Vie
         row.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {
+                leave(OVER_ALBUMS);
                 s.dismiss();
                 showAlbum(a);
             }
@@ -880,6 +971,7 @@ public final class MainActivity extends Activity implements Engine.Listener, Vie
         row.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {
+                leave(OVER_ALBUMS);
                 s.dismiss();
                 showHidden();
             }
@@ -907,6 +999,7 @@ public final class MainActivity extends Activity implements Engine.Listener, Vie
         hideKeyboard();
         resultsLabel = a.kind == Engine.Album.MEANING ? "Альбом «" + a.name + "»" : a.name;
         shownAlbum = a;
+        searchShown = false;
         shownResults = a.items;
         moreResults = a.more.isEmpty() ? null : a.more;
         setItems(a.items, animate);
@@ -945,6 +1038,7 @@ public final class MainActivity extends Activity implements Engine.Listener, Vie
         List<IndexStore.Item> items = engine.hiddenItems();
         resultsLabel = HIDDEN;
         shownAlbum = null;
+        searchShown = false;
         shownResults = items;
         moreResults = null;
         setItems(items, true);
@@ -1570,6 +1664,7 @@ public final class MainActivity extends Activity implements Engine.Listener, Vie
 
     @Override
     public void similar(IndexStore.Item it) {
+        leave(OVER_NONE);
         if (viewer != null) viewer.close();
         runSimilar(it);
     }
@@ -1657,6 +1752,7 @@ public final class MainActivity extends Activity implements Engine.Listener, Vie
 
     @Override
     public void openAlbum(Engine.Album a) {
+        leave(OVER_NONE);
         if (viewer != null) viewer.close();
         showAlbum(a);
     }
@@ -1666,21 +1762,53 @@ public final class MainActivity extends Activity implements Engine.Listener, Vie
         toast("Скачиваю модели лиц (≈40 МБ) — потом найду лица на всех фото");
     }
 
-    /** Who is on the photo: its faces (each one named or corrected with a tap), and the pets or things it is in. */
+    @Override
+    public boolean facesReady() {
+        return engine.facesInstalled();
+    }
+
+    @Override
+    public void facesOf(IndexStore.Item it, Engine.Callback<List<Engine.FaceTag>> cb) {
+        engine.facesOf(it, cb);
+    }
+
+    @Override
+    public void faceTapped(IndexStore.Item it, Engine.FaceTag f) {
+        personChooser(it, f);
+    }
+
+    @Override
+    public void hideFace(IndexStore.Item it, Engine.FaceTag f) {
+        engine.hideFace(f.faceId, facesChanged());
+        toast("Лицо скрыто — вернуть можно в настройках, «Люди и питомцы»");
+    }
+
+    /** After a face was named, corrected or hidden: the viewer's faces and the person shown, as they are now. */
+    private Runnable facesChanged() {
+        return new Runnable() {
+            @Override
+            public void run() {
+                if (viewer != null && !viewer.isClosing()) viewer.refreshFaces();
+                refreshShownAlbum(null);
+            }
+        };
+    }
+
+    /**
+     * Marking the photo: a pet or anything else it shows (or is taken out of); with no face models yet, the offer to
+     * download them first. The faces themselves are on the photo, in the viewer.
+     */
     @Override
     public void whoIsThis(final IndexStore.Item it) {
-        final Sheet s = new Sheet(this, "Кто на фото");
-        final TextView note = hint("");
-        note.setPadding(0, 0, 0, dp(8));
-        s.body().addView(note);
-        final LinearLayout facesBox = new LinearLayout(this);
-        facesBox.setOrientation(LinearLayout.VERTICAL);
-        s.body().addView(facesBox);
-        if (!engine.facesInstalled()) {
-            note.setText(engine.faceDownloading ? "Модели лиц скачиваются — когда закончат, лица найдутся на всех фото"
+        boolean faces = engine.facesInstalled();
+        final Sheet s = new Sheet(this, faces ? "Питомец или что-то ещё" : "Кто на фото");
+        if (!faces) {
+            TextView note = hint(engine.faceDownloading ? "Модели лиц скачиваются — когда закончат, лица появятся прямо на фото"
                     : "Чтобы узнавать людей, нужны модели лиц OpenCV (≈40 МБ, один раз; всё считается на телефоне)");
+            note.setPadding(0, 0, 0, dp(8));
+            s.body().addView(note);
             if (!engine.faceDownloading) {
-                facesBox.addView(actionRow(Icon.DOWNLOAD, "Скачать модели лиц", null, new Runnable() {
+                s.body().addView(actionRow(Icon.DOWNLOAD, "Скачать модели лиц", null, new Runnable() {
                     @Override
                     public void run() {
                         s.dismiss();
@@ -1688,22 +1816,8 @@ public final class MainActivity extends Activity implements Engine.Listener, Vie
                     }
                 }));
             }
-        } else {
-            note.setText("Ищу лица…");
-            engine.facesOf(it, new Engine.Callback<List<Engine.FaceTag>>() {
-                @Override
-                public void done(List<Engine.FaceTag> faces, Exception e) {
-                    if (s.isClosing()) return;
-                    if (e != null) {
-                        note.setText("Не получилось: " + e.getMessage());
-                        return;
-                    }
-                    note.setText(faces.isEmpty() ? "Лиц на этом фото не нашлось" : "Нажмите на лицо, чтобы назвать человека или поправить");
-                    for (final Engine.FaceTag f : faces) facesBox.addView(faceRow(s, it, f));
-                }
-            });
+            s.body().addView(header("Питомец или что-то ещё"));
         }
-        s.body().addView(header("Питомец или что-то ещё"));
         final LinearLayout thingsBox = new LinearLayout(this);
         thingsBox.setOrientation(LinearLayout.VERTICAL);
         s.body().addView(thingsBox);
@@ -1739,44 +1853,10 @@ public final class MainActivity extends Activity implements Engine.Listener, Vie
         s.show(root);
     }
 
-    private View faceRow(final Sheet who, final IndexStore.Item it, final Engine.FaceTag f) {
-        LinearLayout row = new LinearLayout(this);
-        row.setOrientation(LinearLayout.HORIZONTAL);
-        row.setGravity(Gravity.CENTER_VERTICAL);
-        row.setPadding(0, dp(6), 0, dp(6));
-        ImageView face = avatar(52);
-        faceInto(face, it, new float[]{f.x, f.y, f.w, f.h});
-        row.addView(face, new LinearLayout.LayoutParams(dp(52), dp(52)));
-        LinearLayout text = new LinearLayout(this);
-        text.setOrientation(LinearLayout.VERTICAL);
-        text.setPadding(dp(14), 0, 0, 0);
-        text.addView(Ui.text(this, f.name != null ? f.name : "Кто это?", 15, f.name != null ? Ui.TEXT : Ui.TEXT2, Ui.MEDIUM));
-        text.addView(Ui.text(this, f.name != null ? "узнан по лицу · нажмите, чтобы поправить" : "нажмите, чтобы назвать", 12.5f,
-                Ui.TEXT2, Ui.REGULAR));
-        row.addView(text, new LinearLayout.LayoutParams(0, -2, 1));
-        row.setOnClickListener(new View.OnClickListener() {
-            @Override
-            public void onClick(View v) {
-                personChooser(who, it, f);
-            }
-        });
-        Ui.pressable(row);
-        return row;
-    }
-
     /** Who this face is: one of the people there are, someone new, or not the one it was taken for. */
-    private void personChooser(final Sheet who, final IndexStore.Item it, final Engine.FaceTag f) {
+    private void personChooser(final IndexStore.Item it, final Engine.FaceTag f) {
         final Sheet s = new Sheet(this, f.name != null ? "Это " + f.name + "?" : "Кто это?");
-        final Runnable after = new Runnable() {
-            @Override
-            public void run() {
-                refreshShownAlbum(null);
-                if (!who.isClosing()) {
-                    who.dismiss();
-                    whoIsThis(it);
-                }
-            }
-        };
+        final Runnable after = facesChanged();
         if (f.name != null) {
             s.body().addView(actionRow(Icon.CLOSE, "Это не " + f.name, "лица, похожие на это, к «" + f.name + "» не попадут", new Runnable() {
                 @Override
@@ -1806,6 +1886,13 @@ public final class MainActivity extends Activity implements Engine.Listener, Vie
                         engine.nameFace(f.faceId, name, after);
                     }
                 });
+            }
+        }));
+        s.body().addView(actionRow(Icon.HIDE, "Скрыть это лицо", "никого называть не нужно: оно больше не появится", new Runnable() {
+            @Override
+            public void run() {
+                s.dismiss();
+                hideFace(it, f);
             }
         }));
         s.show(root);
@@ -1948,7 +2035,8 @@ public final class MainActivity extends Activity implements Engine.Listener, Vie
     private final LruCache<String, Bitmap> faceCrops = new LruCache<String, Bitmap>(64);
 
     /** The face (a box in fractions of the photo, widened a little) cut out of the photo, into the view. */
-    private void faceInto(final ImageView v, final IndexStore.Item it, final float[] box) {
+    @Override
+    public void faceInto(final ImageView v, final IndexStore.Item it, final float[] box) {
         final String key = it.id + ":" + box[0] + ":" + box[1];
         Bitmap cached = faceCrops.get(key);
         if (cached != null) {
@@ -1994,6 +2082,9 @@ public final class MainActivity extends Activity implements Engine.Listener, Vie
 
     @Override
     public void searchFor(String q) {
+        leave(OVER_NONE);
+        searchLeft = true;
+        searchShown = false;
         if (viewer != null) viewer.close();
         openSearch();
         query.setText(q);

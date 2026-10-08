@@ -46,10 +46,12 @@ final class FaceStore {
     private final List<People.Face> faces = new ArrayList<People.Face>();
     private final Map<Long, List<People.Face>> byPhoto = new HashMap<Long, List<People.Face>>();
     private final List<Group> groups = new ArrayList<Group>();
+    /** Faces the user hid: no one to name (a passer-by), left out of people and groups. */
+    private final Set<Long> ignored = new HashSet<Long>();
     private int version;
 
     FaceStore(Context ctx) {
-        SQLiteOpenHelper helper = new SQLiteOpenHelper(ctx, "faces.db", null, 1) {
+        SQLiteOpenHelper helper = new SQLiteOpenHelper(ctx, "faces.db", null, 2) {
             @Override
             public void onCreate(SQLiteDatabase d) {
                 d.execSQL("CREATE TABLE scanned (photo INTEGER PRIMARY KEY, faces INTEGER)");
@@ -58,10 +60,12 @@ final class FaceStore {
                 d.execSQL("CREATE INDEX faces_photo ON faces (photo)");
                 d.execSQL("CREATE TABLE groups (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, kind INTEGER)");
                 d.execSQL("CREATE TABLE marks (grp INTEGER, yes INTEGER, photo INTEGER, face INTEGER, emb BLOB)");
+                d.execSQL("CREATE TABLE ignored (face INTEGER PRIMARY KEY)");
             }
 
             @Override
             public void onUpgrade(SQLiteDatabase d, int o, int n) {
+                if (o < 2) d.execSQL("CREATE TABLE IF NOT EXISTS ignored (face INTEGER PRIMARY KEY)"); // 0.10.16
             }
         };
         db = helper.getWritableDatabase();
@@ -77,6 +81,12 @@ final class FaceStore {
                 track(new People.Face(c.getLong(0), c.getLong(1), c.getFloat(2), c.getFloat(3), c.getFloat(4), c.getFloat(5), c.getInt(6),
                         c.getFloat(7), VectorMath.fromBytes(c.getBlob(8))));
             }
+        } finally {
+            c.close();
+        }
+        c = db.rawQuery("SELECT face FROM ignored", null);
+        try {
+            while (c.moveToNext()) ignored.add(c.getLong(0));
         } finally {
             c.close();
         }
@@ -178,6 +188,30 @@ final class FaceStore {
 
     synchronized int faceCount() {
         return faces.size();
+    }
+
+    synchronized boolean ignored(long face) {
+        return ignored.contains(face);
+    }
+
+    synchronized int ignoredCount() {
+        return ignored.size();
+    }
+
+    /** The face is hidden: nobody to name. */
+    synchronized void ignore(long face) {
+        ContentValues v = new ContentValues();
+        v.put("face", face);
+        db.insertWithOnConflict("ignored", null, v, SQLiteDatabase.CONFLICT_IGNORE);
+        ignored.add(face);
+        version++;
+    }
+
+    /** Every hidden face back. */
+    synchronized void unignoreAll() {
+        db.delete("ignored", null, null);
+        ignored.clear();
+        version++;
     }
 
     // ------------------------------------------------------------------ people and pets

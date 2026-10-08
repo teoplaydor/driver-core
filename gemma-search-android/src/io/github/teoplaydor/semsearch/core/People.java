@@ -10,17 +10,22 @@ import java.util.Set;
 
 /**
  * People and pets in the gallery. A person is the faces the user named (and those said not to be them): a face of
- * the gallery is theirs when its best cosine with the named ones is at least {@link FaceModel#SAME} and above its best
- * with the ones said not to be them — the person with the highest such cosine, when several qualify. The faces nobody
- * took are grouped (each joins the group whose mean is nearest, from {@link #CLUSTER} on; the largest and clearest
- * faces first, so that groups start from good faces) and a group in {@link #MIN_PHOTOS} photos or more is offered as
- * someone unnamed. A pet or anything else is the photos the user marked: a photo is in it when its best cosine with the
- * marked ones stands out from the gallery ({@link #SURE_Z} robust deviations above the median, as the search does)
- * and beats its best with the photos taken out of it. A photo may be in any number of these.
+ * the gallery is theirs when its best cosine with the named ones is at least {@link #NAMED} and above its best with
+ * the ones said not to be them, and no other person comes within {@link #MARGIN} of it (a face that could be either
+ * is nobody's). The faces nobody took are grouped: the largest and clearest first, a face joins a group when its mean
+ * cosine with the group's first {@link #REPS} faces (its clearest, fixed — a running mean would drift from person to
+ * person through lookalikes) is at least {@link #GROUP}; a group in {@link #MIN_PHOTOS} photos or more is offered as
+ * someone unnamed. Levels: 0 mild, 1 normal, 2 strict (SFace's cosine for one person: OpenCV takes 0.363 on LFW;
+ * a gallery has children, relatives, bad light — so higher). A pet or anything else is the photos the user marked: a
+ * photo is in it when its best cosine with the marked ones stands out from the gallery ({@link #SURE_Z} robust
+ * deviations above the median, as the search does) and beats its best with the photos taken out of it. A photo may be
+ * in any number of these.
  */
 public final class People {
-    public static final double CLUSTER = 0.42, SURE_Z = 3.5, MORE_Z = 2.0;
-    public static final int MIN_PHOTOS = 3, MAX_CLUSTERED = 6000, MAX_GROUPS = 600, MORE_MAX = 300, MIN_GALLERY = 8;
+    public static final double[] NAMED = {0.40, 0.45, 0.52}, GROUP = {0.45, 0.52, 0.60};
+    public static final double MARGIN = 0.03, SURE_Z = 3.5, MORE_Z = 2.0;
+    public static final int MILD = 0, NORMAL = 1, STRICT = 2;
+    public static final int MIN_PHOTOS = 3, MAX_CLUSTERED = 6000, MAX_GROUPS = 600, MORE_MAX = 300, MIN_GALLERY = 8, REPS = 8;
     static final double MIN_SPREAD = 0.02;
 
     /** A face of the gallery: its photo (a key), its box (fractions of the photo), its shorter side in pixels, its vector. */
@@ -65,42 +70,63 @@ public final class People {
         return b;
     }
 
+    private static int level(int level) {
+        return Math.max(0, Math.min(NAMED.length - 1, level));
+    }
+
     /** Which person each face is (an index into {@code persons}), or -1. */
-    public static int[] assign(List<Face> faces, List<Person> persons) {
+    public static int[] assign(List<Face> faces, List<Person> persons, int level) {
+        double named = NAMED[level(level)];
         int[] out = new int[faces.size()];
         for (int i = 0; i < out.length; i++) {
             float[] f = faces.get(i).emb;
             int who = -1;
-            double top = -2;
+            double top = -2, second = -2;
             for (int p = 0; p < persons.size(); p++) {
                 Person pp = persons.get(p);
                 if (pp.yes.isEmpty()) continue;
                 double s = best(f, pp.yes);
-                if (s < FaceModel.SAME || s <= best(f, pp.no)) continue;
+                if (s < named || s <= best(f, pp.no)) continue;
                 if (s > top) {
+                    second = top;
                     top = s;
                     who = p;
+                } else if (s > second) {
+                    second = s;
                 }
             }
-            out[i] = who;
+            out[i] = who >= 0 && top - second >= MARGIN ? who : -1;
         }
         return out;
     }
 
-    /** An unnamed someone: their faces (indices into the list given) and their mean, unit length. */
+    /** An unnamed someone: their faces (indices into the list given), the most typical first, and their first faces. */
     public static final class Cluster {
         public final List<Integer> faces = new ArrayList<Integer>();
-        public float[] mean;
+        final List<float[]> reps = new ArrayList<float[]>();
+        float[] sum;
         public int photos;
+    }
+
+    /** The mean cosine of a face with a group's first faces. */
+    private static double likeness(float[] f, Cluster c) {
+        double s = 0;
+        for (float[] r : c.reps) s += dot(f, r);
+        return s / c.reps.size();
     }
 
     /**
      * Groups the faces with {@code taken[i] < 0} whose shorter side is at least {@code minSize} pixels; the groups in
-     * {@link #MIN_PHOTOS} photos or more, most photos first, each face best first.
+     * {@link #MIN_PHOTOS} photos or more, most photos first. Smaller faces, and those past {@link #MAX_CLUSTERED}, only
+     * join a group offered, and only a little more alike ({@code GROUP + 0.05}).
      */
-    public static List<Cluster> clusters(final List<Face> faces, int[] taken, int minSize) {
-        List<Integer> order = new ArrayList<Integer>();
-        for (int i = 0; i < faces.size(); i++) if (taken[i] < 0 && faces.get(i).size >= minSize) order.add(i);
+    public static List<Cluster> clusters(final List<Face> faces, int[] taken, int minSize, int level) {
+        final double group = GROUP[level(level)];
+        List<Integer> order = new ArrayList<Integer>(), small = new ArrayList<Integer>();
+        for (int i = 0; i < faces.size(); i++) {
+            if (taken[i] >= 0) continue;
+            (faces.get(i).size >= minSize ? order : small).add(i);
+        }
         Collections.sort(order, new Comparator<Integer>() {
             @Override
             public int compare(Integer a, Integer b) {
@@ -108,47 +134,53 @@ public final class People {
                 return Double.compare(y.size * (double) y.score, x.size * (double) x.score);
             }
         });
-        List<float[]> sums = new ArrayList<float[]>(), means = new ArrayList<float[]>();
         List<Cluster> all = new ArrayList<Cluster>();
-        List<Integer> rest = new ArrayList<Integer>();
+        List<float[]> means = new ArrayList<float[]>();
+        List<Integer> rest = new ArrayList<Integer>(small);
         for (int k = 0; k < order.size(); k++) {
             int i = order.get(k);
-            float[] f = faces.get(i).emb;
             if (k >= MAX_CLUSTERED) {
                 rest.add(i);
                 continue;
             }
-            int c = nearest(f, means);
-            if (c >= 0 && dot(f, means.get(c)) >= CLUSTER) {
-                all.get(c).faces.add(i);
-                float[] s = sums.get(c);
-                for (int d = 0; d < s.length; d++) s[d] += f[d];
-                means.set(c, unit(s));
+            float[] f = faces.get(i).emb;
+            Cluster c = join(f, all, means, group);
+            if (c != null) {
+                add(c, f, i);
+                means.set(all.indexOf(c), unit(c.sum));
             } else if (all.size() < MAX_GROUPS) {
                 Cluster n = new Cluster();
-                n.faces.add(i);
+                n.sum = new float[f.length];
+                add(n, f, i);
                 all.add(n);
-                sums.add(f.clone());
-                means.add(unit(f));
+                means.add(unit(n.sum));
             } else {
                 rest.add(i);
             }
         }
         List<Cluster> out = new ArrayList<Cluster>();
-        List<float[]> shown = new ArrayList<float[]>();
+        List<float[]> shownMeans = new ArrayList<float[]>();
         for (int c = 0; c < all.size(); c++) {
-            Cluster cl = all.get(c);
-            if (photos(faces, cl.faces) < MIN_PHOTOS) continue;
-            cl.mean = means.get(c);
-            out.add(cl);
-            shown.add(cl.mean);
+            if (photos(faces, all.get(c).faces) < MIN_PHOTOS) continue;
+            out.add(all.get(c));
+            shownMeans.add(means.get(c));
         }
-        // the faces past the limit: into a shown group when near enough
         for (int i : rest) {
-            int c = nearest(faces.get(i).emb, shown);
-            if (c >= 0 && dot(faces.get(i).emb, shown.get(c)) >= CLUSTER) out.get(c).faces.add(i);
+            Cluster c = join(faces.get(i).emb, out, shownMeans, group + 0.05);
+            if (c != null) c.faces.add(i);
         }
-        for (Cluster cl : out) cl.photos = photos(faces, cl.faces);
+        for (final Cluster c : out) {
+            c.photos = photos(faces, c.faces);
+            // the most typical first (those name a person when the group gets a name)
+            final java.util.Map<Integer, Double> like = new java.util.HashMap<Integer, Double>();
+            for (int i : c.faces) like.put(i, likeness(faces.get(i).emb, c));
+            Collections.sort(c.faces, new Comparator<Integer>() {
+                @Override
+                public int compare(Integer a, Integer b) {
+                    return Double.compare(like.get(b), like.get(a));
+                }
+            });
+        }
         Collections.sort(out, new Comparator<Cluster>() {
             @Override
             public int compare(Cluster a, Cluster b) {
@@ -158,14 +190,42 @@ public final class People {
         return out;
     }
 
-    private static int nearest(float[] f, List<float[]> means) {
-        int best = -1;
-        double top = -2;
+    private static void add(Cluster c, float[] f, int i) {
+        c.faces.add(i);
+        if (c.reps.size() < REPS) c.reps.add(f);
+        for (int d = 0; d < f.length; d++) c.sum[d] += f[d];
+    }
+
+    /**
+     * The group a face joins: among the three whose means are nearest (and not far: {@code group - 0.1}), the one it is
+     * most like by its first faces, when at least {@code group}; else none.
+     */
+    private static Cluster join(float[] f, List<Cluster> groups, List<float[]> means, double group) {
+        int[] cand = {-1, -1, -1};
+        double[] cs = {-2, -2, -2};
         for (int c = 0; c < means.size(); c++) {
             double s = dot(f, means.get(c));
-            if (s > top) {
-                top = s;
-                best = c;
+            if (s < group - 0.1) continue;
+            for (int k = 0; k < 3; k++) {
+                if (s > cs[k]) {
+                    for (int m = 2; m > k; m--) {
+                        cs[m] = cs[m - 1];
+                        cand[m] = cand[m - 1];
+                    }
+                    cs[k] = s;
+                    cand[k] = c;
+                    break;
+                }
+            }
+        }
+        Cluster best = null;
+        double top = group;
+        for (int c : cand) {
+            if (c < 0) continue;
+            double l = likeness(f, groups.get(c));
+            if (l >= top) {
+                top = l;
+                best = groups.get(c);
             }
         }
         return best;

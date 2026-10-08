@@ -64,8 +64,22 @@ final class Viewer extends FrameLayout {
 
         void setHidden(IndexStore.Item it, boolean hide);
 
-        /** Who (and which pet) is on the photo: the faces, named or to name. */
+        /** Marking the photo: a pet or anything else (and the face models, when not there yet). */
         void whoIsThis(IndexStore.Item it);
+
+        /** The face models are there: the photo's faces are shown on it. */
+        boolean facesReady();
+
+        void facesOf(IndexStore.Item it, Engine.Callback<List<Engine.FaceTag>> cb);
+
+        /** The face (a box in fractions of the photo) cut out, round, into the view. */
+        void faceInto(ImageView v, IndexStore.Item it, float[] box);
+
+        /** A face tapped: who it is. */
+        void faceTapped(IndexStore.Item it, Engine.FaceTag f);
+
+        /** A face nobody needs to name, hidden. */
+        void hideFace(IndexStore.Item it, Engine.FaceTag f);
 
         /** Every album the picture is in (Engine.albumsOf). */
         void albumsOf(IndexStore.Item it, Engine.Callback<List<Engine.Album>> cb);
@@ -79,7 +93,8 @@ final class Viewer extends FrameLayout {
     private int index;
     private final View scrim;
     private final Pager pager;
-    private final LinearLayout top, bottom, actions, tagsBox, tagsRow, albumsRow;
+    private final LinearLayout top, bottom, actions, tagsBox, tagsRow, albumsRow, facesRow;
+    private final View facesScroll;
     private final TextView tagsNote, albumsTitle;
     private final View albumsScroll;
     /** "Что на фото" is open: it follows the photo when swiping to the next one. */
@@ -171,6 +186,18 @@ final class Viewer extends FrameLayout {
         albumsScroll = ascroll;
         tagsBox.addView(ascroll, new LinearLayout.LayoutParams(-1, -2));
         bottom.addView(tagsBox, new LinearLayout.LayoutParams(-1, -2));
+        // who is on the photo: their faces, named or to name, right on it
+        android.widget.HorizontalScrollView fscroll = new android.widget.HorizontalScrollView(c);
+        fscroll.setHorizontalScrollBarEnabled(false);
+        fscroll.setPadding(Ui.dp(c, 4), 0, Ui.dp(c, 4), Ui.dp(c, 12));
+        fscroll.setClipToPadding(false);
+        fscroll.setVisibility(GONE);
+        facesRow = new LinearLayout(c);
+        facesRow.setOrientation(LinearLayout.HORIZONTAL);
+        facesRow.setGravity(Gravity.CENTER_VERTICAL);
+        fscroll.addView(facesRow);
+        facesScroll = fscroll;
+        bottom.addView(fscroll, new LinearLayout.LayoutParams(-1, -2));
         actions = new LinearLayout(c);
         actions.setOrientation(LinearLayout.HORIZONTAL);
         actions.setGravity(Gravity.CENTER);
@@ -325,6 +352,7 @@ final class Viewer extends FrameLayout {
         title.setText(DateFormat.getDateInstance(DateFormat.LONG).format(new Date(it.date)));
         subtitle.setText(it.kind == IndexStore.KIND_NOTE ? "Заметка" : it.title != null ? it.title : "");
         actions.removeAllViews();
+        loadFaces(it);
         if (it.kind == IndexStore.KIND_NOTE) {
             tagsBox.setVisibility(GONE);
         } else if (tagsShown) {
@@ -358,14 +386,6 @@ final class Viewer extends FrameLayout {
                     else tagsBox.setVisibility(GONE);
                 }
             });
-            if (it.kind == IndexStore.KIND_PHOTO) {
-                action(Icon.PERSON, "Кто это", new Runnable() {
-                    @Override
-                    public void run() {
-                        host.whoIsThis(it);
-                    }
-                });
-            }
             if (host.hidingOn()) {
                 final boolean hidden = host.isHidden(it);
                 action(hidden ? Icon.SHOW : Icon.HIDE, hidden ? "Вернуть" : "Скрыть", new Runnable() {
@@ -382,6 +402,103 @@ final class Viewer extends FrameLayout {
                 }
             });
         }
+    }
+
+    /** The photo shown. */
+    IndexStore.Item current() {
+        return items.get(index);
+    }
+
+    /** The faces of the photo shown, again (after one was named or hidden). */
+    void refreshFaces() {
+        loadFaces(items.get(index));
+    }
+
+    /** The photo's faces as small round pictures with names; «+» marks a pet or anything else. */
+    private void loadFaces(final IndexStore.Item it) {
+        facesRow.removeAllViews();
+        if (it.kind != IndexStore.KIND_PHOTO) {
+            facesScroll.setVisibility(GONE);
+            return;
+        }
+        facesScroll.setVisibility(VISIBLE);
+        if (!host.facesReady()) {
+            facesRow.addView(pill(Icon.PERSON, "Кто это", it));
+            return;
+        }
+        host.facesOf(it, new Engine.Callback<List<Engine.FaceTag>>() {
+            @Override
+            public void done(List<Engine.FaceTag> faces, Exception e) {
+                if (items.get(index) != it) return;
+                facesRow.removeAllViews();
+                if (faces != null) for (Engine.FaceTag f : faces) facesRow.addView(facePill(it, f));
+                facesRow.addView(pill(Icon.PLUS, "Отметить", it));
+            }
+        });
+    }
+
+    private View facePill(final IndexStore.Item it, final Engine.FaceTag f) {
+        Context c = getContext();
+        LinearLayout p = new LinearLayout(c);
+        p.setOrientation(LinearLayout.HORIZONTAL);
+        p.setGravity(Gravity.CENTER_VERTICAL);
+        p.setBackground(Ui.round(c, 0xCC222932, 20));
+        p.setPadding(Ui.dp(c, 4), Ui.dp(c, 4), Ui.dp(c, f.name == null ? 6 : 14), Ui.dp(c, 4));
+        ImageView face = new ImageView(c);
+        face.setBackground(Ui.round(c, 0xFF2C3440, 16));
+        host.faceInto(face, it, new float[]{f.x, f.y, f.w, f.h});
+        p.addView(face, new LinearLayout.LayoutParams(Ui.dp(c, 32), Ui.dp(c, 32)));
+        TextView name = Ui.text(c, f.name != null ? f.name : "Кто это?", 13.5f, f.name != null ? Ui.TEXT : Ui.TEXT2, Ui.MEDIUM);
+        name.setPadding(Ui.dp(c, 8), 0, 0, 0);
+        p.addView(name);
+        p.setOnClickListener(new OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                host.faceTapped(it, f);
+            }
+        });
+        if (f.name == null) {
+            // a face nobody needs to name (a passer-by): hidden with one tap, right beside «Кто это?»
+            ImageView hide = Ui.icon(c, Icon.HIDE, Ui.TEXT3, 30);
+            hide.setPadding(Ui.dp(c, 6), Ui.dp(c, 6), Ui.dp(c, 6), Ui.dp(c, 6));
+            hide.setContentDescription("Скрыть лицо");
+            hide.setOnClickListener(new OnClickListener() {
+                @Override
+                public void onClick(View v) {
+                    host.hideFace(it, f);
+                }
+            });
+            LinearLayout.LayoutParams hl = new LinearLayout.LayoutParams(Ui.dp(c, 30), Ui.dp(c, 30));
+            hl.leftMargin = Ui.dp(c, 4);
+            p.addView(hide, hl);
+        }
+        Ui.pressable(p);
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-2, Ui.dp(c, 40));
+        lp.rightMargin = Ui.dp(c, 8);
+        p.setLayoutParams(lp);
+        return p;
+    }
+
+    private View pill(int icon, String label, final IndexStore.Item it) {
+        Context c = getContext();
+        LinearLayout p = new LinearLayout(c);
+        p.setOrientation(LinearLayout.HORIZONTAL);
+        p.setGravity(Gravity.CENTER_VERTICAL);
+        p.setBackground(Ui.round(c, 0xCC222932, 20));
+        p.setPadding(Ui.dp(c, 10), 0, Ui.dp(c, 14), 0);
+        p.addView(Ui.icon(c, icon, Ui.TEXT2, 22), new LinearLayout.LayoutParams(Ui.dp(c, 22), Ui.dp(c, 22)));
+        TextView t = Ui.text(c, label, 13.5f, Ui.TEXT2, Ui.MEDIUM);
+        t.setPadding(Ui.dp(c, 6), 0, 0, 0);
+        p.addView(t);
+        p.setOnClickListener(new OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                host.whoIsThis(it);
+            }
+        });
+        Ui.pressable(p);
+        p.setLayoutParams(new LinearLayout.LayoutParams(-2, Ui.dp(c, 40)));
+        return p;
     }
 
     /** The words for this item into the panel (a later swipe's item wins over an earlier one's answer). */

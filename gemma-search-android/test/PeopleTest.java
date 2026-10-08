@@ -61,19 +61,19 @@ public class PeopleTest {
         // person 0's lookalike: near enough that some of their faces pass for person 0's
         float[] look = new float[d];
         float[] other = dir(r, d);
-        for (int i = 0; i < d; i++) look[i] = (float) (0.62 * who[0][i] + 0.78 * other[i]);
+        for (int i = 0; i < d; i++) look[i] = (float) (0.7 * who[0][i] + 0.71 * other[i]);
         unit(look);
         List<Integer> truth = new ArrayList<Integer>();
         long id = 1;
         int[] count = {12, 9, 7, 5, 4, 2};
         for (int p = 0; p < who.length; p++) {
             for (int k = 0; k < count[p]; k++) {
-                faces.add(new People.Face(id++, p * 1000 + k, 0.1f, 0.1f, 0.2f, 0.2f, 60 + r.nextInt(80), 0.95f, face(r, who[p], 0.75)));
+                faces.add(new People.Face(id++, p * 1000 + k, 0.1f, 0.1f, 0.2f, 0.2f, 60 + r.nextInt(80), 0.95f, face(r, who[p], 0.8)));
                 truth.add(p);
             }
         }
         for (int p = 0; p < 2; p++) {
-            faces.add(new People.Face(id++, 100, 0.1f + 0.5f * p, 0.1f, 0.2f, 0.2f, 70, 0.95f, face(r, who[p], 0.75)));
+            faces.add(new People.Face(id++, 100, 0.1f + 0.5f * p, 0.1f, 0.2f, 0.2f, 70, 0.95f, face(r, who[p], 0.8)));
             truth.add(p);
         }
         int lookFrom = faces.size();
@@ -97,7 +97,7 @@ public class PeopleTest {
         faces = new ArrayList<People.Face>(plain);
         int[] none = new int[faces.size()];
         Arrays.fill(none, -1);
-        List<People.Cluster> cl = People.clusters(faces, none, 40);
+        List<People.Cluster> cl = People.clusters(faces, none, 40, People.NORMAL);
         StringBuilder sb = new StringBuilder();
         boolean pure = true;
         Set<Integer> found = new HashSet<Integer>();
@@ -120,7 +120,7 @@ public class PeopleTest {
         p0.yes.add(faces.get(1).emb);
         People.Person p1 = new People.Person();
         p1.yes.add(faces.get(12).emb);
-        int[] before = People.assign(faces, Arrays.asList(p0, p1));
+        int[] before = People.assign(faces, Arrays.asList(p0, p1), People.NORMAL);
         int taken = 0;
         for (int i = lookFrom; i < faces.size(); i++) if (before[i] == 0) taken++;
         System.out.println("  the lookalike taken for person 0: " + taken + " of " + (faces.size() - lookFrom) + " faces");
@@ -128,7 +128,7 @@ public class PeopleTest {
         int wrong = lookFrom;
         for (int i = lookFrom; i < faces.size(); i++) if (before[i] == 0) wrong = i;
         p0.no.add(faces.get(wrong).emb);
-        int[] a = People.assign(faces, Arrays.asList(p0, p1));
+        int[] a = People.assign(faces, Arrays.asList(p0, p1), People.NORMAL);
         int got0 = 0, got1 = 0, others = 0;
         Set<Long> photos0 = new HashSet<Long>(), photos1 = new HashSet<Long>();
         for (int i = 0; i < a.length; i++) {
@@ -142,10 +142,58 @@ public class PeopleTest {
         check(taken > 0 && got0 == 13 && got1 == 10 && others == 0, "a named person: all their faces, no one else's — the lookalike "
                 + "out after one of their faces is said not to be them");
         check(photos0.contains(100L) && photos1.contains(100L), "two people on one photo: it is in both");
-        List<People.Cluster> rest = People.clusters(faces, a, 40);
+        List<People.Cluster> rest = People.clusters(faces, a, 40, People.NORMAL);
         boolean noNamed = true;
         for (People.Cluster c : rest) for (int i : c.faces) noNamed &= a[i] < 0;
         check(rest.size() == 4 && noNamed, "the unnamed after naming two: the other three and the lookalike (" + rest.size() + ")");
+
+        // a chain of faces from one person to another (relatives, lookalikes, bad light), clearest at one end: a running
+        // mean walks along it and makes one group of both (0.10.15 did, in 50 of 50 such chains); each group keeps to its
+        // first, clearest faces
+        float[] pp = dir(r, d), qq = dir(r, d);
+        List<People.Face> chain = new ArrayList<People.Face>();
+        List<Character> side = new ArrayList<Character>();
+        int size = 200;
+        for (int k = 0; k < 6; k++) {
+            chain.add(new People.Face(5000 + k, 8000 + k, 0.1f, 0.1f, 0.2f, 0.2f, size--, 0.97f, face(r, pp, 0.85)));
+            side.add('P');
+        }
+        for (int k = 1; k < 20; k++) {
+            double t = k / 20.0;
+            float[] mid = new float[d];
+            for (int i = 0; i < d; i++) mid[i] = (float) ((1 - t) * pp[i] + t * qq[i]);
+            unit(mid);
+            for (int j = 0; j < 3; j++) {
+                chain.add(new People.Face(5200 + 3 * k + j, 8200 + 3 * k + j, 0.1f, 0.1f, 0.2f, 0.2f, size--, 0.95f, face(r, mid, 0.9)));
+                side.add('-');
+            }
+        }
+        for (int k = 0; k < 6; k++) {
+            chain.add(new People.Face(5100 + k, 8100 + k, 0.1f, 0.1f, 0.2f, 0.2f, size--, 0.97f, face(r, qq, 0.85)));
+            side.add('Q');
+        }
+        int[] free = new int[chain.size()];
+        Arrays.fill(free, -1);
+        boolean apart = true;
+        int groupsPQ = 0;
+        for (People.Cluster c : People.clusters(chain, free, 40, People.NORMAL)) {
+            Set<Character> sides = new HashSet<Character>();
+            for (int i : c.faces) sides.add(side.get(i));
+            apart &= !(sides.contains('P') && sides.contains('Q'));
+            if (sides.contains('P') || sides.contains('Q')) groupsPQ++;
+        }
+        check(apart && groupsPQ == 2, "a chain of in-between faces does not join two people into one group (" + groupsPQ + " groups)");
+
+        // a face nearly as like one named person as another is nobody's
+        People.Person x = new People.Person(), y = new People.Person();
+        x.yes.add(pp);
+        y.yes.add(qq);
+        float[] between = new float[d];
+        for (int i = 0; i < d; i++) between[i] = pp[i] + qq[i];
+        unit(between);
+        int[] amb = People.assign(Arrays.asList(new People.Face(1, 1, 0, 0, 0.1f, 0.1f, 100, 0.95f, between),
+                new People.Face(2, 2, 0, 0, 0.1f, 0.1f, 100, 0.95f, pp)), Arrays.asList(x, y), People.MILD);
+        check(amb[0] == -1 && amb[1] == 0, "a face as like two named people as each other: nobody's; a clear one: theirs");
 
         // a pet by examples: Gemma-like vectors of scenes; the cat photos, not the dogs; a dog taken out stays out
         int dim = 256;

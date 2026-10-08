@@ -1641,7 +1641,7 @@ public final class Engine {
 
     /** People and pets as they stand: the faces, who each is, the albums. */
     private static final class PeopleView {
-        int version, mediaSize;
+        int version, mediaSize, level;
         List<People.Face> faces;
         int[] who;
         List<FaceStore.Group> persons = new ArrayList<FaceStore.Group>();
@@ -1655,15 +1655,18 @@ public final class Engine {
     private PeopleView people() {
         synchronized (peopleLock) {
             List<IndexStore.Item> media = store.media();
-            int v = faceStore.version();
-            if (peopleCache != null && peopleCache.version == v && peopleCache.mediaSize == media.size()) return peopleCache;
+            int v = faceStore.version(), level = faceLevel();
+            if (peopleCache != null && peopleCache.version == v && peopleCache.mediaSize == media.size() && peopleCache.level == level) {
+                return peopleCache;
+            }
             PeopleView pv = new PeopleView();
             pv.version = v;
             pv.mediaSize = media.size();
+            pv.level = level;
             java.util.Map<Long, IndexStore.Item> byKey = new java.util.HashMap<Long, IndexStore.Item>();
             for (IndexStore.Item it : media) byKey.put(IndexStore.key(it), it);
             pv.faces = new ArrayList<People.Face>();
-            for (People.Face f : faceStore.faces()) if (byKey.containsKey(f.photo)) pv.faces.add(f);
+            for (People.Face f : faceStore.faces()) if (byKey.containsKey(f.photo) && !faceStore.ignored(f.id)) pv.faces.add(f);
             List<People.Person> persons = new ArrayList<People.Person>();
             List<FaceStore.Group> things = new ArrayList<FaceStore.Group>();
             for (FaceStore.Group g : faceStore.groups()) {
@@ -1677,7 +1680,7 @@ public final class Engine {
                     things.add(g);
                 }
             }
-            pv.who = People.assign(pv.faces, persons);
+            pv.who = People.assign(pv.faces, persons, level);
             for (int p = 0; p < pv.persons.size(); p++) {
                 List<Integer> idx = new ArrayList<Integer>();
                 for (int i = 0; i < pv.who.length; i++) if (pv.who[i] == p) idx.add(i);
@@ -1686,7 +1689,7 @@ public final class Engine {
                 a.id = pv.persons.get(p).id;
                 pv.albums.add(a);
             }
-            List<People.Cluster> clusters = People.clusters(pv.faces, pv.who, GROUP_FACE);
+            List<People.Cluster> clusters = People.clusters(pv.faces, pv.who, GROUP_FACE, level);
             for (int c = 0; c < Math.min(UNNAMED_MAX, clusters.size()); c++) {
                 Album a = personAlbum("Кто это?", clusters.get(c).faces, pv.faces, byKey);
                 a.kind = Album.UNNAMED;
@@ -1820,6 +1823,45 @@ public final class Engine {
         });
     }
 
+    public static final String[] FACE_LEVELS = {"мягко", "обычно", "строго"};
+
+    /** How strict faces are told apart (People levels: mild, normal, strict). */
+    public int faceLevel() {
+        return Math.max(0, Math.min(2, prefs.getInt("face_level", People.NORMAL)));
+    }
+
+    public void setFaceLevel(int level) {
+        prefs.edit().putInt("face_level", level).apply();
+        Journal.add(ctx, "app", "люди: строгость узнавания — " + FACE_LEVELS[faceLevel()]);
+        notifyChanged();
+    }
+
+    public int facesHidden() {
+        FaceStore fs = faceStore;
+        return fs == null ? 0 : fs.ignoredCount();
+    }
+
+    /** This face is nobody to name (a passer-by): it leaves the photo's faces, people and the unnamed. */
+    public void hideFace(final long faceId, final Runnable done) {
+        ml.submit(new Runnable() {
+            @Override
+            public void run() {
+                faceStore.ignore(faceId);
+                changed(done, "люди: лицо скрыто");
+            }
+        });
+    }
+
+    public void showHiddenFaces(final Runnable done) {
+        ml.submit(new Runnable() {
+            @Override
+            public void run() {
+                faceStore.unignoreAll();
+                changed(done, "люди: скрытые лица возвращены");
+            }
+        });
+    }
+
     /** Names of the people (PERSON) or the pets/things (THING) there are, in the order made. */
     public List<String> groupNames(boolean persons) {
         List<String> out = new ArrayList<String>();
@@ -1860,14 +1902,17 @@ public final class Engine {
         });
     }
 
-    /** Someone unnamed gets a name: their clearest faces (up to 20) become the person's. */
+    /**
+     * Someone unnamed gets a name: their most typical faces (up to 8) become the person's — not all of them: a face that
+     * got into the group by mistake would bring its own lookalikes along.
+     */
     public void nameUnnamed(final Album a, final String name, final Runnable done) {
         ml.submit(new Runnable() {
             @Override
             public void run() {
                 if (name.trim().isEmpty()) return;
                 FaceStore.Group g = faceStore.named(name, FaceStore.PERSON);
-                for (int k = 0; k < Math.min(20, a.faces.length); k++) {
+                for (int k = 0; k < Math.min(People.REPS, a.faces.length); k++) {
                     People.Face f = faceStore.face(a.faces[k]);
                     if (f != null) faceStore.markFace(g, f, true);
                 }
