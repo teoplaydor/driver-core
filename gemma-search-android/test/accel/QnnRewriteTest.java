@@ -82,6 +82,35 @@ public class QnnRewriteTest {
             check(finite && cos >= 0.99999, String.format("activations ×%.0f: same features with fixed shapes, cos %.7f, "
                     + "max relative diff %.2e", amp, cos, maxRel));
         }
+        // QNN's own norm: one RMSNormalization per norm, opset 23 and IR 11 — the same features
+        File nat = new File(args[1], "vit.qnn.r8.onnx");
+        int[] nn = OnnxPatcher.forQnn(src, nat, true);
+        Map<String, Long> natOps = new TreeMap<String, Long>();
+        int rms = 0, abs = 0;
+        for (OnnxPatcher.Node x : OnnxPatcher.nodes(nat, natOps)) {
+            if (x.opType.equals("RMSNormalization")) rms++;
+            if (x.opType.equals("Abs") || x.opType.equals("SimplifiedLayerNormalization")) abs++;
+        }
+        check(nn[5] == 4 && rms == 4 && abs == 0 && natOps.get("ai.onnx") == 23, "QNN's own norm: RMSNormalization ×" + rms + ", opset "
+                + natOps.get("ai.onnx"));
+        for (float amp : new float[]{1f, 400f}) {
+            java.util.Random rnd = new java.util.Random(5);
+            float[] x = new float[s * d];
+            for (int i = 0; i < x.length; i++) x[i] = (float) rnd.nextGaussian() * amp;
+            float[] mask = new float[s * s];
+            for (int q = 0; q < s; q++) for (int k = valid; k < s; k++) mask[q * s + k] = -3.4e38f;
+            float[] a = run(env, src, x, mask, s, d, false), b = run(env, nat, x, mask, s, d, true);
+            double dot = 0, na = 0, nb = 0;
+            boolean finite = true;
+            for (int i = 0; i < valid * d; i++) {
+                dot += a[i] * b[i];
+                na += a[i] * a[i];
+                nb += b[i] * b[i];
+                finite &= !Float.isNaN(b[i]) && !Float.isInfinite(b[i]);
+            }
+            check(finite && dot / Math.sqrt(na * nb) >= 0.99999, String.format("QNN's own norm, activations ×%.0f: cos %.7f", amp,
+                    dot / Math.sqrt(na * nb)));
+        }
         System.out.println(bad == 0 ? "QNN REWRITE OK" : bad + " FAILED");
         if (bad != 0) System.exit(1);
     }

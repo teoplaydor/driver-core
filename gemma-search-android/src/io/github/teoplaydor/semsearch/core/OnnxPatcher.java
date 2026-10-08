@@ -203,10 +203,26 @@ public final class OnnxPatcher {
      *         GELUs} rewritten
      */
     public static int[] forQnn(File in, File out) throws IOException {
+        return forQnn(in, out, false);
+    }
+
+    /** ONNX's RMSNormalization (QNN's own RmsNorm on the NPU) is in the standard from opset 23 (IR version 11). */
+    static final long RMS_OPSET = 23, RMS_IR = 11;
+
+    /**
+     * @param nativeNorms RMS normalisation as ONNX's RMSNormalization (one op, QNN's own RmsNorm) instead of spelled
+     *                    out; the model's opset becomes 23. In 0.10.8 the spelled-out norms (14 ops each, 113 of them)
+     *                    were some 35–40% of the NPU's time at 280 tokens. Whether QNN's norm is right in fp16 (large
+     *                    activations, zero vectors of padding) is checked on the phone, with the spelled-out graph
+     *                    as the fallback.
+     * @return as {@link #forQnn(File, File)}, and the norms as RMSNormalization
+     */
+    public static int[] forQnn(File in, File out, boolean nativeNorms) throws IOException {
         java.util.Map<String, Long> opsets = new java.util.HashMap<String, Long>();
         nodes(in, opsets);
         Long ai = opsets.get("ai.onnx");
         QnnRewrite q = new QnnRewrite(ai == null ? 17 : ai);
+        q.nativeNorms = nativeNorms;
         byte[] model = readAll(in);
         ByteArrayOutputStream res = new ByteArrayOutputStream(model.length + 65536);
         Reader r = new Reader(model, 0, model.length);
@@ -219,6 +235,30 @@ public final class OnnxPatcher {
                 byte[] g = q.graph(model, r.pos, r.pos + len);
                 r.pos += len;
                 writeLenField(res, 7, g);
+            } else if (nativeNorms && field == 1 && wire == 0) {
+                // the IR version opset 23 needs
+                writeVarint(res, 1L << 3);
+                writeVarint(res, Math.max(RMS_IR, r.varint()));
+            } else if (nativeNorms && field == 8 && wire == 2) {
+                // the standard domain's opset: 23 for RMSNormalization (no op of this model changed meaning since 20)
+                int len = (int) r.varint();
+                Reader o = new Reader(model, r.pos, r.pos + len);
+                r.pos += len;
+                String domain = "";
+                long version = 0;
+                while (o.more()) {
+                    long k = o.varint();
+                    int f = (int) (k >>> 3), w = (int) (k & 7);
+                    if (f == 1 && w == 2) domain = o.string();
+                    else if (f == 2 && w == 0) version = o.varint();
+                    else o.skip(w);
+                }
+                boolean standard = domain.isEmpty() || "ai.onnx".equals(domain);
+                ByteArrayOutputStream os = new ByteArrayOutputStream();
+                if (!domain.isEmpty()) writeLenField(os, 1, domain.getBytes(UTF8));
+                writeVarint(os, 2L << 3);
+                writeVarint(os, standard ? Math.max(RMS_OPSET, version) : version);
+                writeLenField(res, 8, os.toByteArray());
             } else {
                 r.skip(wire);
                 res.write(model, start, r.pos - start);
@@ -233,12 +273,14 @@ public final class OnnxPatcher {
         }
         if (out.exists() && !out.delete()) throw new IOException("cannot replace " + out);
         if (!tmp.renameTo(out)) throw new IOException("cannot write " + out);
-        return new int[]{q.attention, q.norms, q.clamped, q.gathers, q.gelus};
+        return new int[]{q.attention, q.norms, q.clamped, q.gathers, q.gelus, q.nativeNormCount};
     }
 
     private static final class QnnRewrite {
         final long opset;
-        int attention, norms, clamped, gathers, gelus;
+        int attention, norms, clamped, gathers, gelus, nativeNormCount;
+        /** RMS norms as ONNX's RMSNormalization (QNN's own RmsNorm), not spelled out. */
+        boolean nativeNorms;
         /** 1-D integer constants of the graph (initializers in the file, Constant nodes): Gather indices. */
         final java.util.Map<String, long[]> indexConstants = new java.util.HashMap<String, long[]>();
         final java.util.Set<String> constants = new java.util.HashSet<String>();
@@ -588,6 +630,13 @@ public final class OnnxPatcher {
             float eps = attrs.containsKey("epsilon") ? (Float) attrs.get("epsilon") : 1e-5f;
             String t = "qnn" + norms++ + "_" + (n.name.isEmpty() ? "rms" : n.name.replaceAll("[^A-Za-z0-9_./]", "_"));
             String x = n.inputs.get(0), w = n.inputs.size() > 1 ? n.inputs.get(1) : "";
+            if (nativeNorms && !w.isEmpty()) {
+                // QNN's RmsNorm needs the scale (it has one here) and the last axis
+                emit("RMSNormalization", new String[]{x, w}, new String[]{n.outputs.get(0)}, t + "/rms", attrInt("axis", axis),
+                        attrFloat("epsilon", eps));
+                nativeNormCount++;
+                return;
+            }
             emit("Abs", new String[]{x}, new String[]{t + "/abs"}, t + "/abs");
             reduce("ReduceMax", t + "/abs", t + "/amax", axis);
             // a zero vector (padding) is divided by this and stays zero

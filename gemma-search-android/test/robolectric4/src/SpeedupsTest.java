@@ -369,6 +369,74 @@ public class SpeedupsTest {
                 && journal.contains("способ 2 из 4: внимание по 4 частям, оптимизация QNN по умолчанию, граф на NPU в 4 частях")
                 && journal.contains("способ 4 не собрался") && journal.contains("ошибка сборки: ")
                 && journal.contains("сборка под 1100 фрагментов: эталон на процессоре (fp32) · память процесса "));
+        // QNN's own RMS norm (graph r8) with the spelled-out norms next to it: a failed try leaves a note and the
+        // same run compiles the spelled-out graph (here both fail: no QNN in this ONNX Runtime), the report says
+        // why; a later process goes to the spelled-out graph at once; a try still noted as running killed the process
+        java.nio.file.Files.copy(vit.toPath(), new File(vit.getParentFile(), "vit.qnn.dnorm.onnx").toPath());
+        String[] normRuns = new String[3];
+        for (int r = 0; r < 3; r++) {
+            @SuppressWarnings("unchecked")
+            android.app.Service fresh = Robolectric.buildService((Class<android.app.Service>) svc).create().get();
+            org.robolectric.Shadows.shadowOf(a.getApplication()).setComponentNameAndServiceForBindService(
+                    new android.content.ComponentName(a, svc), fresh.onBind(new android.content.Intent(a, svc)));
+            final int patches = r < 2 ? 36 : 40;
+            if (r == 2) writeText(new File(vit.getParentFile(), "vit.qnn.p40_norms_attempt.txt"), "1");
+            new File(a.getCacheDir(), "journal.txt").delete();
+            final Object[] nr = new Object[1];
+            Thread nt = new Thread(() -> {
+                io.github.teoplaydor.semsearch.core.VisionRunner v = null;
+                try {
+                    java.lang.reflect.Constructor<?> k = Class.forName("io.github.teoplaydor.semsearch.app.NpuVision")
+                            .getDeclaredConstructor(Context.class, File.class, File.class);
+                    k.setAccessible(true);
+                    v = (io.github.teoplaydor.semsearch.core.VisionRunner) k.newInstance(a, q, vit);
+                    long[] pos = new long[patches * 2];
+                    for (int i = 0; i < patches; i++) {
+                        pos[2 * i] = i % 6;
+                        pos[2 * i + 1] = i / 6;
+                    }
+                    nr[0] = v.run(new float[patches * 32], pos, 1, patches, 32);
+                } catch (Exception x) {
+                    nr[0] = x instanceof java.lang.reflect.InvocationTargetException ? x.getCause() : x;
+                } finally {
+                    if (v != null) v.close();
+                }
+            });
+            nt.start();
+            Robo.waitFor("npu norms run " + r, () -> nr[0] != null);
+            String normJournal = new String(java.nio.file.Files.readAllBytes(new File(a.getCacheDir(), "journal.txt").toPath()), "UTF-8");
+            normRuns[r] = ((Exception) nr[0]).getMessage() + "\n--- journal:\n" + normJournal;
+            System.out.println("QNN's own norm, run " + r + ": " + normRuns[r]);
+        }
+        assertTrue(normRuns[0], normRuns[0].contains("встроенная нормализация QNN под 36 фрагментов не подошла — собираю с разложенной")
+                && normRuns[0].contains("нормализация: разложенная — встроенная QNN не подошла: ")
+                && normRuns[0].contains("QNN компилирует граф")
+                && normRuns[0].contains("эталон на процессоре — с пустыми фрагментами")
+                && normRuns[0].contains("эталон на процессоре — контрастный шум"));
+        assertTrue(new File(vit.getParentFile(), "vit.qnn.p36_norms.txt").exists());
+        assertFalse(new File(vit.getParentFile(), "vit.qnn.p36_norms_attempt.txt").exists());
+        assertTrue(normRuns[1], normRuns[1].contains("нормализация: разложенная — встроенная QNN не подошла: ")
+                && !normRuns[1].contains("собираю с разложенной") && !normRuns[1].contains("эталон на процессоре — контрастный шум"));
+        assertTrue(normRuns[2], normRuns[2].contains("встроенная нормализация QNN под 40 фрагментов в прошлый раз уронила NPU-процесс — дальше разложенная")
+                && normRuns[2].contains("нормализация: разложенная — встроенная QNN не подошла: сборка с ней уронила NPU-процесс"));
+        assertFalse(new File(vit.getParentFile(), "vit.qnn.p40_norms_attempt.txt").exists());
+        // the inputs that check QNN's own norm: the lower half of the image as padding (whole pooled rows), and 0/1 noise
+        long[] grid = new long[2520 * 2];
+        for (int i = 0; i < 2520; i++) {
+            grid[2 * i] = i % 60;
+            grid[2 * i + 1] = i / 60;
+        }
+        @SuppressWarnings("unchecked")
+        java.util.List<Object[]> stress = (java.util.List<Object[]>) Robo.callStatic(svc, "stressInputs", new float[2520 * 4], grid, 2520, 4);
+        assertEquals(2, stress.size());
+        long[] padPos = (long[]) stress.get(0)[2];
+        int kept = 0;
+        for (int i = 0; i < 2520; i++) if (padPos[2 * i] >= 0) kept++;
+        assertEquals(18 * 60, kept); // 42 rows: 21 rounded down to whole rows of 3 × 2 → 18
+        float[] noise = (float[]) stress.get(1)[1];
+        int ones = 0;
+        for (float f : noise) ones += f == 1f ? 1 : 0;
+        assertTrue(ones + " of " + noise.length, ones > noise.length / 3 && ones < noise.length * 2 / 3);
         e.deleteQnn();
         Robo.waitFor("qnn deleted", () -> !new File(a.getFilesDir(), "qnn").exists());
         assertFalse(e.qnnInstalled());

@@ -1568,8 +1568,11 @@ public final class Engine {
                     else f.delete();
                 }
             }
-            OnnxPatcher.forQnn(fp32, graph);
+            OnnxPatcher.forQnn(fp32, graph, true);
         }
+        // the same rewrite with the norms spelled out: the NPU process falls back to it where QNN's own norm fails
+        File split = NpuService.decomposedGraph(graph);
+        if (!split.exists() || split.lastModified() < fp32.lastModified()) OnnxPatcher.forQnn(fp32, split, false);
         File text = graphFile(plan.textModel, true);
         qnnGraphFile = graph;
         qnnPool = Math.max(1, cfg.image.poolingKernelSize);
@@ -1588,10 +1591,19 @@ public final class Engine {
      * ±10⁴, bounds ±65504; r5: Gathers with constant indices as Slices, divisions by a per-vector value as
      * multiplications by its reciprocal, no scaling of scores by 1; r6: the reciprocal as Div(1, x), not Reciprocal,
      * which QNN's provider took although kept on the CPU; r7: GELU as x·σ(x·(a + b·x²)), QNN's Gelu was 40% of the
-     * NPU's time, and √ε / s as a multiplication).
+     * NPU's time, and √ε / s as a multiplication; r8: RMS norms as QNN's own RmsNorm, opset 23 — with the r7 form
+     * next to it, NpuService.decomposedGraph, for a patch count where QNN's norm does not work).
      */
     private static File qnnGraph(File fp32) {
-        return new File(fp32.getParentFile(), fp32.getName().replace(".onnx", ".qnn.r7.onnx"));
+        return new File(fp32.getParentFile(), fp32.getName().replace(".onnx", ".qnn.r8.onnx"));
+    }
+
+    /** A checked NPU compilation for this many patches: of the graph, or of its sibling with the norms spelled out. */
+    static boolean qnnBuilt(File graph, int patches) {
+        for (File g : new File[]{graph, NpuService.decomposedGraph(graph)}) {
+            if (new File(g.getParentFile(), g.getName().replace(".onnx", "") + ".p" + patches + "_precision.txt").exists()) return true;
+        }
+        return false;
     }
 
     /** Where the NPU's result differs from the CPU's (NpuService.scan), for the last image it ran. */
@@ -1822,7 +1834,7 @@ public final class Engine {
         if (plan.accelVision == null || cfg == null) return true;
         File g = qnnGraph(new File(modelDir, plan.accelVision));
         int pool = Math.max(1, cfg.image.poolingKernelSize);
-        return !new File(g.getParentFile(), g.getName().replace(".onnx", "") + ".p" + budget * pool * pool + "_precision.txt").exists();
+        return !qnnBuilt(g, budget * pool * pool);
     }
 
     /** "0.36 с, совпадение 0.994" for a stage's row. */
@@ -3381,8 +3393,7 @@ public final class Engine {
     private boolean qnnCompiles(int budget) {
         File g = qnnGraphFile;
         if (!isQnn(loadedAccel) || g == null || !qnnSeen.add(budget)) return false;
-        int patches = budget * qnnPool * qnnPool;
-        return !new File(g.getParentFile(), g.getName().replace(".onnx", "") + ".p" + patches + "_precision.txt").exists();
+        return !qnnBuilt(g, budget * qnnPool * qnnPool);
     }
 
     /** The NPU process is gone (crashed or stopped): every later photo would fail the same way. */

@@ -489,6 +489,39 @@ public class QnnBuildTest {
         check("qnn112__fused_rms_norm/node_mean_112/s".equals(QnnBuild.dynamicTensorForTest("Error code - ORT_FAIL - message: "
                 + "qnn_model.cc:73 ParseGraphInputOrOutput Dynamic shape is not supported yet, for output: qnn112__fused_rms_norm/node_mean_112/s")),
                 "the error of a part with such a tensor names it");
+        // RMS norms as QNN's own RmsNorm (ONNX's RMSNormalization, opset 23): the Gemma 4 block and the tail give the
+        // same result; the tail's norm (its size known only when it runs) stays on the CPU in double (a double kernel
+        // in ONNX Runtime 1.29), and the ways of a large graph (attention in parts) still find their attention
+        File g4src = new File(new File(args[3]).getParentFile(), "g4.onnx"), g4n = new File(dir, "g4.qnn.r8.onnx");
+        int[] g4c = OnnxPatcher.forQnn(g4src, g4n, true);
+        Map<String, Long> g4ops = new HashMap<String, Long>();
+        List<OnnxPatcher.Node> g4nn = OnnxPatcher.nodes(g4n, g4ops);
+        int rmsN = 0, reduceN = 0;
+        for (OnnxPatcher.Node nd : g4nn) {
+            if (nd.opType.equals("RMSNormalization")) rmsN++;
+            if (nd.opType.startsWith("Reduce") && nd.name.startsWith("qnn")) reduceN++;
+        }
+        float[] g4native = run(g4n, gfin, glin, gshapes);
+        check(g4c[5] == 3 && rmsN == 3 && reduceN == 0 && g4ops.get("ai.onnx") == 23 && maxDiff(g4orig, g4native) / g4max < 1e-5,
+                "QNN's own norm: " + rmsN + " RMSNormalization, opset " + g4ops.get("ai.onnx") + ", = export: relative difference "
+                        + maxDiff(g4orig, g4native) / g4max);
+        File g4natt = new File(dir, "g4.qnn.r8.att4.onnx");
+        check(OnnxPatcher.chunkAttention(g4n, g4natt, 4).size() == 1 && maxDiff(g4orig, run(g4natt, gfin, glin, gshapes)) / g4max < 1e-5,
+                "with QNN's own norm, attention in 4 parts: the same");
+        File tailN = new File(dir, "tail.qnn.r8.onnx");
+        OnnxPatcher.forQnn(tailSrc, tailN, true);
+        List<OnnxPatcher.Node> tnn = OnnxPatcher.nodes(tailN, new HashMap<String, Long>());
+        Map<String, OnnxPatcher.TensorType> ttn = QnnBuild.tensorTypes(env, tailN, dims());
+        Set<String> dynN = QnnBuild.dynamicShapeNodes(tnn);
+        boolean rmsDynamic = false;
+        for (OnnxPatcher.Node nd : tnn) rmsDynamic |= nd.opType.equals("RMSNormalization") && dynN.contains(nd.name);
+        Set<String> tailCpuN = new LinkedHashSet<String>(dynN);
+        tailCpuN.addAll(QnnBuild.positionOnlyNodes(tnn, ttn, OnnxPatcher.inputDims(tailN).keySet()));
+        File tailMovedN = new File(dir, "tail.qnn.r8.cpu.onnx");
+        List<String> tailUnmovedN = OnnxPatcher.keepOnCpu(tailN, tailMovedN, tailCpuN, ttn);
+        float[] tGotN = run(tailMovedN, tfin, tlin, gshapes);
+        check(rmsDynamic && tGotN.length == tWant.length && maxDiff(tWant, tGotN) / tMax < 1e-5 && tailUnmovedN.size() == 1,
+                "the tail with QNN's own norm: the norm found dynamic, on the CPU in double — relative difference " + maxDiff(tWant, tGotN) / tMax);
         File noAtt = new File(dir, "zoo.att.onnx");
         check(OnnxPatcher.chunkAttention(zoo, noAtt, 4).isEmpty() && OnnxPatcher.nodes(noAtt, new HashMap<String, Long>()).size()
                 == OnnxPatcher.nodes(zoo, new HashMap<String, Long>()).size(), "a graph without this attention is copied as it is");

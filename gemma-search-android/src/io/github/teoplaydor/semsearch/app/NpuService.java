@@ -62,7 +62,11 @@ public final class NpuService extends Service {
     private static long[] lastPositions;
     private static int lastPatches;
     private String libDir;
-    private File graph;
+    /**
+     * The graph the app gave (RMS norms as QNN's own RmsNorm), and the one this call works with: that one, or its
+     * sibling with the norms spelled out (decomposedGraph) for a patch count where QNN's norm did not work.
+     */
+    private File base, graph;
     private final Map<Integer, OrtSession> sessions = new HashMap<Integer, OrtSession>();
     /** The vision graph on the CPU in fp32, per patch count: the NPU is checked against it, and it stands in for an image the NPU gets wrong. */
     private final Map<Integer, OrtSession> cpuSessions = new HashMap<Integer, OrtSession>();
@@ -149,7 +153,7 @@ public final class NpuService extends Service {
             if (!loaded) load(dir);
         }
         synchronized (this) {
-            if (graph != null && !graph.equals(visionGraph)) {
+            if (base != null && !base.equals(visionGraph)) {
                 for (OrtSession s : sessions.values()) s.close();
                 sessions.clear();
                 for (OrtSession s : cpuSessions.values()) s.close();
@@ -157,7 +161,7 @@ public final class NpuService extends Service {
                 failures.clear();
             }
             libDir = dir;
-            graph = visionGraph;
+            base = graph = visionGraph;
         }
         journal("NPU-процесс " + android.os.Process.myPid() + " готов: граф " + visionGraph.getName());
     }
@@ -236,9 +240,10 @@ public final class NpuService extends Service {
      * image against the CPU) and saved.
      */
     private synchronized OrtSession session(int patches, float[] pixels, long[] positions, int patchDim) throws Exception {
+        if (base == null) throw new IllegalStateException("NPU-процесс перезапущен без графа");
+        use(patches);
         OrtSession s = sessions.get(patches);
         if (s != null) return s;
-        if (graph == null) throw new IllegalStateException("NPU-процесс перезапущен без графа");
         if (failures.containsKey(patches)) {
             journal("сборка под " + patches + " фрагментов уже не удалась в этом процессе — та же ошибка");
             throw new Exception(failures.get(patches));
@@ -264,14 +269,38 @@ public final class NpuService extends Service {
             journal("готовой сборки под " + patches + " фрагментов нет — собираю");
         }
         if (s == null) {
+            boolean tryNative = graph.equals(base) && decomposedGraph(base).exists();
             try {
+                if (tryNative) {
+                    // noted first: a crash in QNN's compiler leaves it, and the next process takes the spelled-out norms
+                    writeText(baseNote(patches, NORMS_ATTEMPT), "1");
+                    nativeTry = true;
+                }
                 s = compile(patches, pixels, positions, patchDim);
             } catch (Exception e) {
+                if (tryNative) {
+                    // the reason without the try's own first line ("нормализация: встроенная…")
+                    String m = String.valueOf(e.getMessage()).replaceFirst("^(NPU со встроенной нормализацией считает неверно — )?нормализация: [^\n]*\n", "$1");
+                    String why = m.length() > 600 ? m.substring(0, 600) + "…" : m;
+                    writeText(baseNote(patches, NORMS), why);
+                    journal("встроенная нормализация QNN под " + patches + " фрагментов не подошла — собираю с разложенной: " + why);
+                    OrtSession ref = cpuSessions.remove(patches);
+                    if (ref != null) ref.close();
+                    nativeTry = false;
+                    baseNote(patches, NORMS_ATTEMPT).delete();
+                    return session(patches, pixels, positions, patchDim);
+                }
                 failures.put(patches, e.getMessage() != null ? e.getMessage() : e.toString());
                 stage("сборка под " + patches + " фрагментов не удалась");
                 String m = String.valueOf(e.getMessage());
                 journal("ошибка сборки: " + (m.length() > 4000 ? m.substring(0, 4000) + "…" : m));
                 throw e;
+            } finally {
+                if (tryNative) {
+                    nativeTry = false;
+                    baseNote(patches, NORMS_ATTEMPT).delete();
+                    probes.clear();
+                }
             }
         }
         sessions.put(patches, s);
@@ -310,6 +339,12 @@ public final class NpuService extends Service {
             if (p != patches) cpuSessions.remove(p).close();
         }
         StringBuilder rep = new StringBuilder();
+        if (nativeTry) {
+            rep.append("нормализация: встроенная QNN (RmsNorm, одна операция вместо 14)\n");
+        } else if (!graph.equals(base)) {
+            rep.append("нормализация: разложенная — встроенная QNN не подошла: ").append(readText(baseNote(patches, NORMS)).trim()
+                    .replace("\n", " ")).append('\n');
+        }
         Set<String> start = new LinkedHashSet<String>();
         for (String l : readText(note(patches, "cpu")).split("\n")) if (!l.trim().isEmpty()) start.add(l.trim());
         stage("сборка под " + patches + " фрагментов: типы тензоров");
@@ -355,12 +390,23 @@ public final class NpuService extends Service {
         }
         stage("сборка под " + patches + " фрагментов: эталон на процессоре (fp32)");
         float[] want = encode(cpuSession(patches), pixels, positions, patches, patchDim);
+        probes.clear();
+        if (nativeTry) {
+            for (Object[] in : stressInputs(pixels, positions, patches, patchDim)) {
+                Probe p = new Probe((String) in[0], (float[]) in[1], (long[]) in[2]);
+                stage("сборка под " + patches + " фрагментов: эталон на процессоре — " + p.name);
+                p.want = encode(cpuSession(patches), p.pixels, p.positions, patches, patchDim);
+                probes.add(p);
+            }
+        }
         // QNN's compiler runs in this process: the reference session's memory goes back first
         OrtSession ref = cpuSessions.remove(patches);
         if (ref != null) ref.close();
         if (rep.length() > 0) journal("сборка под " + patches + " фрагментов, до QNN: " + rep.toString().trim());
         boolean big = patches > BIG_PATCHES;
         List<Integer> ways = big ? bigWays(patches, rep) : java.util.Collections.singletonList(-1);
+        // QNN's own norm gets one way (the one that worked before first): it is a try, the fallback is ready
+        if (nativeTry && ways.size() > 1) ways = ways.subList(0, 1);
         for (int k = 0; k < ways.size(); k++) {
             int way = ways.get(k);
             boolean lastWay = k == ways.size() - 1;
@@ -413,6 +459,7 @@ public final class NpuService extends Service {
             }
         }
         bf16 = false;
+        if (nativeTry) throw new Exception("NPU со встроенной нормализацией считает неверно — " + rep.toString().trim());
         String where;
         if (patches > SCAN_MAX_PATCHES) {
             where = "при " + patches + " фрагментах не ищется (слишком долго) — подробный разбор даёт проверка на 70 токенах";
@@ -515,12 +562,13 @@ public final class NpuService extends Service {
     private OrtSession rounds(int patches, File source, Set<String> cpu, Set<String> borders, boolean deepFirst, float[] pixels,
                               long[] positions, int patchDim, float[] want, StringBuilder rep, int way) throws Exception {
         File ctx = context(patches);
-        for (int round = 0; round < 2; round++) {
+        for (int round = 0; round < (nativeTry ? 1 : 2); round++) {
             bf16 = round == 1;
             stage("сборка под " + patches + " фрагментов: QNN компилирует граф" + (bf16 ? " (BF16)" : "")
                     + (way >= 0 ? " — способ " + (way + 1) + ": " + wayText(BIG_WAYS[way]) : ""));
-            QnnBuild.Outcome o = QnnBuild.run(source, cpu, npu(patches, ctx), way >= 0 ? COMPILE_BUDGET_MS / 2 : COMPILE_BUDGET_MS,
-                    deepFirst);
+            // a try of QNN's own norm: no search for nodes QNN cannot build (minutes per compilation) — the fallback instead
+            QnnBuild.Outcome o = QnnBuild.run(source, cpu, npu(patches, ctx), nativeTry ? 1 : way >= 0 ? COMPILE_BUDGET_MS / 2
+                    : COMPILE_BUDGET_MS, deepFirst);
             rep.append(bf16 ? "BF16: " : "").append(o.report);
             if (o.compiled != null && !o.compiled.equals(source)) o.compiled.delete();
             if (!o.ok) {
@@ -535,6 +583,17 @@ public final class NpuService extends Service {
                 ctx.delete();
                 return null;
             }
+            if (nativeTry && o.log != null && o.log.refused.containsKey("RMSNormalization")) {
+                // refused norms run on the CPU, each between two parts of the graph on the NPU: slower than spelled out
+                Set<String> left = new LinkedHashSet<String>(o.log.refused.get("RMSNormalization"));
+                left.removeAll(cpu);
+                left.removeAll(o.cpu);
+                if (!left.isEmpty()) {
+                    String why = o.log.reasons.get("RMSNormalization");
+                    ctx.delete();
+                    throw new Exception("QNN не взял встроенную нормализацию (" + left.size() + " узлов)" + (why == null ? "" : ": " + why));
+                }
+            }
             stage("сборка под " + patches + " фрагментов: проверка NPU против процессора");
             OrtSession quiet = env.createSession(ctx.getPath(), options(graph, patches, false, true));
             long v0 = android.os.SystemClock.elapsedRealtime();
@@ -542,6 +601,13 @@ public final class NpuService extends Service {
             rep.append(String.format(java.util.Locale.ROOT, "\n  проверка на этой картинке: совпадение с процессором %.4f", c));
             journal(String.format(java.util.Locale.ROOT, "проверка NPU против процессора%s: совпадение %.4f (нужно ≥ %.2f), прогон на NPU %d мс",
                     bf16 ? " (BF16)" : "", c, MATCH, android.os.SystemClock.elapsedRealtime() - v0));
+            for (int i = 0; c >= MATCH && i < probes.size(); i++) {
+                Probe p = probes.get(i);
+                float pc = cosine(encode(quiet, p.pixels, p.positions, patches, patchDim), p.want);
+                rep.append(String.format(java.util.Locale.ROOT, "\n  проверка %s: совпадение %.4f", p.name, pc));
+                journal(String.format(java.util.Locale.ROOT, "проверка NPU против процессора, %s: совпадение %.4f (нужно ≥ %.2f)", p.name, pc, MATCH));
+                if (!(pc >= MATCH)) c = pc;
+            }
             if (c >= MATCH) {
                 writeText(note(patches, "qnn"), rep.toString());
                 StringBuilder names = new StringBuilder();
@@ -761,6 +827,99 @@ public final class NpuService extends Service {
         return out;
     }
 
+    /** The graph with the RMS norms spelled out, next to one with QNN's own norm (the fallback for it). */
+    static File decomposedGraph(File graph) {
+        return new File(graph.getParentFile(), graph.getName().replace(".onnx", "") + ".dnorm.onnx");
+    }
+
+    /** Notes of the app's graph about QNN's own norm for a patch count: why it did not work; tried now. */
+    private static final String NORMS = "norms", NORMS_ATTEMPT = "norms_attempt";
+
+    private File baseNote(int patches, String kind) {
+        return new File(base.getParentFile(), base.getName().replace(".onnx", "") + ".p" + patches + "_" + kind + ".txt");
+    }
+
+    /**
+     * The graph for this patch count: the app's (QNN's own RMS norm) unless it did not work for it — then the one
+     * with the norms spelled out. A try of QNN's norm still noted as running killed the process: noted as failed.
+     */
+    private File graphFor(int patches) {
+        File split = decomposedGraph(base);
+        if (!split.exists()) return base;
+        File attempt = baseNote(patches, NORMS_ATTEMPT), failed = baseNote(patches, NORMS);
+        if (attempt.exists()) {
+            writeText(failed, "сборка с ней уронила NPU-процесс");
+            attempt.delete();
+            journal("встроенная нормализация QNN под " + patches + " фрагментов в прошлый раз уронила NPU-процесс — дальше разложенная");
+        }
+        return failed.exists() ? split : base;
+    }
+
+    /** This call works with the graph for this patch count. */
+    private void use(int patches) {
+        if (base != null) graph = graphFor(patches);
+    }
+
+    /** QNN's own norm is being tried (one way, fp16, no search; checked on padding and a high-contrast image too). */
+    private boolean nativeTry;
+
+    /** Inputs the CPU's reference is computed for at a try of QNN's own norm, with that reference. */
+    private static final class Probe {
+        final String name;
+        final float[] pixels;
+        final long[] positions;
+        float[] want;
+
+        Probe(String name, float[] pixels, long[] positions) {
+            this.name = name;
+            this.pixels = pixels;
+            this.positions = positions;
+        }
+    }
+
+    private final List<Probe> probes = new ArrayList<Probe>();
+
+    /**
+     * Where QNN's own norm may break and the check's image may not show it: padding (patches at position -1, zero
+     * vectors — their norm was 0/0 in fp16 once; here the lower half of the image is cut off, at a whole number of
+     * pooled rows) and a high-contrast image (0/1 noise: larger activations, squares that could overflow fp16).
+     * {name, pixels, positions} each.
+     */
+    static List<Object[]> stressInputs(float[] pixels, long[] positions, int patches, int patchDim) {
+        List<Object[]> out = new ArrayList<Object[]>();
+        long rows = 0;
+        for (int i = 0; i < patches; i++) if (positions[2 * i] >= 0) rows = Math.max(rows, positions[2 * i + 1] + 1);
+        long cut = rows / 2 / 6 * 6;
+        if (cut < 1) cut = rows / 2;
+        if (cut >= 1) {
+            float[] px = pixels.clone();
+            long[] pos = positions.clone();
+            int kept = 0;
+            for (int i = 0; i < patches; i++) {
+                if (pos[2 * i] >= 0 && pos[2 * i + 1] < cut) {
+                    kept++;
+                    continue;
+                }
+                java.util.Arrays.fill(px, i * patchDim, (i + 1) * patchDim, 0f);
+                pos[2 * i] = pos[2 * i + 1] = -1;
+            }
+            if (kept > 0) out.add(new Object[]{"с пустыми фрагментами (нижняя половина обрезана)", px, pos});
+        }
+        float[] noise = new float[pixels.length];
+        long h = 0x9E3779B97F4A7C15L;
+        for (int j = 0; j < noise.length; j++) {
+            h ^= h << 13;
+            h ^= h >>> 7;
+            h ^= h << 17;
+            noise[j] = (h & 1) == 0 ? 0f : 1f;
+        }
+        for (int i = 0; i < patches; i++) {
+            if (positions[2 * i] < 0) java.util.Arrays.fill(noise, i * patchDim, (i + 1) * patchDim, 0f);
+        }
+        out.add(new Object[]{"контрастный шум", noise, positions.clone()});
+        return out;
+    }
+
     private File context(int patches) {
         return new File(graph.getParentFile(), graph.getName().replace(".onnx", "") + ".p" + patches + "_ctx.onnx");
     }
@@ -834,6 +993,12 @@ public final class NpuService extends Service {
                     f = encode(cpuSession(patches), pixels, positions, patches, patchDim);
                     fallbacks++;
                     journal("NPU дал не числа — снимок пересчитан на процессоре (всего " + fallbacks + ")");
+                    if (graph.equals(base) && decomposedGraph(base).exists() && !baseNote(patches, NORMS).exists()) {
+                        // QNN's own norm passed its checks but not this image: the next NPU process compiles the
+                        // spelled-out norms (not now — the app waits for a compiled graph only a short while)
+                        writeText(baseNote(patches, NORMS), "NPU дал не числа на снимке после проверок");
+                        journal("встроенная нормализация QNN дала не числа — со следующего запуска NPU-процесса разложенная");
+                    }
                 }
                 if (k == 0) {
                     lastPixels = pixels.clone();
@@ -897,6 +1062,7 @@ public final class NpuService extends Service {
     /** Where the NPU's result goes wrong for the last run's image (scanReport). */
     private synchronized String scan(int patches, int patchDim) throws Exception {
         if (lastPixels == null || lastPatches != patches) throw new IllegalStateException("нет прогона на NPU, не с чем сравнивать");
+        use(patches);
         Set<String> cpu = new LinkedHashSet<String>();
         for (String l : readText(note(patches, "cpu")).split("\n")) if (!l.trim().isEmpty()) cpu.add(l.trim());
         return scanReport(patches, patchDim, lastPixels, lastPositions, cpu,
@@ -976,6 +1142,7 @@ public final class NpuService extends Service {
 
     /** One profiled run (from the saved context, so no second compilation): which nodes the NPU took. */
     private synchronized String profile(int patches, int patchDim) throws Exception {
+        use(patches);
         if (!sessions.containsKey(patches) && !context(patches).exists()) throw new IllegalStateException("NPU ещё не собран под эту детализацию");
         bf16 = "bf16".equals(readText(note(patches, "precision")).trim());
         File ctx = context(patches);
