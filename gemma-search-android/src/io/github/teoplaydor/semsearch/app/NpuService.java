@@ -703,6 +703,30 @@ public final class NpuService extends Service {
         return best;
     }
 
+    /**
+     * Patch positions (x, y) of an image filling {@code patches} exactly, in a grid the pooling takes: with its
+     * kernel k (3 for Gemma 4: the largest k whose k² divides the count), tokens = patches / k² laid out as the
+     * factor pair nearest a square (280 → 20 × 14 tokens, 60 × 42 patches).
+     */
+    static long[] gridPositions(int patches) {
+        int k = 1;
+        for (int c = 4; c >= 2; c--) {
+            if (patches % (c * c) == 0) {
+                k = c;
+                break;
+            }
+        }
+        int tokens = patches / (k * k), h = 1;
+        for (int d = 1; d * d <= tokens; d++) if (tokens % d == 0) h = d;
+        int w = tokens / h * k;
+        long[] p = new long[patches * 2];
+        for (int i = 0; i < patches; i++) {
+            p[2 * i] = i % w;
+            p[2 * i + 1] = i / w;
+        }
+        return p;
+    }
+
     /** Where the NPU process writes what it is doing: after a crash the app reads it (NpuVision). */
     static File stageFile(android.content.Context c) {
         return new File(c.getCacheDir(), "npu-stage.txt");
@@ -961,17 +985,17 @@ public final class NpuService extends Service {
         OrtSession s = env.createSession(ctx.exists() ? ctx.getPath() : graph.getPath(), o);
         File json = null;
         try {
-            int side = (int) Math.ceil(Math.sqrt(patches));
-            long[] positions = new long[patches * 2];
-            for (int i = 0; i < patches; i++) {
-                positions[2 * i] = i % side;
-                positions[2 * i + 1] = i / side;
-            }
-            encode(s, new float[patches * patchDim], positions, patches, patchDim);
+            // the last real image of this size, else a full grid the pooling can take (a square-ish one was not:
+            // its pooled index ran past the 280 tokens)
+            boolean real = lastPatches == patches && lastPositions != null && lastPixels != null;
+            long[] positions = real ? lastPositions.clone() : gridPositions(patches);
+            float[] pixels = real ? lastPixels.clone() : new float[patches * patchDim];
+            journal("профиль NPU под " + patches + " фрагментов на " + (real ? "последнем снимке" : "сетке-заготовке"));
+            encode(s, pixels, positions, patches, patchDim);
             json = new File(s.endProfiling());
             String built = readText(note(patches, "qnn")).trim() + (fallbacks > 0 ? "\nснимков, пересчитанных на процессоре (NPU дал не числа): " + fallbacks : "");
             return (built.isEmpty() ? "" : built + "\n") + OrtProfile.parse(json).summary(6) + "\nNPU изнутри (профиль QNN): "
-                    + qnnProfile(ctx.exists() ? ctx : graph, patches, patchDim, positions);
+                    + qnnProfile(ctx.exists() ? ctx : graph, patches, patchDim, pixels, positions);
         } finally {
             s.close();
             if (json != null) json.delete();
@@ -984,7 +1008,7 @@ public final class NpuService extends Service {
      * QNN's own profile of two runs (a separate session: its detailed profiling slows the NPU down): where the
      * time on the NPU goes, by op (QnnLog.profile).
      */
-    private String qnnProfile(File model, int patches, int patchDim, long[] positions) {
+    private String qnnProfile(File model, int patches, int patchDim, float[] pixels, long[] positions) {
         File csv = new File(getCacheDir(), "npu-qnn-profile.csv");
         csv.delete();
         Map<String, String> extra = new HashMap<String, String>();
@@ -995,7 +1019,7 @@ public final class NpuService extends Service {
             try {
                 OrtSession s = env.createSession(model.getPath(), o);
                 try {
-                    for (int run = 0; run < 2; run++) encode(s, new float[patches * patchDim], positions, patches, patchDim);
+                    for (int run = 0; run < 2; run++) encode(s, pixels, positions, patches, patchDim);
                 } finally {
                     s.close();
                 }

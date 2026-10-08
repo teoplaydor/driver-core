@@ -312,6 +312,15 @@ public class SpeedupsTest {
             System.out.println("NPU process stage: " + stage);
             assertTrue(stage, stage.startsWith("сборка под 24 фрагментов не удалась · память процесса "));
         }
+        // the profile's stand-in image: a grid the pooling takes — Gemma 4's pooled index (x/k + (max_x+1)/k · y/k)
+        // stays below the token count (0.10.5's square-ish grid ran to 280 of 280 and the profile failed)
+        for (int[] bt : new int[][]{{630, 70}, {1260, 140}, {2520, 280}}) {
+            long[] gp = (long[]) Robo.callStatic(svc, "gridPositions", bt[0]);
+            long maxX = 0, maxIdx = 0;
+            for (int i = 0; i < bt[0]; i++) maxX = Math.max(maxX, gp[2 * i]);
+            for (int i = 0; i < bt[0]; i++) maxIdx = Math.max(maxIdx, gp[2 * i] / 3 + (maxX + 1) / 3 * (gp[2 * i + 1] / 3));
+            assertEquals(bt[0] + " patches", bt[1] - 1, maxIdx);
+        }
         new File(vit.getParentFile(), "vit.qnn.p96_precision.txt").delete();
         new File(vit.getParentFile(), "vit.qnn.p96_cpu.txt").delete();
         // A large graph (more than 1024 patches; 280 tokens are 2520) compiles in lighter ways. Way 1 is still noted
