@@ -302,9 +302,18 @@ public final class NpuService extends Service {
         stage("сборка под " + patches + " фрагментов: типы тензоров");
         Map<String, OnnxPatcher.TensorType> types = QnnBuild.tensorTypes(env, graph, dims(graph, patches));
         List<OnnxPatcher.Node> nodes = OnnxPatcher.nodes(graph, new HashMap<String, Long>());
+        // shapes known only when the graph runs (the real tokens picked after pooling, and what follows): QNN
+        // builds static shapes only
+        Set<String> dynamic = QnnBuild.dynamicShapeNodes(nodes, types);
+        dynamic.removeAll(start);
+        if (!dynamic.isEmpty()) {
+            start.addAll(dynamic);
+            rep.append("на процессоре — формы, известные только при счёте (отбор настоящих токенов и что после него): ")
+                    .append(opCounts(nodes, dynamic)).append('\n');
+        }
         // A compilation for another detail level that passed the check already knows which nodes the CPU keeps
         // (the same graph, other sizes): no scan of every tensor on the CPU, which at 280 tokens holds gigabytes
-        int donor = start.isEmpty() ? checkedSibling(patches) : 0;
+        int donor = start.size() == dynamic.size() ? checkedSibling(patches) : 0;
         if (donor > 0) {
             for (String l : readText(note(donor, "cpu")).split("\n")) if (!l.trim().isEmpty()) start.add(l.trim());
             String counts = opCounts(nodes, start);
@@ -353,7 +362,7 @@ public final class NpuService extends Service {
                 deepFirst = w[1] == 1;
                 rep.append("способ сборки ").append(way + 1).append(" из ").append(BIG_WAYS.length).append(": ").append(wayText(w))
                         .append(splits.isEmpty() ? " (внимание в графе не найдено — целиком)" : "").append('\n');
-                writeText(note(patches, "attempt"), String.valueOf(way));
+                writeText(note(patches, ATTEMPT), String.valueOf(way));
             }
             try {
                 OrtSession s = rounds(patches, source, cpu, borders, deepFirst, pixels, positions, patchDim, want, rep, way);
@@ -372,12 +381,12 @@ public final class NpuService extends Service {
                 rep.append(m.isEmpty() ? "" : "  не собралось: " + (m.length() > 300 ? m.substring(0, 300) + "…" : m)).append('\n');
             } finally {
                 if (big) {
-                    note(patches, "attempt").delete(); // the process lived through this way
+                    note(patches, ATTEMPT).delete(); // the process lived through this way
                     source.delete();
                 }
             }
             way++;
-            writeText(note(patches, "way"), String.valueOf(way));
+            writeText(note(patches, WAY), String.valueOf(way));
         }
         bf16 = false;
         String where;
@@ -406,7 +415,12 @@ public final class NpuService extends Service {
      * parts of the graph on the NPU}. A way that killed the process is not tried again; one that failed otherwise
      * gives way to the next at once.
      */
-    static final int[][] BIG_WAYS = {{4, 1, 1}, {4, 0, 1}, {4, 0, 4}, {8, 0, 8}};
+    static final int[][] BIG_WAYS = {{4, 0, 1}, {4, 0, 4}, {8, 0, 8}, {4, 1, 1}};
+    /**
+     * The notes of the ways (which one is next, which one is running) are of this order of BIG_WAYS: level 3 first
+     * had the process killed for memory at 2520 patches (3.6 GB), so it went last.
+     */
+    private static final String WAY = "way2", ATTEMPT = "attempt2", CRASHES = "crashes2";
 
     static String wayText(int[] w) {
         return "внимание по " + w[0] + " частям, " + (w[1] == 1 ? "оптимизация QNN 3" : "оптимизация QNN по умолчанию")
@@ -420,11 +434,11 @@ public final class NpuService extends Service {
     private int bigWay(int patches, StringBuilder rep) throws Exception {
         int way = 0;
         try {
-            way = Integer.parseInt(readText(note(patches, "way")).trim());
+            way = Integer.parseInt(readText(note(patches, WAY)).trim());
         } catch (NumberFormatException ignored) {
             // the first way
         }
-        String started = readText(note(patches, "attempt")).trim();
+        String started = readText(note(patches, ATTEMPT)).trim();
         if (!started.isEmpty()) {
             int w = way;
             try {
@@ -433,14 +447,14 @@ public final class NpuService extends Service {
                 // the one noted as current
             }
             if (w >= 0 && w < BIG_WAYS.length) {
-                String crashes = readText(note(patches, "crashes"));
-                writeText(note(patches, "crashes"), crashes + "способ " + (w + 1) + " (" + wayText(BIG_WAYS[w]) + ") уронил NPU-процесс\n");
+                String crashes = readText(note(patches, CRASHES));
+                writeText(note(patches, CRASHES), crashes + "способ " + (w + 1) + " (" + wayText(BIG_WAYS[w]) + ") уронил NPU-процесс\n");
             }
             way = Math.max(way, w + 1);
-            writeText(note(patches, "way"), String.valueOf(way));
-            note(patches, "attempt").delete();
+            writeText(note(patches, WAY), String.valueOf(way));
+            note(patches, ATTEMPT).delete();
         }
-        String history = readText(note(patches, "crashes")).trim();
+        String history = readText(note(patches, CRASHES)).trim();
         if (!history.isEmpty()) rep.append(history).append('\n');
         if (way >= BIG_WAYS.length) {
             throw new Exception("NPU не собирает граф под " + patches + " фрагментов: все способы сборки роняли NPU-процесс —\n" + history);

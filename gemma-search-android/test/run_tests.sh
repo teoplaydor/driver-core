@@ -95,6 +95,7 @@ javac --release 8 -XDstringConcat=inline -nowarn -encoding UTF-8 -cp "$T/cls" -d
 java -cp "$T/cls" ForQnn "$T/accel/g4.onnx" "$T/accel/g4.qnn.onnx"
 python3 test/accel/check_gemma4_block.py "$T/accel/g4.onnx" "$T/accel/g4.qnn.onnx" 2>&1 | grep -v "truncated to\|warnings.warn"
 python3 test/accel/make_op_zoo.py "$T/accel/zoo.onnx"
+python3 test/accel/make_dynamic_tail.py "$T/accel/tail.onnx"
 javac --release 8 -XDstringConcat=inline -nowarn -encoding UTF-8 -cp "$T/cls:$T/ort-desktop.jar" -d "$T/cls" test/accel/QnnBuildTest.java
 java -Dfile.encoding=UTF-8 -Dstdout.encoding=UTF-8 -cp "$T/cls:build/deps/ort-classes:$T/ort-desktop.jar" QnnBuildTest \
   "$T/accel/vit.qnn.onnx" "$T/accel/zoo.onnx" "$T/qnnbuild" "$T/accel/g4.qnn.onnx" 2>&1 | grep -v CleanUnusedInitializers

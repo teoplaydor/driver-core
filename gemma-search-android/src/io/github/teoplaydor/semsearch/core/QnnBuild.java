@@ -135,6 +135,22 @@ public final class QnnBuild {
                         continue;
                     }
                 }
+                // a part of the graph with a tensor of a shape known only when it runs: its maker and users go to the CPU
+                String dyn = dynamicTensor(f.message);
+                if (dyn != null && npu.nowMs() < deadline) {
+                    List<String> moved = new ArrayList<String>();
+                    for (OnnxPatcher.Node n : nodes) {
+                        if ((n.outputs.contains(dyn) || n.inputs.contains(dyn)) && !n.opType.equals("Constant") && out.cpu.add(n.name)) {
+                            moved.add(n.opType + " " + n.name);
+                        }
+                    }
+                    if (!moved.isEmpty()) {
+                        if (first == null) first = f;
+                        last = f;
+                        culprits.append("\n  форма ").append(dyn).append(" известна только при счёте — на процессор: ").append(moved);
+                        continue;
+                    }
+                }
                 if (first == null) first = f;
                 last = f;
                 if (!f.graphFailed() || npu.nowMs() > deadline) break;
@@ -317,6 +333,43 @@ public final class QnnBuild {
         List<String> out = new ArrayList<String>();
         for (String t : all) if (chosen.contains(t)) out.add(t);
         return out;
+    }
+
+    /**
+     * Nodes with an output whose shape is known only when the graph runs (after a NonZero: the image's real tokens
+     * selected from the pooled ones, and what follows — the last norm, the projection), with the inputs' sizes
+     * fixed. QNN builds static shapes only; most of its ops refuse such a node, but not all (Reciprocal does not
+     * check), and a part of the graph with such an input or output does not compile.
+     */
+    public static Set<String> dynamicShapeNodes(List<OnnxPatcher.Node> nodes, Map<String, OnnxPatcher.TensorType> types) {
+        Set<String> out = new LinkedHashSet<String>();
+        for (OnnxPatcher.Node n : nodes) {
+            if (n.opType.equals("Constant")) continue;
+            for (String o : n.outputs) {
+                OnnxPatcher.TensorType t = types.get(o);
+                if (t == null || t.dims == null) continue;
+                boolean dynamic = false;
+                for (long d : t.dims) dynamic |= d < 0;
+                if (dynamic) {
+                    out.add(n.name);
+                    break;
+                }
+            }
+        }
+        return out;
+    }
+
+    private static final java.util.regex.Pattern DYNAMIC =
+            java.util.regex.Pattern.compile("Dynamic shape is not supported yet, for output: (\\S+)");
+
+    /** The tensor ONNX Runtime's QNN provider names as of a dynamic shape (an input or an output of a part), or null. */
+    static String dynamicTensor(String message) {
+        java.util.regex.Matcher m = DYNAMIC.matcher(message);
+        return m.find() ? m.group(1) : null;
+    }
+
+    public static String dynamicTensorForTest(String message) {
+        return dynamicTensor(message);
     }
 
     /**

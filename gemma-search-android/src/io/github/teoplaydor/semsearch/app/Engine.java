@@ -2279,6 +2279,10 @@ public final class Engine {
                             npuMs = okMs.get(i);
                         }
                     }
+                    // one that did not work at this detail is tried at the other (it compiles for each size anew)
+                    if (npuRival == null && !isQnn(best[0]) && !prefs.getBoolean("qnn_broken", false)) {
+                        for (int[] c : plan1) if (isQnn(c[0])) npuRival = c;
+                    }
                     Measure bestOther = null, rivalOther = null, npuOther = null;
                     if (stCool != null && !weigh) pr.skip(stCool, "");
                     if (other > 0) {

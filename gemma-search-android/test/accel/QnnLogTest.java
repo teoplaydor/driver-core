@@ -141,6 +141,13 @@ public class QnnLogTest {
                 "QNN's profile: ops by type (named after the graph's nodes), slowest nodes, per run");
         check(QnnLog.profile(Arrays.asList("Msg Timestamp,Message,Time,Unit of Measurement,Timing Source,Event Level,Event Identifier"),
                 nodes, 1).equals("QNN не дал профиля по операциям"), "an empty profile says so");
+        // the DSP loader tries several folders before it finds its library: those lines are not errors to report
+        QnnLog noise = QnnLog.parse(Arrays.asList(
+                "E/io.github.teoplaydor.semsearch: npu: vendor/qcom/proprietary/adsprpc/src/fastrpc_apps_user.c:6192: Error 0xd: open_shell failed for domain 3 search paths used are /usr/lib/dsp/ (errno Permission denied)",
+                "E/io.github.teoplaydor.semsearch: npu: vendor/qcom/proprietary/adsprpc/src/apps_std_imp.c:377: Error 0x2: apps_std_fopen_fd failed for /data/user/0/x/files/qnn/lib/cdsp/./libQnnHtpV81Skel.so (No such file or directory)",
+                "E/io.github.teoplaydor.semsearch: npu: vendor/qcom/proprietary/adsprpc/src/log_config.c:223:Enabled adspmsgd with mask 8",
+                "E/adsprpc: remote_handle_open failed: 0x80000406"));
+        check(noise.system.size() == 1 && noise.system.get(0).contains("remote_handle_open"), "the DSP loader's search is not reported: " + noise.system);
         if (bad > 0) {
             System.out.println(bad + " FAILED");
             System.exit(1);

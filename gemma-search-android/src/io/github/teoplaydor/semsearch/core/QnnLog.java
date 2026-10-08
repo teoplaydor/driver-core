@@ -59,8 +59,9 @@ public final class QnnLog {
                 text = lm.group(3);
             }
             if (!tag.isEmpty() && !"onnxruntime".equals(tag)) {
-                // the DSP loader's complaints about folders it may not watch are noise
-                if (("E".equals(level) || "F".equals(level)) && !text.contains("add watcher") && q.system.size() < 6) {
+                // the DSP loader's complaints about folders it may not watch or search (it finds its library on the
+                // next path) are noise
+                if (("E".equals(level) || "F".equals(level)) && !dspLoaderNoise(text) && q.system.size() < 6) {
                     addOnce(q.system, tag + ": " + text.trim());
                 }
                 continue;
@@ -128,6 +129,11 @@ public final class QnnLog {
             }
         }
         return q;
+    }
+
+    static boolean dspLoaderNoise(String text) {
+        return text.contains("add watcher") || text.contains("open_shell failed") || text.contains("apps_std_fopen_fd failed")
+                || text.contains("Enabled adspmsgd");
     }
 
     private static void addOnce(List<String> l, String s) {
