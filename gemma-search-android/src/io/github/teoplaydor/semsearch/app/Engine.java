@@ -31,6 +31,7 @@ import io.github.teoplaydor.semsearch.core.ModelConfig;
 import io.github.teoplaydor.semsearch.core.OnnxPatcher;
 import io.github.teoplaydor.semsearch.core.OrtProfile;
 import io.github.teoplaydor.semsearch.core.PatternSource;
+import io.github.teoplaydor.semsearch.core.PhotoTags;
 import io.github.teoplaydor.semsearch.core.QnnRuntime;
 import io.github.teoplaydor.semsearch.core.QueryBridge;
 import io.github.teoplaydor.semsearch.core.SigLip;
@@ -1195,6 +1196,71 @@ public final class Engine {
 
     private void requireModel() {
         if (model == null || photo == null || state != State.READY) throw new IllegalStateException("модель ещё не загружена");
+    }
+
+    // ------------------------------------------------------------------ what a picture shows
+
+    /** The vocabulary's words embedded by the photo model (PhotoTags), and for which model and gallery size. */
+    private PhotoTags tags;
+    private Embedder tagsModel;
+    private int tagsCalibratedAt = -1;
+
+    /**
+     * Words for what a photo or video shows (assets/photo_tags.txt, PhotoTags): best first, possibly none. The first
+     * call embeds the vocabulary (some 350 short queries) and saves it; later ones only compare vectors.
+     */
+    public void describe(final IndexStore.Item item, final Callback<List<String>> cb) {
+        ml.submit(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    requireModel();
+                    if (item.emb == null || item.kind == IndexStore.KIND_NOTE) throw new IllegalStateException("у этого файла нет вектора картинки");
+                    PhotoTags t = photoTags();
+                    if (t.vecs.length > 0 && t.vecs[0].length != item.emb.length) {
+                        throw new IllegalStateException("индекс построен другой моделью — переиндексируйте галерею");
+                    }
+                    post(cb, t.rank(item.emb), null);
+                } catch (Exception e) {
+                    post(cb, null, e);
+                }
+            }
+        });
+    }
+
+    private PhotoTags photoTags() throws Exception {
+        if (tags == null || tagsModel != photo) {
+            java.io.InputStream in = ctx.getAssets().open("photo_tags.txt");
+            List<String[]> words = PhotoTags.parse(in);
+            File cache = new File(ctx.getFilesDir(), "photo_tags.bin");
+            float[] probe = photo.embedQuery(words.get(0)[0]);
+            float[][] vecs = PhotoTags.readCache(cache, words, probe);
+            if (vecs == null) {
+                long t0 = System.currentTimeMillis();
+                vecs = new float[words.size()][];
+                vecs[0] = probe;
+                for (int i = 1; i < vecs.length; i++) vecs[i] = photo.embedQuery(words.get(i)[0]);
+                PhotoTags.writeCache(cache, words, vecs);
+                android.util.Log.i("SemSearch", "photo tags: " + vecs.length + " words in " + (System.currentTimeMillis() - t0) + " ms");
+            }
+            tags = new PhotoTags(words, vecs);
+            tagsModel = photo;
+            tagsCalibratedAt = -1;
+        }
+        List<IndexStore.Item> media = store.media();
+        if (tagsCalibratedAt < 0 || Math.abs(media.size() - tagsCalibratedAt) > Math.max(20, tagsCalibratedAt / 10)) {
+            // the gallery's mean per word: up to 500 pictures spread over the index
+            List<float[]> sample = new ArrayList<float[]>();
+            int dim = tags.vecs.length > 0 ? tags.vecs[0].length : 0;
+            int step = Math.max(1, media.size() / 500);
+            for (int i = 0; i < media.size(); i += step) {
+                float[] e = media.get(i).emb;
+                if (e != null && e.length == dim) sample.add(e);
+            }
+            tags.calibrate(sample);
+            tagsCalibratedAt = media.size();
+        }
+        return tags;
     }
 
     // ------------------------------------------------------------------ notes

@@ -1256,6 +1256,24 @@ public final class MainActivity extends Activity implements Engine.Listener, Vie
         viewer = null;
     }
 
+    @Override
+    public void describe(IndexStore.Item it, Engine.Callback<List<String>> cb) {
+        if (!engine.ready()) {
+            cb.done(null, new IllegalStateException(engine.hasModelFiles() ? "модель ещё загружается" : "сначала скачайте модель"));
+            return;
+        }
+        engine.describe(it, cb);
+    }
+
+    @Override
+    public void searchFor(String q) {
+        if (viewer != null) viewer.close();
+        openSearch();
+        query.setText(q);
+        query.setSelection(q.length());
+        runSearch(true);
+    }
+
     // ------------------------------------------------------------------ gallery
 
     @Override

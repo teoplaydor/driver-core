@@ -459,6 +459,21 @@ public class UiShots {
         call(a, "openViewer", 1);
         settle(900);
         shot(a, "07-viewer");
+        // "Что на фото": the words the picture matches better than the gallery, each one a search
+        final View vw = byName(a.getWindow().getDecorView(), "Viewer");
+        View tagsButton = null;
+        List<View> stack = new ArrayList<View>(Collections.singletonList((View) field(vw, "actions")));
+        while (!stack.isEmpty()) {
+            View v = stack.remove(stack.size() - 1);
+            if (v instanceof android.widget.TextView && "Что на фото".contentEquals(((android.widget.TextView) v).getText())) tagsButton = v;
+            if (v instanceof ViewGroup) for (int i = 0; i < ((ViewGroup) v).getChildCount(); i++) stack.add(((ViewGroup) v).getChildAt(i));
+        }
+        ((View) tagsButton.getParent()).performClick();
+        waitFor("words", () -> ((ViewGroup) fieldUnchecked(vw, "tagsRow")).getChildCount() > 0
+                || !String.valueOf(((android.widget.TextView) fieldUnchecked(vw, "tagsNote")).getText()).startsWith("Подбираю"));
+        settle(500);
+        System.out.println("UiShots: what is on the photo: " + ((ViewGroup) field(vw, "tagsRow")).getChildCount() + " words");
+        shot(a, "07b-viewer-tags");
         a.onBackPressed();
         settle(700);
         q.setText("");

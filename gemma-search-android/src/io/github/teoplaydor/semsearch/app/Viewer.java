@@ -29,7 +29,8 @@ import java.util.List;
 
 /**
  * Full-screen viewer over the gallery: grows out of the tapped tile, swipes left/right through the
- * current results, closes with a swipe down; photos zoom, videos play in place, notes read as cards.
+ * current results, closes with a swipe up or down — the photo goes back into its tile; photos zoom, videos play
+ * in place, notes read as cards. "Что на фото" lists the words of a vocabulary the picture matches best.
  */
 final class Viewer extends FrameLayout {
     interface Host {
@@ -49,6 +50,12 @@ final class Viewer extends FrameLayout {
         void delete(IndexStore.Item it);
 
         void viewerClosed();
+
+        /** Words for what the picture shows (Engine.describe), best first. */
+        void describe(IndexStore.Item it, Engine.Callback<List<String>> cb);
+
+        /** Closes the viewer and searches for this text. */
+        void searchFor(String query);
     }
 
     private final Host host;
@@ -56,7 +63,10 @@ final class Viewer extends FrameLayout {
     private int index;
     private final View scrim;
     private final Pager pager;
-    private final LinearLayout top, bottom;
+    private final LinearLayout top, bottom, actions, tagsBox, tagsRow;
+    private final TextView tagsNote;
+    /** "Что на фото" is open: it follows the photo when swiping to the next one. */
+    private boolean tagsShown;
     private final TextView title, subtitle;
     private final Page[] pages = new Page[3];
     private boolean chrome = true, closing;
@@ -67,6 +77,8 @@ final class Viewer extends FrameLayout {
         this.items = items;
         this.index = index;
         setClickable(true);
+        // above the raised search bar, results chip and status (elevation 3–4 dp draws over later siblings without it)
+        setTranslationZ(Ui.dp(c, 16));
         scrim = new View(c);
         scrim.setBackgroundColor(0xFF07090C);
         addView(scrim, new LayoutParams(-1, -1));
@@ -104,10 +116,33 @@ final class Viewer extends FrameLayout {
         addView(top, new LayoutParams(-1, -2, Gravity.TOP));
 
         bottom = new LinearLayout(c);
-        bottom.setOrientation(LinearLayout.HORIZONTAL);
-        bottom.setGravity(Gravity.CENTER);
+        bottom.setOrientation(LinearLayout.VERTICAL);
         bottom.setPadding(Ui.dp(c, 12), Ui.dp(c, 30), Ui.dp(c, 12), Ui.dp(c, 18));
-        bottom.setBackground(new GradientDrawable(GradientDrawable.Orientation.BOTTOM_TOP, new int[]{0xCC07090C, 0x0007090C}));
+        bottom.setBackground(new GradientDrawable(GradientDrawable.Orientation.BOTTOM_TOP, new int[]{0xE607090C, 0x0007090C}));
+        // what the picture shows: a line of words, each one a search
+        tagsBox = new LinearLayout(c);
+        tagsBox.setOrientation(LinearLayout.VERTICAL);
+        tagsBox.setPadding(Ui.dp(c, 4), 0, Ui.dp(c, 4), Ui.dp(c, 14));
+        tagsBox.setVisibility(GONE);
+        TextView tagsTitle = Ui.text(c, "Что на фото", 12, Ui.TEXT2, Ui.MEDIUM);
+        tagsBox.addView(tagsTitle);
+        android.widget.HorizontalScrollView scroll = new android.widget.HorizontalScrollView(c);
+        scroll.setHorizontalScrollBarEnabled(false);
+        scroll.setPadding(0, Ui.dp(c, 8), 0, 0);
+        scroll.setClipToPadding(false);
+        tagsRow = new LinearLayout(c);
+        tagsRow.setOrientation(LinearLayout.HORIZONTAL);
+        scroll.addView(tagsRow);
+        tagsBox.addView(scroll, new LinearLayout.LayoutParams(-1, -2));
+        tagsNote = Ui.text(c, "", 12, Ui.TEXT3, Ui.REGULAR);
+        tagsNote.setPadding(0, Ui.dp(c, 8), 0, 0);
+        tagsNote.setVisibility(GONE);
+        tagsBox.addView(tagsNote);
+        bottom.addView(tagsBox, new LinearLayout.LayoutParams(-1, -2));
+        actions = new LinearLayout(c);
+        actions.setOrientation(LinearLayout.HORIZONTAL);
+        actions.setGravity(Gravity.CENTER);
+        bottom.addView(actions, new LinearLayout.LayoutParams(-1, -2));
         addView(bottom, new LayoutParams(-1, -2, Gravity.BOTTOM));
     }
 
@@ -142,6 +177,15 @@ final class Viewer extends FrameLayout {
 
     /** Animates the photo between its grid tile (cropped square) and its full-screen fit. */
     private void morph(final PhotoView v, Rect tileOnScreen, final RectF fit, final boolean opening, final Runnable done) {
+        morph(v, tileOnScreen, fit, opening, 1f, 0f, 0f, 1f, done);
+    }
+
+    /**
+     * The same from (or to) another state of the photo than its fit: {@code scale}, {@code tx}, {@code ty} (pivot at its
+     * top left) and the scrim's alpha — where a swipe up or down left it.
+     */
+    private void morph(final PhotoView v, Rect tileOnScreen, final RectF fit, final boolean opening, final float fromScale,
+                       final float fromTx, final float fromTy, final float fromScrim, final Runnable done) {
         int[] loc = new int[2];
         getLocationOnScreen(loc);
         final RectF tile = new RectF(tileOnScreen.left - loc[0], tileOnScreen.top - loc[1],
@@ -161,15 +205,15 @@ final class Viewer extends FrameLayout {
             @Override
             public void onAnimationUpdate(ValueAnimator an) {
                 float t = (Float) an.getAnimatedValue();
-                float s = s0 + (1 - s0) * t;
+                float s = s0 + (fromScale - s0) * t;
                 v.setScaleX(s);
                 v.setScaleY(s);
-                v.setTranslationX(tx0 * (1 - t));
-                v.setTranslationY(ty0 * (1 - t));
+                v.setTranslationX(tx0 + (fromTx - tx0) * t);
+                v.setTranslationY(ty0 + (fromTy - ty0) * t);
                 clip.set(Math.round(clip0.left + (clip1.left - clip0.left) * t), Math.round(clip0.top + (clip1.top - clip0.top) * t),
                         Math.round(clip0.right + (clip1.right - clip0.right) * t), Math.round(clip0.bottom + (clip1.bottom - clip0.bottom) * t));
                 v.setClipBounds(clip);
-                scrim.setAlpha(t);
+                scrim.setAlpha(fromScrim * t);
             }
         });
         a.addListener(new AnimatorListenerAdapter() {
@@ -201,13 +245,21 @@ final class Viewer extends FrameLayout {
         };
         top.animate().alpha(0f).setDuration(150).start();
         bottom.animate().alpha(0f).setDuration(150).start();
-        Rect tile = p.item.kind == IndexStore.KIND_NOTE || p.getTranslationY() != 0 ? null : host.tileRect(p.item);
+        Rect tile = p.item.kind == IndexStore.KIND_NOTE ? null : host.tileRect(p.item);
         if (tile != null && p.photo.bitmap() != null && !p.photo.zoomed()) {
-            morph(p.photo, tile, p.photo.fitRect(), false, remove);
+            // swiped up or down: from where the swipe left it (the page's offset and scale, moved onto the photo)
+            float ps = p.getScaleX();
+            float fx = p.getPivotX() * (1 - ps) + p.getTranslationX(), fy = p.getPivotY() * (1 - ps) + p.getTranslationY();
+            p.animate().cancel();
+            p.setScaleX(1f);
+            p.setScaleY(1f);
+            p.setTranslationY(0);
+            morph(p.photo, tile, p.photo.fitRect(), false, ps, fx, fy, scrim.getAlpha(), remove);
             return;
         }
         scrim.animate().alpha(0f).setDuration(220).start();
-        p.animate().alpha(0f).scaleX(0.9f).scaleY(0.9f).translationY(p.getTranslationY() + Ui.dp(getContext(), 40))
+        float away = (p.getTranslationY() < 0 ? -1 : 1) * Ui.dp(getContext(), 40);
+        p.animate().alpha(0f).scaleX(0.9f).scaleY(0.9f).translationY(p.getTranslationY() + away)
                 .setDuration(220).setInterpolator(Ui.EASE).withEndAction(remove).start();
     }
 
@@ -240,7 +292,12 @@ final class Viewer extends FrameLayout {
         Context c = getContext();
         title.setText(DateFormat.getDateInstance(DateFormat.LONG).format(new Date(it.date)));
         subtitle.setText(it.kind == IndexStore.KIND_NOTE ? "Заметка" : it.title != null ? it.title : "");
-        bottom.removeAllViews();
+        actions.removeAllViews();
+        if (it.kind == IndexStore.KIND_NOTE) {
+            tagsBox.setVisibility(GONE);
+        } else if (tagsShown) {
+            loadTags(it);
+        }
         action(Icon.SIMILAR, "Похожие", new Runnable() {
             @Override
             public void run() {
@@ -261,6 +318,14 @@ final class Viewer extends FrameLayout {
                 }
             });
         } else {
+            action(Icon.TAG, it.kind == IndexStore.KIND_VIDEO ? "Что на видео" : "Что на фото", new Runnable() {
+                @Override
+                public void run() {
+                    tagsShown = !tagsShown;
+                    if (tagsShown) loadTags(it);
+                    else tagsBox.setVisibility(GONE);
+                }
+            });
             action(Icon.OPEN, "Открыть в…", new Runnable() {
                 @Override
                 public void run() {
@@ -268,6 +333,51 @@ final class Viewer extends FrameLayout {
                 }
             });
         }
+    }
+
+    /** The words for this item into the panel (a later swipe's item wins over an earlier one's answer). */
+    private void loadTags(final IndexStore.Item it) {
+        Context c = getContext();
+        ((TextView) tagsBox.getChildAt(0)).setText(it.kind == IndexStore.KIND_VIDEO ? "Что на видео" : "Что на фото");
+        tagsBox.setVisibility(VISIBLE);
+        tagsRow.removeAllViews();
+        tagsNote.setText("Подбираю слова… (в первый раз — до полуминуты: словарь переводится в векторы)");
+        tagsNote.setVisibility(VISIBLE);
+        host.describe(it, new Engine.Callback<List<String>>() {
+            @Override
+            public void done(List<String> words, Exception e) {
+                if (items.get(index) != it || !tagsShown) return;
+                tagsRow.removeAllViews();
+                if (e != null) {
+                    tagsNote.setText("Не получилось: " + e.getMessage());
+                    return;
+                }
+                if (words.isEmpty()) {
+                    tagsNote.setText("Ничего определённого — модель не выделяет здесь ни одного слова из словаря");
+                    return;
+                }
+                tagsNote.setText("Слова, которые модель видит в этом кадре сильнее, чем в остальной галерее; нажмите — найдутся похожие");
+                for (final String w : words) tagsRow.addView(chip(w));
+            }
+        });
+    }
+
+    private View chip(final String word) {
+        Context c = getContext();
+        TextView t = Ui.text(c, word, 13.5f, Ui.TEXT, Ui.MEDIUM);
+        t.setBackground(Ui.round(c, 0xCC222932, 16));
+        t.setPadding(Ui.dp(c, 14), Ui.dp(c, 8), Ui.dp(c, 14), Ui.dp(c, 8));
+        t.setOnClickListener(new OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                host.searchFor(word);
+            }
+        });
+        Ui.pressable(t);
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-2, -2);
+        lp.rightMargin = Ui.dp(c, 8);
+        t.setLayoutParams(lp);
+        return t;
     }
 
     private void action(int icon, String label, final Runnable r) {
@@ -288,7 +398,7 @@ final class Viewer extends FrameLayout {
             }
         });
         Ui.pressable(b);
-        bottom.addView(b, new LinearLayout.LayoutParams(0, -2, 1));
+        actions.addView(b, new LinearLayout.LayoutParams(0, -2, 1));
     }
 
     /** Moves one page left (+1) or right (-1) after the swipe animation. */
@@ -454,7 +564,7 @@ final class Viewer extends FrameLayout {
     final class Pager extends FrameLayout {
         private final int slop;
         private float downX, downY, dx, dy;
-        private int mode; // 0 undecided, 1 horizontal, 2 dismiss
+        private int mode; // 0 undecided, 1 horizontal, 2 dismiss (up or down)
         private VelocityTracker vt;
 
         Pager(Context c) {
@@ -488,7 +598,9 @@ final class Viewer extends FrameLayout {
                         downX = e.getX();
                         return true;
                     }
-                    if (my > slop && my > Math.abs(mx) && pages[1].video == null) {
+                    if (Math.abs(my) > slop && Math.abs(my) > Math.abs(mx) && pages[1].video == null
+                            && (pages[1].noteView == null || !pages[1].noteView.canScrollVertically(my < 0 ? 1 : -1))) {
+                        // a note scrolls first; at its end the swipe closes as for a photo
                         mode = 2;
                         downY = e.getY();
                         return true;
@@ -510,8 +622,8 @@ final class Viewer extends FrameLayout {
                         boolean edge = (dx > 0 && index == 0) || (dx < 0 && index == items.size() - 1);
                         layoutPages(edge ? dx * 0.3f : dx);
                     } else if (mode == 2) {
-                        dy = Math.max(0, e.getY() - downY);
-                        float f = Math.min(1f, dy / h);
+                        dy = e.getY() - downY;
+                        float f = Math.min(1f, Math.abs(dy) / h);
                         Page p = pages[1];
                         p.setTranslationY(dy);
                         p.setScaleX(1 - 0.18f * f);
@@ -531,7 +643,8 @@ final class Viewer extends FrameLayout {
                     }
                     if (mode == 1) settle(dx, vx, w);
                     else if (mode == 2) {
-                        if (dy > h / 6 || vy > 1500) {
+                        // either way: up or down, far enough or fast enough, the photo goes back into its tile
+                        if (Math.abs(dy) > h / 6 || Math.abs(vy) > 1500) {
                             close();
                         } else {
                             Page p = pages[1];

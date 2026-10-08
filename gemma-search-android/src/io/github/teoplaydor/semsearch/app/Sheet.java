@@ -77,6 +77,8 @@ final class Sheet extends FrameLayout {
 
     /** Adds the sheet to the screen and slides it in. */
     Sheet show(ViewGroup root) {
+        // above the viewer too (a note is deleted from it through a sheet)
+        setTranslationZ(Ui.dp(getContext(), 24));
         root.addView(this, new ViewGroup.LayoutParams(-1, -1));
         scrim.setAlpha(0f);
         scrim.animate().alpha(1f).setDuration(220).start();

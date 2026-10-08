@@ -1,0 +1,358 @@
+# Words for "Что на фото": the English word (what the model is asked, as a search query) and how it is shown.
+# One per line: english<TAB>русский. The picture gets the words it matches better than the rest of the gallery.
+# люди
+person	человек
+people	люди
+group of people	группа людей
+crowd	толпа
+man	мужчина
+woman	женщина
+child	ребёнок
+children	дети
+baby	младенец
+teenager	подросток
+elderly person	пожилой человек
+family	семья
+couple	пара
+friends	друзья
+selfie	селфи
+portrait	портрет
+face	лицо
+smile	улыбка
+hands	руки
+group photo	групповое фото
+# животные
+dog	собака
+puppy	щенок
+cat	кошка
+kitten	котёнок
+bird	птица
+pigeon	голубь
+duck	утка
+chicken	курица
+horse	лошадь
+cow	корова
+sheep	овца
+goat	коза
+pig	свинья
+rabbit	кролик
+hamster	хомяк
+fish	рыба
+aquarium	аквариум
+insect	насекомое
+butterfly	бабочка
+bee	пчела
+spider	паук
+squirrel	белка
+fox	лиса
+bear	медведь
+deer	олень
+monkey	обезьяна
+elephant	слон
+giraffe	жираф
+lion	лев
+tiger	тигр
+snake	змея
+turtle	черепаха
+frog	лягушка
+dolphin	дельфин
+zoo	зоопарк
+# еда и напитки
+food	еда
+meal	блюдо
+breakfast	завтрак
+lunch	обед
+dinner	ужин
+pizza	пицца
+burger	бургер
+sushi	суши
+pasta	паста
+salad	салат
+soup	суп
+meat	мясо
+steak	стейк
+barbecue	шашлык
+fish dish	рыбное блюдо
+bread	хлеб
+cake	торт
+dessert	десерт
+ice cream	мороженое
+chocolate	шоколад
+cookies	печенье
+pancakes	блины
+fruit	фрукты
+apple	яблоко
+banana	банан
+strawberry	клубника
+watermelon	арбуз
+vegetables	овощи
+mushrooms	грибы
+berries	ягоды
+coffee	кофе
+tea	чай
+wine	вино
+beer	пиво
+cocktail	коктейль
+juice	сок
+water bottle	бутылка воды
+cooking	готовка
+restaurant	ресторан
+cafe	кафе
+# природа
+nature	природа
+landscape	пейзаж
+sky	небо
+clouds	облака
+sun	солнце
+sunset	закат
+sunrise	рассвет
+night sky	ночное небо
+stars	звёзды
+moon	луна
+rainbow	радуга
+storm	гроза
+rain	дождь
+fog	туман
+snow	снег
+winter	зима
+autumn	осень
+spring	весна
+summer	лето
+sea	море
+ocean	океан
+beach	пляж
+sand	песок
+waves	волны
+lake	озеро
+river	река
+waterfall	водопад
+pond	пруд
+mountains	горы
+hills	холмы
+rocks	скалы
+cave	пещера
+forest	лес
+trees	деревья
+tree	дерево
+palm trees	пальмы
+grass	трава
+field	поле
+meadow	луг
+flowers	цветы
+rose	роза
+tulips	тюльпаны
+garden	сад
+plants	растения
+houseplant	комнатное растение
+leaves	листья
+desert	пустыня
+island	остров
+ice	лёд
+# город и места
+city	город
+street	улица
+road	дорога
+highway	шоссе
+bridge	мост
+building	здание
+skyscraper	небоскрёб
+house	дом
+apartment building	многоэтажка
+village	деревня
+church	церковь
+temple	храм
+castle	замок
+monument	памятник
+square	площадь
+park	парк
+playground	детская площадка
+night city	ночной город
+city lights	огни города
+architecture	архитектура
+old town	старый город
+market	рынок
+shop	магазин
+supermarket	супермаркет
+shopping mall	торговый центр
+museum	музей
+theater	театр
+stadium	стадион
+airport	аэропорт
+train station	вокзал
+metro	метро
+parking	парковка
+construction site	стройка
+factory	завод
+office	офис
+school	школа
+university	университет
+classroom	класс
+library	библиотека
+hospital	больница
+hotel	гостиница
+graffiti	граффити
+# дома
+room	комната
+interior	интерьер
+living room	гостиная
+bedroom	спальня
+kitchen	кухня
+bathroom	ванная
+bed	кровать
+sofa	диван
+table	стол
+chair	стул
+window	окно
+door	дверь
+balcony	балкон
+stairs	лестница
+lamp	лампа
+christmas tree	ёлка
+fireplace	камин
+# транспорт
+car	машина
+cars	машины
+car interior	салон машины
+truck	грузовик
+bus	автобус
+tram	трамвай
+train	поезд
+airplane	самолёт
+airplane window	вид из иллюминатора
+boat	лодка
+ship	корабль
+yacht	яхта
+bicycle	велосипед
+motorcycle	мотоцикл
+scooter	самокат
+traffic	пробка
+# вещи
+phone	телефон
+computer	компьютер
+laptop	ноутбук
+keyboard	клавиатура
+monitor	монитор
+television	телевизор
+headphones	наушники
+camera	фотоаппарат
+watch	часы
+glasses	очки
+book	книга
+books	книги
+notebook	тетрадь
+pen	ручка
+bag	сумка
+backpack	рюкзак
+clothes	одежда
+dress	платье
+shoes	обувь
+sneakers	кроссовки
+jacket	куртка
+hat	шапка
+jewelry	украшения
+toys	игрушки
+teddy bear	плюшевый мишка
+gift	подарок
+balloons	шарики
+candles	свечи
+money	деньги
+credit card	банковская карта
+keys	ключи
+tools	инструменты
+furniture	мебель
+cosmetics	косметика
+medicine	лекарства
+guitar	гитара
+piano	пианино
+musical instrument	музыкальный инструмент
+painting	картина
+drawing	рисунок
+sculpture	скульптура
+flag	флаг
+# события и занятия
+party	вечеринка
+birthday	день рождения
+wedding	свадьба
+celebration	праздник
+new year	новый год
+christmas	рождество
+fireworks	фейерверк
+concert	концерт
+festival	фестиваль
+dance	танец
+sport	спорт
+football	футбол
+basketball	баскетбол
+tennis	теннис
+running	бег
+gym	спортзал
+swimming	плавание
+swimming pool	бассейн
+skiing	лыжи
+cycling	велопрогулка
+hiking	поход
+camping	кемпинг
+fishing	рыбалка
+travel	путешествие
+vacation	отпуск
+picnic	пикник
+walk	прогулка
+work	работа
+meeting	встреча
+study	учёба
+game	игра
+video game	видеоигра
+# документы и экран
+screenshot	скриншот
+text	текст
+document	документ
+paper document	бумажный документ
+receipt	чек
+ticket	билет
+boarding pass	посадочный талон
+passport	паспорт
+form	анкета
+contract	договор
+invoice	счёт
+handwriting	рукописный текст
+notes	заметки
+whiteboard	доска
+chat	переписка
+message	сообщение
+email	письмо
+web page	веб-страница
+app	приложение
+settings screen	настройки
+map	карта
+navigation	маршрут
+spreadsheet	таблица
+chart	график
+diagram	схема
+code	код
+presentation slide	слайд
+calendar	календарь
+schedule	расписание
+price list	прайс
+menu	меню
+recipe	рецепт
+qr code	QR-код
+barcode	штрихкод
+meme	мем
+comic	комикс
+poster	афиша
+sign	вывеска
+logo	логотип
+book page	страница книги
+newspaper	газета
+photo of a screen	экран, снятый на камеру
+# свет и вид
+night	ночь
+dark photo	тёмное фото
+bright light	яркий свет
+black and white photo	чёрно-белое фото
+close-up	крупный план
+aerial view	вид сверху
+panorama	панорама
+reflection	отражение
+silhouette	силуэт
+underwater	под водой
