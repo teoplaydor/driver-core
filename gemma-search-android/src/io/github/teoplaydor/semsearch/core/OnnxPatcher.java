@@ -462,7 +462,7 @@ public final class OnnxPatcher {
                         attrInt("axis", 0));
                 emit("Cast", new String[]{t + "/head"}, new String[]{t + "/headf"}, t + "/headf", attrInt("to", FLOAT));
                 emit("Sqrt", new String[]{t + "/headf"}, new String[]{t + "/sqrt"}, t + "/sqrt");
-                emit("Reciprocal", new String[]{t + "/sqrt"}, new String[]{t + "/scale"}, t + "/scale");
+                emit("Div", new String[]{constFloat("qnn_one", 1f), t + "/sqrt"}, new String[]{t + "/scale"}, t + "/scale");
                 scale = t + "/scale";
             }
             String scores = t + "/qk";
@@ -560,8 +560,10 @@ public final class OnnxPatcher {
             reduce("ReduceMax", t + "/abs", t + "/amax", axis);
             // a zero vector (padding) is divided by this and stays zero
             emit("Max", new String[]{t + "/amax", constFloat("qnn_scale_floor", 1e-4f)}, new String[]{t + "/s"}, t + "/s");
-            // one reciprocal per vector, then a multiplication: a division of every element was a sixth of the NPU's time
-            emit("Reciprocal", new String[]{t + "/s"}, new String[]{t + "/inv_s"}, t + "/inv_s");
+            // one reciprocal per vector, then a multiplication: a division of every element was a sixth of the NPU's time.
+            // As 1 / s, not Reciprocal: ONNX Runtime's QNN provider checks neither the type nor the shape of a
+            // Reciprocal and took one kept on the CPU (in double, of a size known only when the graph runs)
+            emit("Div", new String[]{constFloat("qnn_one", 1f), t + "/s"}, new String[]{t + "/inv_s"}, t + "/inv_s");
             emit("Mul", new String[]{x, t + "/inv_s"}, new String[]{t + "/y"}, t + "/y");
             emit("Mul", new String[]{t + "/y", t + "/y"}, new String[]{t + "/sq"}, t + "/sq");
             reduce("ReduceMean", t + "/sq", t + "/ms", axis);
@@ -572,7 +574,7 @@ public final class OnnxPatcher {
             emit("Mul", new String[]{t + "/r", t + "/r"}, new String[]{t + "/r2"}, t + "/r2");
             emit("Add", new String[]{t + "/ms", t + "/r2"}, new String[]{t + "/den"}, t + "/den");
             emit("Sqrt", new String[]{t + "/den"}, new String[]{t + "/rms"}, t + "/rms");
-            emit("Reciprocal", new String[]{t + "/rms"}, new String[]{t + "/inv_rms"}, t + "/inv_rms");
+            emit("Div", new String[]{constFloat("qnn_one", 1f), t + "/rms"}, new String[]{t + "/inv_rms"}, t + "/inv_rms");
             String normed = w.isEmpty() ? n.outputs.get(0) : t + "/normed";
             emit("Mul", new String[]{t + "/y", t + "/inv_rms"}, new String[]{normed}, normed);
             if (!w.isEmpty()) emit("Mul", new String[]{normed, w}, new String[]{n.outputs.get(0)}, t + "/out");

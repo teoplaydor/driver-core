@@ -317,7 +317,8 @@ public class SpeedupsTest {
         // A large graph (more than 1024 patches; 280 tokens are 2520) compiles in lighter ways. Way 1 is still noted
         // as started — the process died in it: it goes into the report as a crash and the next ways are tried in
         // turn (here each fails at once: no QNN in this ONNX Runtime).
-        writeText(new File(vit.getParentFile(), "vit.qnn.p1100_attempt3.txt"), "0");
+        writeText(new File(vit.getParentFile(), "vit.qnn.p1100_attempt4.txt"), "0");
+        new File(a.getCacheDir(), "journal.txt").delete();
         final Object[] bigRun = new Object[1];
         Thread bt = new Thread(() -> {
             io.github.teoplaydor.semsearch.core.VisionRunner v = null;
@@ -346,10 +347,19 @@ public class SpeedupsTest {
                 && big.contains("способ сборки 2 из 4: внимание по 4 частям, оптимизация QNN по умолчанию, граф на NPU в 4 частях (внимание в графе не найдено — целиком)")
                 && big.contains("способ сборки 4 из 4: внимание по 4 частям, оптимизация QNN 3")
                 && !big.contains("способ сборки 1 из 4") && big.contains("QNN execution provider is not supported"));
-        assertFalse(new File(vit.getParentFile(), "vit.qnn.p1100_attempt3.txt").exists());
+        assertFalse(new File(vit.getParentFile(), "vit.qnn.p1100_attempt4.txt").exists());
         assertFalse(new File(vit.getParentFile(), "vit.qnn.att4.onnx").exists());
-        // only the crash moved the start on: the ways that failed otherwise are tried again next time
-        assertEquals("1", new String(java.nio.file.Files.readAllBytes(new File(vit.getParentFile(), "vit.qnn.p1100_way3.txt").toPath()), "UTF-8"));
+        // only the way that killed the process is ruled out; the ways that failed otherwise are tried again next time
+        assertEquals("0", new String(java.nio.file.Files.readAllBytes(new File(vit.getParentFile(), "vit.qnn.p1100_crashed4.txt").toPath()), "UTF-8").trim());
+        assertFalse(new File(vit.getParentFile(), "vit.qnn.p1100_way4.txt").exists());
+        // the journal, by time, survives the process: each way, each QNN compilation and its error, the stages with memory
+        String journal = new String(java.nio.file.Files.readAllBytes(new File(a.getCacheDir(), "journal.txt").toPath()), "UTF-8");
+        System.out.println("journal:\n" + journal);
+        assertTrue(journal, journal.contains(" npu  способ 1 (внимание по 4 частям, оптимизация QNN по умолчанию) в прошлый раз уронил NPU-процесс")
+                && journal.contains("способы сборки под 1100 фрагментов по порядку: [1, 2, 3]")
+                && journal.contains("способ 2 из 4: внимание по 4 частям, оптимизация QNN по умолчанию, граф на NPU в 4 частях")
+                && journal.contains("способ 4 не собрался") && journal.contains("ошибка сборки: ")
+                && journal.contains("сборка под 1100 фрагментов: эталон на процессоре (fp32) · память процесса "));
         e.deleteQnn();
         Robo.waitFor("qnn deleted", () -> !new File(a.getFilesDir(), "qnn").exists());
         assertFalse(e.qnnInstalled());

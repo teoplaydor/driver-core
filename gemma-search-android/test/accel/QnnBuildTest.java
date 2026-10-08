@@ -373,12 +373,15 @@ public class QnnBuildTest {
             if (nd.opType.equals("Gather") && nd.inputs.get(1).equals("rot_perm")) constGathers++;
             if (nd.opType.equals("Slice") && nd.name.startsWith("qnng")) slices++;
             if (nd.opType.equals("Div") && nd.name.contains("layernorm")) divs++;
-            if (nd.opType.equals("Reciprocal")) recips++;
+            if (nd.opType.equals("Div") && nd.inputs.get(0).equals("qnn_one")) recips++;
             if (nd.opType.equals("Mul") && nd.name.contains("/scores")) scoreMuls++;
+            // ONNX Runtime's QNN provider checks neither the type nor the shape of a Reciprocal: one kept on the CPU
+            // (in double, of a dynamic size) went to the NPU in 0.10.4
+            if (nd.opType.equals("Reciprocal")) scoreMuls += 1000;
         }
         check(maxDiff(g4orig, g4ref) / g4max < 1e-5 && constGathers == 0 && slices == 4 && recips > 0 && scoreMuls == 0,
                 "rewritten block = export: relative difference " + maxDiff(g4orig, g4ref) / g4max + "; constant Gathers left " + constGathers
-                        + ", Slices " + slices + ", Reciprocal " + recips + ", score scaling by 1: " + scoreMuls);
+                        + ", Slices " + slices + ", 1 / x " + recips + ", score scaling by 1: " + scoreMuls);
         check(maxDiff(g4ref, g4moved) / g4max < 1e-5, "same output with the position logic on the CPU: relative difference "
                 + maxDiff(g4ref, g4moved) / g4max);
         // what the NPU would get: no node outside the CPU part takes a boolean or a position-made integer
@@ -439,9 +442,12 @@ public class QnnBuildTest {
         for (OnnxPatcher.Node nd : tn) {
             if (!dynamic.contains(nd.name)) continue;
             dynOps.add(nd.opType);
-            reciprocal |= nd.opType.equals("Reciprocal");
+            reciprocal |= nd.opType.equals("Div") && nd.inputs.get(0).equals("qnn_one");
             before |= nd.name.startsWith("/tail/embed") || nd.name.startsWith("/tail/reshape") || nd.name.startsWith("/tail/shape");
         }
+        int tailRecips = 0;
+        for (OnnxPatcher.Node nd : tn) if (nd.opType.equals("Reciprocal")) tailRecips++;
+        check(tailRecips == 0, "no Reciprocal in the rewritten tail (QNN's provider takes it unchecked): " + tailRecips);
         check(reciprocal && !before && dynamic.size() >= 14 && dynOps.contains("MatMul") && dynOps.contains("Gather") && dynOps.contains("NonZero"),
                 "sizes known only when it runs: " + dynamic.size() + " nodes " + dynOps + ", none before the selection");
         // the trap of 0.10.3: on the raw graph shape inference leaves the computed Reshape's shape unknown (in the real

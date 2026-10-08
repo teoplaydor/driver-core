@@ -49,10 +49,26 @@ public final class StageProgress {
         s.expectMs = Math.max(1, expectMs);
     }
 
+    /** Hears stages start, move to a next part and end (for a journal). */
+    public interface Listener {
+        void event(Stage s, String what);
+    }
+
+    private Listener listener;
+
+    public synchronized void setListener(Listener l) {
+        listener = l;
+    }
+
+    private void tell(Stage s, String what) {
+        if (listener != null) listener.event(s, what);
+    }
+
     public synchronized void start(Stage s, long now) {
         s.state = RUNNING;
         s.startMs = s.partStartMs = now;
         s.detail = "";
+        tell(s, "▸ " + s.name);
     }
 
     /** The stage is made of {@code total} parts (thread counts, batch sizes, rounds). */
@@ -66,6 +82,7 @@ public final class StageProgress {
         s.partsDone = Math.max(0, done);
         s.partStartMs = now;
         if (detail != null) s.detail = detail;
+        tell(s, "  " + s.name + ", часть " + (done + 1) + (s.parts > 0 ? " из " + s.parts : "") + (detail != null ? ": " + detail : ""));
     }
 
     public synchronized void detail(Stage s, String detail) {
@@ -85,6 +102,7 @@ public final class StageProgress {
         s.state = SKIPPED;
         s.result = why == null ? "" : why;
         s.detail = "";
+        tell(s, "– " + s.name + ": пропущено" + (s.result.isEmpty() ? "" : " — " + s.result));
     }
 
     private void end(Stage s, int state, String result, long now) {
@@ -92,6 +110,7 @@ public final class StageProgress {
         s.result = result == null ? "" : result;
         s.detail = "";
         s.endMs = now;
+        tell(s, (state == DONE ? "✓ " : "✕ ") + s.name + (s.result.isEmpty() ? "" : ": " + s.result) + " — за " + clock(now - s.startMs));
     }
 
     /** The job is over: stages that did not run are skipped. */

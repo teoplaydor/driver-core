@@ -1581,10 +1581,11 @@ public final class Engine {
      * The vision graph rewritten for QNN; the "r" number changes with the rewrite (r2: unique node names; r3:
      * RMS norm and constants safe in fp16; r4: sentinels used as data — the mask carried in the keys — become
      * ±10⁴, bounds ±65504; r5: Gathers with constant indices as Slices, divisions by a per-vector value as
-     * multiplications by its reciprocal, no scaling of scores by 1).
+     * multiplications by its reciprocal, no scaling of scores by 1; r6: the reciprocal as Div(1, x), not Reciprocal,
+     * which QNN's provider took although kept on the CPU).
      */
     private static File qnnGraph(File fp32) {
-        return new File(fp32.getParentFile(), fp32.getName().replace(".onnx", ".qnn.r5.onnx"));
+        return new File(fp32.getParentFile(), fp32.getName().replace(".onnx", ".qnn.r6.onnx"));
     }
 
     /** Where the NPU's result differs from the CPU's (NpuService.scan), for the last image it ran. */
@@ -1718,6 +1719,7 @@ public final class Engine {
     /** What the measurement of the current stage does now. */
     private void benchDoing(String what) {
         benchDoing = what;
+        Journal.add(ctx, "app", "  " + what);
         StageProgress pr = bench;
         StageProgress.Stage s = benchStage;
         if (pr != null && s != null) pr.detail(s, what);
@@ -1749,9 +1751,18 @@ public final class Engine {
         }, 1, 1, java.util.concurrent.TimeUnit.SECONDS);
     }
 
+    /** The check's journal (both processes, by time) at the end of its report. */
+    private void appendJournal(StringBuilder rep) {
+        String j = Journal.tail(ctx, 120000).trim();
+        if (!j.isEmpty()) rep.append("\n\nЖурнал подбора (по времени; app — приложение, npu — NPU-процесс):\n").append(j);
+    }
+
     private void finishBench() {
         StageProgress pr = bench;
-        if (pr != null) pr.finish(now());
+        if (pr != null) {
+            pr.finish(now());
+            Journal.add(ctx, "app", "подбор закончен за " + StageProgress.clock(pr.elapsedMs(now())));
+        }
         benchStage = null;
         stopTicker();
         notifyChanged();
@@ -1825,6 +1836,7 @@ public final class Engine {
                 return r;
             }
             crashes.append("\n    ").append(attempt + 1).append(") ").append(r.error.replace("\n", "\n       "));
+            Journal.add(ctx, "app", "NPU-процесс упал — запускаю новый (перезапуск " + (attempt + 1) + " из " + MAX_NPU_RESTARTS + "): " + r.error);
             status = "NPU-процесс упал при сборке — новый процесс соберёт другим способом (попытка " + (attempt + 2) + ")…";
             benchDoing("NPU-процесс упал при сборке — перезапуск " + (attempt + 1) + " из " + MAX_NPU_RESTARTS + ", следующий способ");
         }
@@ -1852,6 +1864,9 @@ public final class Engine {
                 long t0 = System.currentTimeMillis();
                 float[][] e = m.embedImages(imgs, budget);
                 double per = (System.currentTimeMillis() - t0) / (double) batch;
+                long[] tmj = m.lastTimingsMs();
+                Journal.add(ctx, "app", String.format(java.util.Locale.ROOT, "  замер %d: %.0f мс на фото (картинка %d мс, текст %d мс на пачку из %d)",
+                        run + 1, per, tmj[0], tmj[1], batch));
                 if (per < r.perPhotoMs) {
                     r.perPhotoMs = per;
                     long[] tm = m.lastTimingsMs();
@@ -1867,6 +1882,10 @@ public final class Engine {
             }
         } catch (Throwable e) {
             r.error = e.getMessage() != null ? e.getMessage() : e.toString();
+            java.io.StringWriter sw = new java.io.StringWriter();
+            e.printStackTrace(new java.io.PrintWriter(sw));
+            String trace = sw.toString();
+            Journal.add(ctx, "app", "  ошибка: " + (trace.length() > 3000 ? trace.substring(0, 3000) + "…" : trace));
         } finally {
             if (m != null) m.close();
         }
@@ -2095,6 +2114,17 @@ public final class Engine {
                     boolean qnnPlanned = false;
                     for (int[] c : plan1) qnnPlanned |= isQnn(c[0]);
                     StageProgress.Stage stNpu = qnnPlanned ? pr.add("NPU изнутри: что он взял и профиль QNN", 25000) : null;
+                    Journal.clear(ctx);
+                    StringBuilder planned = new StringBuilder();
+                    for (int[] c : plan1) planned.append(planned.length() > 0 ? ", " : "").append(ACCEL_NAMES[c[0]]);
+                    Journal.add(ctx, "app", "подбор: SemSearch " + BuildInfo.version(ctx) + ", " + device() + "; " + conditions(ctx)
+                            + "; детализация " + budget + " токенов, ядер " + cores + ", потоков " + auto + "; варианты: " + planned);
+                    pr.setListener(new StageProgress.Listener() {
+                        @Override
+                        public void event(StageProgress.Stage s, String what) {
+                            Journal.add(ctx, "app", what);
+                        }
+                    });
                     bench = pr;
                     startTicker();
                     notifyChanged();
@@ -2486,13 +2516,16 @@ public final class Engine {
                         rep.append(String.format(java.util.Locale.ROOT, "\n\nNPU не проверен: ему нужна полная версия визуального "
                                 + "энкодера (≈%d МБ) — кнопка «Проверить NPU» в настройках.", gemmaFp32EstimateBytes() >> 20));
                     }
-                    prefs.edit().putString("g_report", rep.toString()).apply();
                     finishBench();
+                    appendJournal(rep);
+                    prefs.edit().putString("g_report", rep.toString()).apply();
                     post(cb, rep.toString(), null);
                 } catch (Throwable e) {
                     rep.append("\nОшибка: ").append(e.getMessage() != null ? e.getMessage() : e.toString());
-                    prefs.edit().putString("g_report", rep.toString()).apply();
+                    Journal.add(ctx, "app", "подбор прерван: " + e);
                     finishBench();
+                    appendJournal(rep);
+                    prefs.edit().putString("g_report", rep.toString()).apply();
                     post(cb, rep.toString(), null);
                 }
                 mark("");
@@ -3206,6 +3239,7 @@ public final class Engine {
                 npuRestart = true;
                 npuRestarts++;
                 android.util.Log.e("SemSearch", "index: NPU process gone, restart " + npuRestarts, t);
+                Journal.add(ctx, "app", "индексация: NPU-процесс упал при сборке — перезапуск " + npuRestarts + ": " + msg);
             }
             requeue.add(e);
             return;
@@ -3215,6 +3249,7 @@ public final class Engine {
             return;
         }
         if (npuProcessGone(t)) {
+            Journal.add(ctx, "app", "индексация остановлена: " + msg);
             stopError = msg;
             reloadAfterIndex = true;
             prefs.edit().putString("qnn_crash", msg.length() > 300 ? msg.substring(0, 300) + "…" : msg).apply();

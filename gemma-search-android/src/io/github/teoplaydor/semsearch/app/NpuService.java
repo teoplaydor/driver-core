@@ -82,6 +82,8 @@ public final class NpuService extends Service {
      * same nodes.
      */
     private static final int SCAN_MAX_PATCHES = 1024;
+    /** Runs per patch count in this service object (the first few go to the journal with their time). */
+    private final Map<Integer, Integer> runs = new HashMap<Integer, Integer>();
     /** Patch counts whose compilation failed in this service object: the same error again at once, not another try. */
     private final Map<Integer, String> failures = new HashMap<Integer, String>();
 
@@ -157,6 +159,7 @@ public final class NpuService extends Service {
             libDir = dir;
             graph = visionGraph;
         }
+        journal("NPU-процесс " + android.os.Process.myPid() + " готов: граф " + visionGraph.getName());
     }
 
     /**
@@ -236,7 +239,10 @@ public final class NpuService extends Service {
         OrtSession s = sessions.get(patches);
         if (s != null) return s;
         if (graph == null) throw new IllegalStateException("NPU-процесс перезапущен без графа");
-        if (failures.containsKey(patches)) throw new Exception(failures.get(patches));
+        if (failures.containsKey(patches)) {
+            journal("сборка под " + patches + " фрагментов уже не удалась в этом процессе — та же ошибка");
+            throw new Exception(failures.get(patches));
+        }
         // next to the graph, so whatever stays on the CPU still finds its weights in the external data file
         File ctx = context(patches);
         if (ctx.exists() && ctx.lastModified() < graph.lastModified()) ctx.delete(); // made from an older graph
@@ -245,12 +251,17 @@ public final class NpuService extends Service {
         if (ctx.exists() && !note(patches, "precision").exists()) ctx.delete();
         if (ctx.exists()) {
             bf16 = "bf16".equals(readText(note(patches, "precision")).trim());
-            stage("загрузка готовой сборки под " + patches + " фрагментов");
+            stage("загрузка готовой сборки под " + patches + " фрагментов (" + (ctx.length() >> 20) + " МБ, " + (bf16 ? "BF16" : "fp16") + ")");
+            long t0 = android.os.SystemClock.elapsedRealtime();
             try {
                 s = env.createSession(ctx.getPath(), options(graph, patches, false, true));
+                journal("готовая сборка загружена за " + (android.os.SystemClock.elapsedRealtime() - t0) + " мс");
             } catch (Exception stale) {
+                journal("готовая сборка не загрузилась (" + stale.getMessage() + ") — собираю заново");
                 ctx.delete();
             }
+        } else {
+            journal("готовой сборки под " + patches + " фрагментов нет — собираю");
         }
         if (s == null) {
             try {
@@ -258,6 +269,8 @@ public final class NpuService extends Service {
             } catch (Exception e) {
                 failures.put(patches, e.getMessage() != null ? e.getMessage() : e.toString());
                 stage("сборка под " + patches + " фрагментов не удалась");
+                String m = String.valueOf(e.getMessage());
+                journal("ошибка сборки: " + (m.length() > 4000 ? m.substring(0, 4000) + "…" : m));
                 throw e;
             }
         }
@@ -345,15 +358,18 @@ public final class NpuService extends Service {
         // QNN's compiler runs in this process: the reference session's memory goes back first
         OrtSession ref = cpuSessions.remove(patches);
         if (ref != null) ref.close();
+        if (rep.length() > 0) journal("сборка под " + patches + " фрагментов, до QNN: " + rep.toString().trim());
         boolean big = patches > BIG_PATCHES;
-        int way = big ? bigWay(patches, rep) : -1;
-        while (true) {
+        List<Integer> ways = big ? bigWays(patches, rep) : java.util.Collections.singletonList(-1);
+        for (int k = 0; k < ways.size(); k++) {
+            int way = ways.get(k);
+            boolean lastWay = k == ways.size() - 1;
             File source = graph;
             boolean deepFirst = true;
             Set<String> cpu = new LinkedHashSet<String>(start), borders = new LinkedHashSet<String>();
             if (big) {
                 // a graph this large: attention in parts, maybe QNN's default optimisation and the graph in parts on
-                // the NPU (a Split kept on the CPU between them); noted before, so that a crash moves on to the next way
+                // the NPU (a Split kept on the CPU between them); noted before, so that a crash rules this way out
                 int[] w = BIG_WAYS[way];
                 source = new File(graph.getParentFile(), graph.getName().replace(".onnx", "") + ".att" + w[0] + ".onnx");
                 List<String> splits = OnnxPatcher.chunkAttention(graph, source, w[0]);
@@ -362,21 +378,28 @@ public final class NpuService extends Service {
                 deepFirst = w[1] == 1;
                 rep.append("способ сборки ").append(way + 1).append(" из ").append(BIG_WAYS.length).append(": ").append(wayText(w))
                         .append(splits.isEmpty() ? " (внимание в графе не найдено — целиком)" : "").append('\n');
+                journal("способ " + (way + 1) + " из " + BIG_WAYS.length + ": " + wayText(w) + "; частей внимания " + splits.size()
+                        + ", границ частей графа " + borders.size() + ", узлов на процессоре " + cpu.size());
                 writeText(note(patches, ATTEMPT), String.valueOf(way));
             }
             try {
                 OrtSession s = rounds(patches, source, cpu, borders, deepFirst, pixels, positions, patchDim, want, rep, way);
                 if (s != null) {
-                    if (big) writeText(note(patches, WAY), String.valueOf(way)); // the next compilation of this size starts here
+                    if (big) {
+                        writeText(note(patches, WAY), String.valueOf(way)); // the next compilation of this size starts with it
+                        journal("способ " + (way + 1) + " сработал");
+                    }
                     return s;
                 }
                 start = cpu;
                 start.removeAll(borders);
-                if (!big || way + 1 >= BIG_WAYS.length) break;
+                if (big) journal("способ " + (way + 1) + ": NPU считает неверно");
+                if (lastWay) break;
             } catch (Exception e) {
                 // QNN's own failure is in the report already; anything else is added (what was done so far stays there)
                 String m = e instanceof Reported ? "" : e.getMessage() != null ? e.getMessage() : e.toString();
-                if (!big || way + 1 >= BIG_WAYS.length) {
+                if (big) journal("способ " + (way + 1) + " не собрался" + (m.isEmpty() ? "" : ": " + m));
+                if (lastWay) {
                     String text = rep + m;
                     writeText(note(patches, "qnn"), text);
                     throw new Exception(text, e);
@@ -388,7 +411,6 @@ public final class NpuService extends Service {
                     source.delete();
                 }
             }
-            way++;
         }
         bf16 = false;
         String where;
@@ -419,12 +441,12 @@ public final class NpuService extends Service {
      */
     static final int[][] BIG_WAYS = {{4, 0, 1}, {4, 0, 4}, {8, 0, 8}, {4, 1, 1}};
     /**
-     * The notes of the ways (which one to start with, which one is running) are of this order of BIG_WAYS: level 3
-     * first had the process killed for memory at 2520 patches (3.6 GB), so it went last. The way to start with
-     * moves on only past a way that killed the process, and to the one that worked: a way that failed otherwise
-     * (in 0.10.3 every way failed for one bug of the app) is tried again next time.
+     * The notes of the ways (the one that worked, the one running, those that killed the process) are of this order
+     * of BIG_WAYS: level 3 first had the process killed for memory at 2520 patches (3.6 GB), so it went last. Only a
+     * way that killed the process is left out later; one that failed otherwise (in 0.10.3 every way failed for one
+     * bug of the app) is tried again.
      */
-    private static final String WAY = "way3", ATTEMPT = "attempt3", CRASHES = "crashes3";
+    private static final String WAY = "way4", ATTEMPT = "attempt4", CRASHED = "crashed4";
 
     static String wayText(int[] w) {
         return "внимание по " + w[0] + " частям, " + (w[1] == 1 ? "оптимизация QNN 3" : "оптимизация QNN по умолчанию")
@@ -432,38 +454,50 @@ public final class NpuService extends Service {
     }
 
     /**
-     * The way to compile this patch count now: a way still noted as started (attempt) killed the process — it goes
-     * into the crash list and the next way follows; the list goes into the report.
+     * The ways to try for this patch count, in order: the one that worked before first, then the others but those
+     * that killed the process. A way still noted as started (attempt) killed it: it is added to those, with Android's
+     * words about the death left in the journal. Ways that failed otherwise are tried again (their failure may be the
+     * app's, fixed since).
      */
-    private int bigWay(int patches, StringBuilder rep) throws Exception {
-        int way = 0;
-        try {
-            way = Integer.parseInt(readText(note(patches, WAY)).trim());
-        } catch (NumberFormatException ignored) {
-            // the first way
-        }
+    private List<Integer> bigWays(int patches, StringBuilder rep) throws Exception {
         String started = readText(note(patches, ATTEMPT)).trim();
         if (!started.isEmpty()) {
-            int w = way;
             try {
-                w = Integer.parseInt(started);
+                int w = Integer.parseInt(started);
+                if (w >= 0 && w < BIG_WAYS.length) {
+                    writeText(note(patches, CRASHED), readText(note(patches, CRASHED)) + w + "\n");
+                    journal("способ " + (w + 1) + " (" + wayText(BIG_WAYS[w]) + ") в прошлый раз уронил NPU-процесс — больше не пробую");
+                }
             } catch (NumberFormatException ignored) {
-                // the one noted as current
+                // nothing to add
             }
-            if (w >= 0 && w < BIG_WAYS.length) {
-                String crashes = readText(note(patches, CRASHES));
-                writeText(note(patches, CRASHES), crashes + "способ " + (w + 1) + " (" + wayText(BIG_WAYS[w]) + ") уронил NPU-процесс\n");
-            }
-            way = Math.max(way, w + 1);
-            writeText(note(patches, WAY), String.valueOf(way));
             note(patches, ATTEMPT).delete();
         }
-        String history = readText(note(patches, CRASHES)).trim();
-        if (!history.isEmpty()) rep.append(history).append('\n');
-        if (way >= BIG_WAYS.length) {
-            throw new Exception("NPU не собирает граф под " + patches + " фрагментов: все способы сборки роняли NPU-процесс —\n" + history);
+        Set<Integer> crashed = new LinkedHashSet<Integer>();
+        for (String l : readText(note(patches, CRASHED)).split("\n")) {
+            try {
+                crashed.add(Integer.parseInt(l.trim()));
+            } catch (NumberFormatException ignored) {
+                // a blank line
+            }
         }
-        return way;
+        StringBuilder history = new StringBuilder();
+        for (int w : crashed) if (w >= 0 && w < BIG_WAYS.length) history.append("способ ").append(w + 1).append(" (").append(wayText(BIG_WAYS[w])).append(") уронил NPU-процесс\n");
+        if (history.length() > 0) rep.append(history);
+        List<Integer> order = new ArrayList<Integer>();
+        try {
+            int worked = Integer.parseInt(readText(note(patches, WAY)).trim());
+            if (worked >= 0 && worked < BIG_WAYS.length && !crashed.contains(worked)) order.add(worked);
+        } catch (NumberFormatException ignored) {
+            // none worked yet
+        }
+        for (int w = 0; w < BIG_WAYS.length; w++) if (!crashed.contains(w) && !order.contains(w)) order.add(w);
+        if (order.isEmpty()) {
+            throw new Exception("NPU не собирает граф под " + patches + " фрагментов: все способы сборки роняли NPU-процесс —\n" + history.toString().trim());
+        }
+        journal("способы сборки под " + patches + " фрагментов по порядку: " + order + " (из " + BIG_WAYS.length + ")"
+                + (crashed.isEmpty() ? "" : ", уронившие процесс пропускаю: " + crashed));
+        return order;
     }
 
     /** QNN could not compile: why is in the report already. */
@@ -503,8 +537,11 @@ public final class NpuService extends Service {
             }
             stage("сборка под " + patches + " фрагментов: проверка NPU против процессора");
             OrtSession quiet = env.createSession(ctx.getPath(), options(graph, patches, false, true));
+            long v0 = android.os.SystemClock.elapsedRealtime();
             float c = cosine(encode(quiet, pixels, positions, patches, patchDim), want);
             rep.append(String.format(java.util.Locale.ROOT, "\n  проверка на этой картинке: совпадение с процессором %.4f", c));
+            journal(String.format(java.util.Locale.ROOT, "проверка NPU против процессора%s: совпадение %.4f (нужно ≥ %.2f), прогон на NPU %d мс",
+                    bf16 ? " (BF16)" : "", c, MATCH, android.os.SystemClock.elapsedRealtime() - v0));
             if (c >= MATCH) {
                 writeText(note(patches, "qnn"), rep.toString());
                 StringBuilder names = new StringBuilder();
@@ -538,14 +575,21 @@ public final class NpuService extends Service {
                     so.addConfigEntry("session.disable_prepacking", "1");
                 }
                 LogTail tail = save ? LogTail.start() : null;
+                long t0 = android.os.SystemClock.elapsedRealtime();
+                journal("QNN собирает " + g.getName() + (save ? "" : " (проба поиска)") + ", оптимизация " + (deep ? "3" : "по умолчанию"));
                 try {
                     env.createSession(g.getPath(), so).close();
                     last = tail != null ? QnnLog.parse(tail.finish()) : null;
+                    journal("QNN: собрано за " + (android.os.SystemClock.elapsedRealtime() - t0) / 1000 + " с"
+                            + (last != null ? "; " + last.summary(4).replace("\n", "\n  ") : ""));
                     return null;
                 } catch (Exception e) {
                     QnnLog log = QnnLog.parse(tail != null ? tail.finish() : Collections.<String>emptyList());
                     if (save) ctx.delete(); // written before the session failed
-                    return new QnnBuild.Failure(e.getMessage() != null ? e.getMessage() : e.toString(), log);
+                    String m = e.getMessage() != null ? e.getMessage() : e.toString();
+                    journal("QNN: не собрано за " + (android.os.SystemClock.elapsedRealtime() - t0) / 1000 + " с — "
+                            + (m.length() > 600 ? m.substring(0, 600) + "…" : m) + (save ? "\n  " + log.summary(8).replace("\n", "\n  ") : ""));
+                    return new QnnBuild.Failure(m, log);
                 } finally {
                     so.close();
                 }
@@ -664,10 +708,18 @@ public final class NpuService extends Service {
         return new File(c.getCacheDir(), "npu-stage.txt");
     }
 
-    /** What the process is doing now, with its memory (resident, and the peak so far). */
+    /** What the process is doing now, with its memory (resident, and the peak so far); it goes to the journal too. */
     private void stage(String what) {
         long[] mem = memoryMb();
-        writeText(stageFile(this), what + (mem[0] > 0 ? " · память процесса " + mem[0] + " МБ, пик " + mem[1] + " МБ" : ""));
+        String m = mem[0] > 0 ? " · память процесса " + mem[0] + " МБ, пик " + mem[1] + " МБ" : "";
+        writeText(stageFile(this), what + m);
+        Journal.add(this, "npu", what + m);
+    }
+
+    /** A line in the check's journal (Journal), with this process's memory. */
+    private void journal(String what) {
+        long[] mem = memoryMb();
+        Journal.add(this, "npu", what + (mem[0] > 0 ? " · " + mem[0] + " МБ (пик " + mem[1] + ")" : ""));
     }
 
     /** {resident, peak resident} of this process in MB, from /proc/self/status (0 when unreadable). */
@@ -748,11 +800,16 @@ public final class NpuService extends Service {
                 m.slice().order(ByteOrder.nativeOrder()).asFloatBuffer().get(pixels);
                 m.position(4 * pixelCount + 8 * k * patches * 2);
                 m.slice().order(ByteOrder.nativeOrder()).asLongBuffer().get(positions);
+                long r0 = android.os.SystemClock.elapsedRealtime();
                 float[] f = encode(s, pixels, positions, patches, patchDim);
+                int n = runs.containsKey(patches) ? runs.get(patches) : 0;
+                runs.put(patches, n + 1);
+                if (n < 5) journal("прогон на NPU, " + patches + " фрагментов: " + (android.os.SystemClock.elapsedRealtime() - r0) + " мс");
                 if (!finite(f)) {
                     // the NPU went out of fp16's range on this image: the CPU computes it
                     f = encode(cpuSession(patches), pixels, positions, patches, patchDim);
                     fallbacks++;
+                    journal("NPU дал не числа — снимок пересчитан на процессоре (всего " + fallbacks + ")");
                 }
                 if (k == 0) {
                     lastPixels = pixels.clone();

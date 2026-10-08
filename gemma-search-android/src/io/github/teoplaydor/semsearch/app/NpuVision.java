@@ -127,6 +127,7 @@ final class NpuVision implements VisionRunner {
             if (pid > 0) android.os.Process.killProcess(pid);
             dead = true;
             death = "NPU-процесс не ответил за " + timeoutSec + " с и остановлен" + (stage.isEmpty() ? "" : "; " + stage);
+            Journal.add(ctx, "app", death);
             throw new Crashed(death);
         } catch (java.util.concurrent.ExecutionException e) {
             Throwable c = e.getCause();
@@ -161,6 +162,7 @@ final class NpuVision implements VisionRunner {
         if (!why.isEmpty()) sb.append(": ").append(why);
         String stage = stage();
         if (!stage.isEmpty()) sb.append("; в это время: ").append(stage);
+        Journal.add(ctx, "app", sb.toString());
         return sb.toString();
     }
 
