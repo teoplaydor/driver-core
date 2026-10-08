@@ -69,4 +69,14 @@ sub("ai/onnxruntime/OnnxRuntime.java",
       }
       return;
     }""")
+# On Android ONNX Runtime loads only its JNI library and lets the system resolve libonnxruntime.so — from the
+# APK. With another build in a directory that would pair its JNI with the APK's core library (symbol versions
+# differ: VERS_1.29.0 vs VERS_1.30.0), so the core library is loaded from the directory first.
+sub("ai/onnxruntime/OnnxRuntime.java",
+    """      if (!isAndroid()) {
+        load(ONNXRUNTIME_LIBRARY_NAME);
+      }""",
+    """      if (!isAndroid() || System.getProperty("onnxruntime.native.dir") != null) {
+        load(ONNXRUNTIME_LIBRARY_NAME);
+      }""")
 print("patched", root)

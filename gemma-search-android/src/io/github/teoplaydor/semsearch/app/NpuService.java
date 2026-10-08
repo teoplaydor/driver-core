@@ -114,6 +114,9 @@ public final class NpuService extends Service {
                     if (f.getName().startsWith("libQnnHtpV") && f.getName().endsWith("Stub.so")) System.load(f.getAbsolutePath());
                 }
             }
+            // ONNX Runtime's core library first, from here: the JNI library's dependency then resolves to it (an
+            // already-loaded soname) instead of the app's own build in the APK, whose symbol versions differ
+            System.load(new File(dir, "libonnxruntime.so").getAbsolutePath());
             System.setProperty("onnxruntime.native.dir", dir);
             env = OrtEnvironment.getEnvironment();
             loaded = true;
