@@ -64,8 +64,20 @@ public final class Engine {
     private final Handler main = new Handler(Looper.getMainLooper());
     private final ExecutorService ml = Executors.newSingleThreadExecutor();
     private final ExecutorService net = Executors.newSingleThreadExecutor();
-    /** Decodes the next photo while the current one is being embedded. */
-    private final ExecutorService decoder = Executors.newSingleThreadExecutor();
+    /**
+     * Decodes the next photo while the current one is being embedded. Replaced when a decode hangs (a file that never
+     * opens: its thread stays stuck, the next files go to a new one).
+     */
+    private volatile ExecutorService decoder = Executors.newSingleThreadExecutor();
+    /** How long a photo's decoding or a video's frames may take before the file counts as unreadable. */
+    static volatile int openTimeoutS = 60;
+    /** Test hook: files of these names hang when opened (a photo's decoding, a video's frames) until interrupted. */
+    public static volatile java.util.Set<String> hangForTest;
+
+    private static void hangIfTest(Media.Entry e) throws InterruptedException {
+        java.util.Set<String> h = hangForTest;
+        if (h != null && e.name != null && h.contains(e.name)) Thread.sleep(Long.MAX_VALUE);
+    }
     /**
      * The indexing pipeline's text stage: the text model (CPU) of one batch runs here while the vision encoder (the
      * NPU, the GPU) takes the next batch on {@link #ml}.
@@ -3121,6 +3133,7 @@ public final class Engine {
         return decoder.submit(new Callable<Bitmap>() {
             @Override
             public Bitmap call() throws Exception {
+                hangIfTest(e);
                 return Media.decodeForIndex(ctx.getContentResolver(), e.uri, e.orientation, target);
             }
         });
@@ -3195,6 +3208,8 @@ public final class Engine {
         requeue.clear();
         qnnSeen.clear();
         pipelinedRun = false;
+        videoHangs = 0;
+        videoSkipNote = null;
         sumWaitMs = sumVisionMs = sumTextMs = 0;
         timedPhotos = 0;
         idxTotal = 0;
@@ -3255,6 +3270,26 @@ public final class Engine {
     private final Runnable indexStep = new Runnable() {
         @Override
         public void run() {
+            try {
+                step();
+            } catch (Throwable t) {
+                // an executor swallows what escapes a task: the next step would never come and the run would stand
+                // still, "Индексирую", with nothing working
+                android.util.Log.e("SemSearch", "index step", t);
+                Journal.add(ctx, "app", "индексация: ошибка шага — " + t);
+                try {
+                    collectText();
+                } catch (Throwable ignored) {
+                    // the run ends anyway
+                }
+                for (Future<Bitmap> f : prefetched.values()) f.cancel(false);
+                prefetched.clear();
+                finishIndex("Индексация остановлена из-за ошибки: " + (t.getMessage() != null ? t.getMessage() : t.toString())
+                        + "\nВ индекс добавлено " + (idxDone - idxErrors) + " из " + idxTotal);
+            }
+        }
+
+        private void step() {
             List<Media.Entry> batch = new ArrayList<Media.Entry>();
             boolean last;
             synchronized (queue) {
@@ -3265,7 +3300,8 @@ public final class Engine {
                 if (cancelIndex || stopError != null || queue.isEmpty() || model == null) {
                     for (Future<Bitmap> f : prefetched.values()) f.cancel(false);
                     prefetched.clear();
-                    String err = timingSplit() + (idxFirstError != null ? "\nПервая ошибка: " + idxFirstError : "");
+                    String err = timingSplit() + (idxFirstError != null ? "\nПервая ошибка: " + idxFirstError : "")
+                            + (videoSkipNote != null ? "\n" + videoSkipNote : "");
                     if (stopError != null) {
                         finishIndex("Индексация остановлена: " + stopError + "\nВ индекс добавлено " + (idxDone - idxErrors) + " из "
                                 + idxTotal + (idxErrors > 0 ? ", пропущено " + idxErrors : "")
@@ -3298,8 +3334,8 @@ public final class Engine {
             long spent = System.currentTimeMillis() - idxStarted;
             double per = spent / 1000.0 / Math.max(1, idxProcessed);
             int left = idxTotal - idxDone;
-            idxStatus = String.format(java.util.Locale.ROOT, "%d из %d · %.2f с на файл · осталось ~%s",
-                    idxDone, idxTotal, per, eta((long) (per * left))) + timingSplit();
+            idxStatus = String.format(java.util.Locale.ROOT, "%d из %d%s · %.2f с на файл · осталось ~%s",
+                    idxDone, idxTotal, idxErrors > 0 ? " (пропущено " + idxErrors + ")" : "", per, eta((long) (per * left))) + timingSplit();
             if (npuRestart) {
                 // the NPU process died compiling a large graph: its photos again, with a new process (the next way)
                 npuRestart = false;
@@ -3317,7 +3353,7 @@ public final class Engine {
                 if (state != State.READY || photo == null) stopError = "после падения NPU-процесса модель не загрузилась: " + status;
             }
             notifyChanged();
-            ml.submit(this);
+            ml.submit(indexStep);
         }
     };
 
@@ -3344,8 +3380,22 @@ public final class Engine {
         List<Bitmap> bitmaps = new ArrayList<Bitmap>();
         for (int i = 0; i < batch.size(); i++) {
             try {
-                bitmaps.add(futures.get(i).get());
+                // a file that never opens (seen: indexing stood still with no load) must not hold the run forever
+                bitmaps.add(futures.get(i).get(openTimeoutS, java.util.concurrent.TimeUnit.SECONDS));
                 ok.add(batch.get(i));
+            } catch (java.util.concurrent.TimeoutException te) {
+                futures.get(i).cancel(true);
+                fail(batch.get(i), new IllegalStateException("файл не открылся за " + openTimeoutS + " с (недоступен или ещё в облаке?)"));
+                // the decoding thread hangs in that file: the files queued after it go to a new one
+                Journal.add(ctx, "app", "индексация: " + batch.get(i).name + " не открылся за " + openTimeoutS + " с — декодер заменён");
+                decoder.shutdownNow();
+                decoder = Executors.newSingleThreadExecutor();
+                for (Future<Bitmap> f : prefetched.values()) f.cancel(true);
+                prefetched.clear();
+                for (int j = i + 1; j < batch.size(); j++) {
+                    futures.get(j).cancel(true);
+                    futures.set(j, decodeAsync(batch.get(j)));
+                }
             } catch (Throwable t) {
                 fail(batch.get(i), t instanceof ExecutionException && t.getCause() != null ? t.getCause() : t);
             }
@@ -3548,9 +3598,11 @@ public final class Engine {
         }
     }
 
-    private void indexVideo(Media.Entry e) {
+    private void indexVideo(final Media.Entry e) {
+        idxStatus = idxDone + " из " + idxTotal + " · видео " + (e.name != null ? e.name : "") + ": кадры…" + videoCompileNote();
+        notifyChanged();
         try {
-            List<Bitmap> frames = Media.videoFrames(ctx, e.uri, VIDEO_FRAMES, 640);
+            List<Bitmap> frames = videoFrames(e);
             try {
                 List<io.github.teoplaydor.semsearch.core.ImagePreprocessor.Source> src =
                         new ArrayList<io.github.teoplaydor.semsearch.core.ImagePreprocessor.Source>();
@@ -3558,13 +3610,79 @@ public final class Engine {
                 float[] emb = photo.embedVideo(src, 0);
                 store.add(e.kind, e.id, e.uri.toString(), e.name, null, e.date, emb);
                 idxDone++;
+                videoHangs = 0;
             } finally {
                 for (Bitmap f : frames) f.recycle();
             }
         } catch (Throwable t) {
             if (npuProcessGone(t)) modelFail(e, t);
             else fail(e, t); // a video that cannot be read is the file's fault
+            if (t instanceof OpenTimeout && ++videoHangs >= VIDEO_HANGS_STOP) {
+                // video after video does not open (a minute each): the others wait for another run, unmarked
+                int left = 0;
+                synchronized (queue) {
+                    for (java.util.Iterator<Media.Entry> it = queue.iterator(); it.hasNext(); ) {
+                        if (it.next().kind == IndexStore.KIND_VIDEO) {
+                            it.remove();
+                            left++;
+                        }
+                    }
+                }
+                idxTotal -= left;
+                videoSkipNote = VIDEO_HANGS_STOP + " видео подряд не открылись — остальные " + left + " в этот раз пропущены";
+                Journal.add(ctx, "app", "индексация: " + videoSkipNote);
+            }
         }
+    }
+
+    /** Why the rest of the videos were left for another run (for the end of the run's status). */
+    private String videoSkipNote;
+
+    /**
+     * A video's frames, on a thread of their own: MediaMetadataRetriever can hang on a file (indexing stood still on
+     * the first video with no load), and then the video counts as unreadable and its thread is left behind.
+     */
+    private List<Bitmap> videoFrames(final Media.Entry e) throws Exception {
+        java.util.concurrent.FutureTask<List<Bitmap>> task = new java.util.concurrent.FutureTask<List<Bitmap>>(
+                new Callable<List<Bitmap>>() {
+                    @Override
+                    public List<Bitmap> call() throws Exception {
+                        hangIfTest(e);
+                        return Media.videoFrames(ctx, e.uri, VIDEO_FRAMES, 640);
+                    }
+                });
+        Thread t = new Thread(task, "video-frames");
+        t.setDaemon(true);
+        t.start();
+        try {
+            return task.get(openTimeoutS, java.util.concurrent.TimeUnit.SECONDS);
+        } catch (java.util.concurrent.TimeoutException te) {
+            task.cancel(true);
+            Journal.add(ctx, "app", "индексация: кадры видео " + e.name + " не получены за " + openTimeoutS + " с");
+            throw new OpenTimeout("кадры видео не получены за " + openTimeoutS + " с (файл недоступен или ещё в облаке?)");
+        } catch (ExecutionException ee) {
+            throw ee.getCause() instanceof Exception ? (Exception) ee.getCause() : ee;
+        }
+    }
+
+    /** A file did not open in the time allowed. */
+    static final class OpenTimeout extends IllegalStateException {
+        OpenTimeout(String m) {
+            super(m);
+        }
+    }
+
+    /** Videos in a row whose frames did not come; at VIDEO_HANGS_STOP the run leaves the rest of the videos alone. */
+    private int videoHangs;
+    static final int VIDEO_HANGS_STOP = 3;
+
+    /** On the NPU, the first video of a run may need a compilation for its frames' size (minutes): said so. */
+    private String videoCompileNote() {
+        if (!isQnn(loadedAccel) || !(photo instanceof EmbeddingGemma2) || qnnGraphFile == null) return "";
+        ModelConfig cfg = ((EmbeddingGemma2) photo).config();
+        if (cfg.video == null) return "";
+        int patches = cfg.video.maxPatches();
+        return qnnBuilt(qnnGraphFile, patches) ? "" : " NPU собирает модель под кадры видео (" + patches + " фрагментов) — несколько минут";
     }
 
     /** Not in the index yet; files that failed before only count when the user started the run. */

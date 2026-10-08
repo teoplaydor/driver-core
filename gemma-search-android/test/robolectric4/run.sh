@@ -80,7 +80,7 @@ fi
 
 rm -rf build/shots
 TESTS=("$@")
-[ ${#TESTS[@]} -gt 0 ] || TESTS=(UiShots AppFlowTest AppIndexingTest IndexStopTest PipelineTest ViewerTest AutoIndexTest IdleIndexTest SpeedupsTest)
+[ ${#TESTS[@]} -gt 0 ] || TESTS=(UiShots AppFlowTest AppIndexingTest IndexStopTest PipelineTest ViewerTest OpenTimeoutTest AutoIndexTest IdleIndexTest SpeedupsTest)
 # One JVM per class: Engine is an app-wide singleton.
 for t in "${TESTS[@]}"; do
   echo "-- $t"
