@@ -959,6 +959,23 @@ public final class MainActivity extends Activity implements Engine.Listener, Vie
             toast("Остановите индексацию — замер идёт на том же процессоре");
             return;
         }
+        String slow = Engine.slowdown(this);
+        if (slow != null) {
+            // a throttled phone gives numbers several times worse than usual (seen at 9% battery while charging)
+            sheet = Sheet.confirm(root, "Замер сейчас будет неточным", "Сейчас " + slow + ": телефон работает медленнее обычного, "
+                    + "и все варианты покажутся в разы хуже. Лучше подобрать на зарядке с запасом заряда, когда телефон не "
+                    + "горячий.", "Всё равно замерить", new Runnable() {
+                        @Override
+                        public void run() {
+                            startBenchmark();
+                        }
+                    });
+            return;
+        }
+        startBenchmark();
+    }
+
+    private void startBenchmark() {
         toast("Замеряю варианты… телефон может нагреться");
         engine.benchmark(new Engine.Callback<String>() {
             @Override

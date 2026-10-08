@@ -180,6 +180,21 @@ public class SpeedupsTest {
         assertTrue(e.prefs().getBoolean("speed_check_pending", false));
         Robo.settle(500);
 
+        // A throttled phone measures several times slower (seen: 9% battery while charging): the check says so.
+        android.content.Intent bat = new android.content.Intent(android.content.Intent.ACTION_BATTERY_CHANGED);
+        bat.putExtra(android.os.BatteryManager.EXTRA_LEVEL, 9).putExtra(android.os.BatteryManager.EXTRA_SCALE, 100)
+                .putExtra(android.os.BatteryManager.EXTRA_PLUGGED, android.os.BatteryManager.BATTERY_PLUGGED_AC);
+        a.getApplication().sendStickyBroadcast(bat);
+        assertEquals("заряд 9%", Robo.callStatic(Engine.class, "slowdown", a));
+        String cond = (String) Robo.callStatic(Engine.class, "conditions", a);
+        assertTrue(cond, cond.startsWith("заряд 9% (заряжается), экономия батареи выключена"));
+        bat.putExtra(android.os.BatteryManager.EXTRA_LEVEL, 80);
+        a.getApplication().sendStickyBroadcast(bat);
+        assertNull(Robo.callStatic(Engine.class, "slowdown", a));
+        org.robolectric.Shadows.shadowOf((android.os.PowerManager) a.getSystemService(Context.POWER_SERVICE)).setIsPowerSaveMode(true);
+        assertEquals("включена экономия батареи", Robo.callStatic(Engine.class, "slowdown", a));
+        org.robolectric.Shadows.shadowOf((android.os.PowerManager) a.getSystemService(Context.POWER_SERVICE)).setIsPowerSaveMode(false);
+
         // Unused variants go on request; the manifest forgets the fp16 graph, the 4-bit model stays.
         e.deleteGemmaFp16();
         e.deleteLiteRt();

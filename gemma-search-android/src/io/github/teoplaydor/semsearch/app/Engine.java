@@ -2,6 +2,8 @@ package io.github.teoplaydor.semsearch.app;
 
 import android.content.ContentResolver;
 import android.content.Context;
+import android.content.Intent;
+import android.content.IntentFilter;
 import android.content.SharedPreferences;
 import android.graphics.Bitmap;
 import android.net.Uri;
@@ -1512,6 +1514,48 @@ public final class Engine {
         else prefs.edit().remove(key).commit();
     }
 
+    /** Battery, power saving and heat, as the speed report shows them. */
+    static String conditions(Context c) {
+        Intent b = c.registerReceiver(null, new IntentFilter(Intent.ACTION_BATTERY_CHANGED));
+        StringBuilder sb = new StringBuilder();
+        if (b != null) {
+            int level = b.getIntExtra(android.os.BatteryManager.EXTRA_LEVEL, -1), scale = b.getIntExtra(android.os.BatteryManager.EXTRA_SCALE, -1);
+            boolean charging = b.getIntExtra(android.os.BatteryManager.EXTRA_PLUGGED, 0) != 0;
+            if (level >= 0 && scale > 0) sb.append("заряд ").append(level * 100 / scale).append('%').append(charging ? " (заряжается)" : "");
+        }
+        android.os.PowerManager pm = (android.os.PowerManager) c.getSystemService(Context.POWER_SERVICE);
+        if (pm != null) {
+            sb.append(sb.length() > 0 ? ", " : "").append("экономия батареи ").append(pm.isPowerSaveMode() ? "включена" : "выключена");
+            int t = thermalStatus(pm);
+            if (t >= 0) sb.append(", нагрев: ").append(new String[]{"нет", "лёгкий", "умеренный", "сильный", "критический",
+                    "критический", "критический"}[Math.min(6, t)]);
+        }
+        return sb.toString();
+    }
+
+    /** Why the phone is slowed down right now (low battery, power saving, heat), or null. */
+    static String slowdown(Context c) {
+        android.os.PowerManager pm = (android.os.PowerManager) c.getSystemService(Context.POWER_SERVICE);
+        if (pm != null && pm.isPowerSaveMode()) return "включена экономия батареи";
+        if (pm != null && thermalStatus(pm) >= 2) return "телефон нагрелся";
+        Intent b = c.registerReceiver(null, new IntentFilter(Intent.ACTION_BATTERY_CHANGED));
+        if (b != null) {
+            int level = b.getIntExtra(android.os.BatteryManager.EXTRA_LEVEL, -1), scale = b.getIntExtra(android.os.BatteryManager.EXTRA_SCALE, -1);
+            if (level >= 0 && scale > 0 && level * 100 / scale < 20) return "заряд " + level * 100 / scale + "%";
+        }
+        return null;
+    }
+
+    /** PowerManager.getCurrentThermalStatus() (API 29), -1 when unknown. */
+    static int thermalStatus(android.os.PowerManager pm) {
+        if (android.os.Build.VERSION.SDK_INT < 29) return -1;
+        try {
+            return (Integer) android.os.PowerManager.class.getMethod("getCurrentThermalStatus").invoke(pm);
+        } catch (Exception e) {
+            return -1;
+        }
+    }
+
     /** Phone and chip, for the speed report (Build.SOC_MODEL is API 31+). */
     static String device() {
         String soc = null;
@@ -1583,6 +1627,12 @@ public final class Engine {
                     int budget = photoBudget();
                     int auto = autoThreads(), cores = Runtime.getRuntime().availableProcessors();
                     rep.append(device()).append('\n');
+                    String slowAtStart = slowdown(ctx);
+                    rep.append("Условия: ").append(conditions(ctx)).append('\n');
+                    if (slowAtStart != null) {
+                        rep.append("⚠ Телефон сейчас замедлен (").append(slowAtStart).append("): цифры будут хуже обычных, "
+                                + "сравнивать стоит только варианты между собой\n");
+                    }
                     rep.append(autoDetail() ? "Детализация авто: подбор на " + budget + " токенах (обычные фото)"
                             : "Детализация " + budget + " токенов").append(", ядер ").append(cores)
                             .append(", быстрых ").append(auto).append("\n(картинка + текст на одно фото)\n\n");
@@ -1593,8 +1643,11 @@ public final class Engine {
                     boolean lrt = liteRtInstalled();
                     // With an index of LiteRT-LM vectors only its variants are comparable; its CPU run is the reference.
                     final boolean space = liteRtSpace();
-                    int[] order = space ? new int[]{ACCEL_LITERT_CPU, ACCEL_LITERT_GPU} : new int[ACCEL_NAMES.length];
-                    if (!space) for (int a = 0; a < order.length; a++) order[a] = a;
+                    // the exact CPU run first (the reference), then the likely winners while the phone is still cool,
+                    // the NPU last (slow on most phones, and its driver may crash)
+                    int[] order = space ? new int[]{ACCEL_LITERT_CPU, ACCEL_LITERT_GPU}
+                            : new int[]{ACCEL_CPU, ACCEL_GPU_FP16_ATTN, ACCEL_GPU_INT8, ACCEL_GPU_FP16, ACCEL_GPU, ACCEL_CPU_INT8,
+                            ACCEL_LITERT_GPU, ACCEL_LITERT_CPU, ACCEL_NPU, ACCEL_NPU_FP32};
                     for (int a : order) {
                         if (isGpu(a) && gpuBroken()) continue;
                         if (a == ACCEL_GPU_FP16 && !fp16) continue;
@@ -1613,6 +1666,8 @@ public final class Engine {
                     int[] best = null, offer = null, lrtBest = null;
                     double bestMs = Double.MAX_VALUE, offerMs = Double.MAX_VALUE, lrtBestMs = Double.MAX_VALUE;
                     float offerCos = 0, lrtBestCos = 0;
+                    List<int[]> okCands = new ArrayList<int[]>();
+                    List<Double> okMs = new ArrayList<Double>();
                     int step = 0;
                     for (int phase = 0; phase < 3; phase++) {
                         List<int[]> cands = new ArrayList<int[]>();
@@ -1653,6 +1708,10 @@ public final class Engine {
                                             m.visionMs / 1000.0, m.textMs / 1000.0),
                                     reference == m.emb ? "" : String.format(java.util.Locale.ROOT, ", совпадение %.3f", m.cos),
                                     ok ? "" : ownSpace ? " — векторы отличаются от ONNX-версии" : " — отклонено, результат расходится"));
+                            if (ok) {
+                                okCands.add(c);
+                                okMs.add(m.perPhotoMs);
+                            }
                             if (ok && m.perPhotoMs < bestMs) {
                                 bestMs = m.perPhotoMs;
                                 best = c;
@@ -1675,6 +1734,48 @@ public final class Engine {
                     if (best == null) {
                         throw new IllegalStateException(space ? "LiteRT-LM не подходит для этой детализации — «Вернуться на ONNX "
                                 + "Runtime» в настройках" : "ни один вариант не сработал");
+                    }
+                    // Measured one after another, later variants run on a warmer phone. The two best (when close) are
+                    // measured again alternately, and the winner's repeat shows whether the phone slowed down meanwhile.
+                    int[] runner = null;
+                    double runnerMs = Double.MAX_VALUE;
+                    for (int i = 0; i < okCands.size(); i++) {
+                        if (okCands.get(i)[0] != best[0] && okMs.get(i) < runnerMs) {
+                            runner = okCands.get(i);
+                            runnerMs = okMs.get(i);
+                        }
+                    }
+                    int[] phaseBest = best;
+                    double firstBestMs = bestMs, againBest = Double.MAX_VALUE, againRunner = Double.MAX_VALUE;
+                    Measure lastBest = null, lastRunner = null;
+                    boolean duel = runner != null && runnerMs < bestMs * 1.25;
+                    for (int round = 0; round < (duel ? 2 : 1); round++) {
+                        Measure a = measureAt(cfg, tok, plan, best, budget, reference);
+                        if (a.error == null && a.perPhotoMs < againBest) {
+                            againBest = a.perPhotoMs;
+                            lastBest = a;
+                        }
+                        if (duel) {
+                            Measure b = measureAt(cfg, tok, plan, runner, budget, reference);
+                            if (b.error == null && b.perPhotoMs < againRunner) {
+                                againRunner = b.perPhotoMs;
+                                lastRunner = b;
+                            }
+                        }
+                    }
+                    if (duel && lastBest != null && lastRunner != null) {
+                        rep.append(String.format(java.util.Locale.ROOT, "\nПеремер двух лучших вперемешку: %s %.2f с, %s %.2f с",
+                                ACCEL_NAMES[best[0]], againBest / 1000.0, ACCEL_NAMES[runner[0]], againRunner / 1000.0));
+                        if (againRunner < againBest) {
+                            best = runner;
+                            bestEmb = lastRunner.emb;
+                        }
+                        bestMs = Math.min(againBest, againRunner);
+                    }
+                    if (lastBest != null && againBest > firstBestMs * 1.25) {
+                        rep.append(String.format(java.util.Locale.ROOT, "\n⚠ За время замера телефон замедлился: %s сначала %.2f с, "
+                                        + "в конце %.2f с (нагрев или экономия батареи) — поздние варианты в списке выглядят хуже, чем есть",
+                                ACCEL_NAMES[phaseBest[0]], firstBestMs / 1000.0, againBest / 1000.0));
                     }
                     // The other end of the detail scale. With auto detail screenshots get it: the winner and the
                     // fastest LiteRT-LM variant are measured there too (after a pause — the phone is warm by now)
@@ -1804,6 +1905,10 @@ public final class Engine {
                         rep.append("\n\n").append(!fp16 && !lrt ? "fp16-версия и LiteRT-LM не проверены"
                                 : !fp16 ? "fp16-версия не проверена" : "LiteRT-LM не проверен")
                                 .append(": кнопка «Проверить LiteRT-LM и fp16» в настройках.");
+                    }
+                    String slowAtEnd = slowdown(ctx);
+                    if (slowAtEnd != null && slowAtStart == null) {
+                        rep.append("\n\n⚠ К концу замера телефон замедлился (").append(slowAtEnd).append(")");
                     }
                     if (liteRtLoadIssues != null && lrt) {
                         rep.append("\n\nLiteRT-LM: не загрузились необязательные библиотеки — ").append(liteRtLoadIssues);

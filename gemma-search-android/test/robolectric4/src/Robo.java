@@ -90,6 +90,18 @@ final class Robo {
         throw new NoSuchMethodException(name);
     }
 
+    /** A static (possibly package-private) method by name and argument count. */
+    static Object callStatic(Class<?> k, String name, Object... args) throws Exception {
+        for (Method m : k.getDeclaredMethods()) {
+            if (m.getName().equals(name) && m.getParameterTypes().length == args.length
+                    && java.lang.reflect.Modifier.isStatic(m.getModifiers())) {
+                m.setAccessible(true);
+                return m.invoke(null, args);
+            }
+        }
+        throw new NoSuchMethodException(name);
+    }
+
     static Object field(Object o, String name) throws Exception {
         Field f = o.getClass().getDeclaredField(name);
         f.setAccessible(true);
