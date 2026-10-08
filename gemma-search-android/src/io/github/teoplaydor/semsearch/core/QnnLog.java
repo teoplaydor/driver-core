@@ -1,7 +1,6 @@
 package io.github.teoplaydor.semsearch.core;
 
 import java.util.ArrayList;
-import java.util.Collection;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
@@ -182,27 +181,6 @@ public final class QnnLog {
             if (o.opType.equals(n.opType) && !o.name.isEmpty() && o.name.replaceAll("\\d+", "#").equals(key)) out.add(o.name);
         }
         return out;
-    }
-
-    private static final Pattern TOKEN = Pattern.compile("(_N\\d+N)$");
-
-    /**
-     * ONNX Runtime's {@code session.name_based_layer_assignment} value that keeps these nodes on the CPU. It
-     * matches substrings of node names, so a name's unique token (OnnxPatcher.forQnn) is enough; names its
-     * grammar cannot carry are left out. The CPU is named by its execution provider: "cpu" would mean any
-     * provider on a CPU device, and ONNX Runtime 1.29 counts QNN's as one (it registers without a device).
-     */
-    public static String cpuAssignment(Collection<String> names) {
-        StringBuilder sb = new StringBuilder();
-        Set<String> seen = new LinkedHashSet<String>();
-        for (String n : names) {
-            String t = n.trim();
-            Matcher m = TOKEN.matcher(t);
-            if (m.find()) t = m.group(1);
-            if (t.isEmpty() || t.startsWith("=") || t.matches(".*[,;()].*") || !seen.add(t)) continue;
-            sb.append(sb.length() == 0 ? "" : ", ").append(t);
-        }
-        return sb.length() == 0 ? "" : "CPUExecutionProvider(" + sb + ")";
     }
 
     /** Whether the graph compiles for the NPU when QNN may take only its first {@code k} nodes. */

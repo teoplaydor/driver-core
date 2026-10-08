@@ -85,6 +85,10 @@ java -Dfile.encoding=UTF-8 -Dstdout.encoding=UTF-8 -cp "$T/cls:build/deps/ort-cl
   "$T/accel/vit.onnx" "$T/accel"
 javac --release 8 -XDstringConcat=inline -nowarn -encoding UTF-8 -cp "$T/cls:$T/ort-desktop.jar" -d "$T/cls" test/accel/QnnLogTest.java
 java -Dfile.encoding=UTF-8 -Dstdout.encoding=UTF-8 -cp "$T/cls:build/deps/ort-classes:$T/ort-desktop.jar" QnnLogTest "$T/accel/vit.qnn.onnx"
+python3 test/accel/make_op_zoo.py "$T/accel/zoo.onnx"
+javac --release 8 -XDstringConcat=inline -nowarn -encoding UTF-8 -cp "$T/cls:$T/ort-desktop.jar" -d "$T/cls" test/accel/QnnBuildTest.java
+java -Dfile.encoding=UTF-8 -Dstdout.encoding=UTF-8 -cp "$T/cls:build/deps/ort-classes:$T/ort-desktop.jar" QnnBuildTest \
+  "$T/accel/vit.qnn.onnx" "$T/accel/zoo.onnx" "$T/qnnbuild" 2>&1 | grep -v CleanUnusedInitializers
 python3 test/accel/make_attention_graph.py "$T/accel/attention.onnx"
 java -Dfile.encoding=UTF-8 -Dstdout.encoding=UTF-8 -cp "$T/cls:build/deps/ort-classes:$T/ort-desktop.jar" ProfileTest "$T/models/dummy" \
   "$T/accel/attention.onnx"

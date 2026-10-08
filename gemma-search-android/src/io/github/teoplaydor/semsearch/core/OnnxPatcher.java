@@ -444,6 +444,286 @@ public final class OnnxPatcher {
         return vi.toByteArray();
     }
 
+    // ---------------------------------------------------------------- graph edits for the NPU search (QnnBuild)
+
+    public static final int TYPE_FLOAT = 1, TYPE_INT32 = 6, TYPE_INT64 = 7, TYPE_BOOL = 9, TYPE_FLOAT16 = 10, TYPE_DOUBLE = 11;
+
+    /** A tensor's element type (TensorProto.DataType) and shape (-1: unknown size). */
+    public static final class TensorType {
+        public final int elem;
+        public final long[] dims;
+
+        public TensorType(int elem, long[] dims) {
+            this.elem = elem;
+            this.dims = dims;
+        }
+
+        @Override
+        public String toString() {
+            String[] names = {"?", "float", "uint8", "int8", "uint16", "int16", "int32", "int64", "string", "bool", "float16", "double"};
+            StringBuilder sb = new StringBuilder(elem >= 0 && elem < names.length ? names[elem] : "type" + elem).append('[');
+            for (int i = 0; dims != null && i < dims.length; i++) sb.append(i > 0 ? "," : "").append(dims[i] < 0 ? "?" : String.valueOf(dims[i]));
+            return sb.append(']').toString();
+        }
+    }
+
+    private interface GraphEdit {
+        byte[] apply(byte[] model, int from, int to) throws IOException;
+    }
+
+    /** The model with its graph edited, written next to the original (its external data stays reachable). */
+    private static void editGraph(File in, File out, GraphEdit e) throws IOException {
+        byte[] model = readAll(in);
+        ByteArrayOutputStream res = new ByteArrayOutputStream(model.length + 65536);
+        Reader r = new Reader(model, 0, model.length);
+        while (r.more()) {
+            int start = r.pos;
+            long key = r.varint();
+            int field = (int) (key >>> 3), wire = (int) (key & 7);
+            if (field == 7 && wire == 2) {
+                int len = (int) r.varint();
+                writeLenField(res, 7, e.apply(model, r.pos, r.pos + len));
+                r.pos += len;
+            } else {
+                r.skip(wire);
+                res.write(model, start, r.pos - start);
+            }
+        }
+        File tmp = new File(out.getPath() + ".tmp");
+        OutputStream os = new FileOutputStream(tmp);
+        try {
+            os.write(res.toByteArray());
+        } finally {
+            os.close();
+        }
+        if (out.exists() && !out.delete()) throw new IOException("cannot replace " + out);
+        if (!tmp.renameTo(out)) throw new IOException("cannot write " + out);
+    }
+
+    /**
+     * The graph with only its first {@code keep} nodes (all when negative) and these outputs. An output the
+     * graph declared keeps its declaration; the others get none, and ONNX Runtime infers their types and shapes
+     * — which is also how all of a graph's tensor types can be learned (QnnBuild.tensorTypes).
+     */
+    public static void subgraph(File in, File out, final int keep, final java.util.List<String> outputs) throws IOException {
+        editGraph(in, out, new GraphEdit() {
+            @Override
+            public byte[] apply(byte[] b, int from, int to) throws IOException {
+                ByteArrayOutputStream g = new ByteArrayOutputStream(to - from + 65536);
+                java.util.Map<String, byte[]> declared = new java.util.HashMap<String, byte[]>();
+                Reader r = new Reader(b, from, to);
+                int node = 0;
+                while (r.more()) {
+                    int start = r.pos;
+                    long key = r.varint();
+                    int field = (int) (key >>> 3), wire = (int) (key & 7);
+                    if (field == 12 && wire == 2) {
+                        int len = (int) r.varint();
+                        byte[] vi = new byte[len];
+                        System.arraycopy(b, r.pos, vi, 0, len);
+                        r.pos += len;
+                        Reader vr = new Reader(vi, 0, vi.length);
+                        while (vr.more()) {
+                            long k = vr.varint();
+                            if ((k >>> 3) == 1 && (k & 7) == 2) {
+                                declared.put(vr.string(), vi);
+                                break;
+                            }
+                            vr.skip((int) (k & 7));
+                        }
+                        continue;
+                    }
+                    r.skip(wire);
+                    if (field == 1 && wire == 2 && keep >= 0 && node++ >= keep) continue;
+                    g.write(b, start, r.pos - start);
+                }
+                for (String o : outputs) {
+                    byte[] vi = declared.get(o);
+                    if (vi == null) {
+                        ByteArrayOutputStream v = new ByteArrayOutputStream();
+                        writeLenField(v, 1, o.getBytes(UTF8));
+                        vi = v.toByteArray();
+                    }
+                    writeLenField(g, 12, vi);
+                }
+                return g.toByteArray();
+            }
+        });
+    }
+
+    /** Element types and shapes of the graph's initializers, by name. */
+    public static java.util.Map<String, TensorType> initializerTypes(File f) throws IOException {
+        java.util.Map<String, TensorType> out = new java.util.HashMap<String, TensorType>();
+        byte[] model = readAll(f);
+        Reader r = new Reader(model, 0, model.length);
+        while (r.more()) {
+            long key = r.varint();
+            int field = (int) (key >>> 3), wire = (int) (key & 7);
+            if (field != 7 || wire != 2) {
+                r.skip(wire);
+                continue;
+            }
+            int len = (int) r.varint();
+            Reader g = new Reader(model, r.pos, r.pos + len);
+            r.pos += len;
+            while (g.more()) {
+                long k = g.varint();
+                int gf = (int) (k >>> 3), gw = (int) (k & 7);
+                if (gf != 5 || gw != 2) {
+                    g.skip(gw);
+                    continue;
+                }
+                int tl = (int) g.varint();
+                Reader t = new Reader(model, g.pos, g.pos + tl);
+                g.pos += tl;
+                int elem = 0;
+                String name = null;
+                java.util.List<Long> dims = new java.util.ArrayList<Long>();
+                while (t.more()) {
+                    long tk = t.varint();
+                    int tf = (int) (tk >>> 3), tw = (int) (tk & 7);
+                    if (tf == 1 && tw == 0) {
+                        dims.add(t.varint());
+                    } else if (tf == 1 && tw == 2) {
+                        int pl = (int) t.varint(), end = t.pos + pl;
+                        while (t.pos < end) dims.add(t.varint());
+                    } else if (tf == 2 && tw == 0) {
+                        elem = (int) t.varint();
+                    } else if (tf == 8 && tw == 2) {
+                        name = t.string();
+                    } else {
+                        t.skip(tw);
+                    }
+                }
+                long[] d = new long[dims.size()];
+                for (int i = 0; i < d.length; i++) d[i] = dims.get(i);
+                if (name != null) out.put(name, new TensorType(elem, d));
+            }
+        }
+        return out;
+    }
+
+    /** Inputs that carry the data (others are indices, shapes, axes, pads: they keep their types). */
+    private static int[] dataInputs(String op, int n) {
+        if (op.startsWith("Reduce") || op.equals("Gather") || op.equals("GatherElements") || op.equals("GatherND")
+                || op.equals("Reshape") || op.equals("Slice") || op.equals("Expand") || op.equals("Tile")
+                || op.equals("Squeeze") || op.equals("Unsqueeze") || op.equals("Transpose") || op.equals("Split")
+                || op.equals("Softmax") || op.equals("LogSoftmax") || op.equals("TopK") || op.equals("CumSum")
+                || op.equals("Resize") || op.equals("Cast") || op.equals("Shape") || op.equals("Size")) {
+            return new int[]{0};
+        }
+        if (op.equals("Pad")) return new int[]{0, 2};
+        if (op.equals("Where")) return new int[]{1, 2};
+        if (op.equals("ScatterElements") || op.equals("ScatterND")) return new int[]{0, 2};
+        int[] all = new int[n];
+        for (int i = 0; i < n; i++) all[i] = i;
+        return all;
+    }
+
+    /** Ops ONNX Runtime's CPU has no double kernel for (checked against the op zoo in tests): they cannot move. */
+    private static final java.util.Set<String> NO_DOUBLE = new java.util.HashSet<String>(java.util.Arrays.asList("Erf"));
+
+    /** Ops whose output type does not follow their inputs'. */
+    private static final java.util.Set<String> OWN_OUTPUT_TYPE = new java.util.HashSet<String>(java.util.Arrays.asList(
+            "Cast", "Shape", "Size", "Equal", "Less", "LessOrEqual", "Greater", "GreaterOrEqual", "Not", "And", "Or",
+            "Xor", "IsNaN", "IsInf", "ArgMax", "ArgMin", "NonZero", "ConstantOfShape"));
+
+    /**
+     * The graph with these nodes computed in double precision: QNN has no double, so they stay on the CPU, whose
+     * kernels take it. Their data inputs (float or integer) are cast to double, their outputs back to their own
+     * types. Unlike assigning nodes by name, ONNX Runtime partitions this graph as usual (its name-based
+     * assignment hides the initializers from QNN, which then fails on Slice). Returns the nodes it could not
+     * move (no input of a type to cast, or no double kernel on the CPU).
+     */
+    public static java.util.List<String> keepOnCpu(File in, File out, final java.util.Set<String> names,
+                                                   final java.util.Map<String, TensorType> types) throws IOException {
+        final java.util.List<String> unmoved = new java.util.ArrayList<String>();
+        editGraph(in, out, new GraphEdit() {
+            @Override
+            public byte[] apply(byte[] b, int from, int to) throws IOException {
+                ByteArrayOutputStream g = new ByteArrayOutputStream(to - from + 65536);
+                java.util.Map<String, String> asDouble = new java.util.HashMap<String, String>();
+                Reader r = new Reader(b, from, to);
+                while (r.more()) {
+                    int start = r.pos;
+                    long key = r.varint();
+                    int field = (int) (key >>> 3), wire = (int) (key & 7);
+                    if (field != 1 || wire != 2) {
+                        r.skip(wire);
+                        g.write(b, start, r.pos - start);
+                        continue;
+                    }
+                    int len = (int) r.varint();
+                    byte[] raw = new byte[len];
+                    System.arraycopy(b, r.pos, raw, 0, len);
+                    r.pos += len;
+                    Node n = parseNode(raw);
+                    if (!names.contains(n.name)) {
+                        writeLenField(g, 1, raw);
+                        continue;
+                    }
+                    if (NO_DOUBLE.contains(n.opType)) {
+                        unmoved.add(n.name);
+                        writeLenField(g, 1, raw);
+                        continue;
+                    }
+                    java.util.List<String> ins = new java.util.ArrayList<String>(n.inputs);
+                    int cast = 0, firstType = 0;
+                    for (int i : dataInputs(n.opType, ins.size())) {
+                        if (i >= ins.size() || ins.get(i).isEmpty()) continue;
+                        TensorType t = types.get(ins.get(i));
+                        if (t == null || !(t.elem == TYPE_FLOAT || t.elem == TYPE_FLOAT16 || t.elem == TYPE_INT64 || t.elem == TYPE_INT32)) continue;
+                        if (firstType == 0) firstType = t.elem;
+                        // a node moved before may already give it in double
+                        String d = asDouble.get(ins.get(i));
+                        if (d == null) {
+                            d = ins.get(i) + "_to_double";
+                            asDouble.put(ins.get(i), d);
+                            writeLenField(g, 1, node("Cast", "", new String[]{ins.get(i)}, new String[]{d}, d, "to", TYPE_DOUBLE));
+                        }
+                        ins.set(i, d);
+                        cast++;
+                    }
+                    if (cast == 0) {
+                        unmoved.add(n.name);
+                        writeLenField(g, 1, raw);
+                        continue;
+                    }
+                    java.util.List<String> outs = new java.util.ArrayList<String>(n.outputs);
+                    java.util.List<String[]> back = new java.util.ArrayList<String[]>();
+                    for (int j = 0; j < outs.size(); j++) {
+                        String o = outs.get(j);
+                        if (o.isEmpty() || OWN_OUTPUT_TYPE.contains(n.opType) || (n.opType.equals("TopK") && j == 1)) continue;
+                        TensorType t = types.get(o);
+                        int elem = t != null ? t.elem : firstType;
+                        outs.set(j, o + "_as_double");
+                        asDouble.put(o, o + "_as_double");
+                        back.add(new String[]{o + "_as_double", o, String.valueOf(elem)});
+                    }
+                    ByteArrayOutputStream nb = new ByteArrayOutputStream(raw.length + 64);
+                    for (String x : ins) writeLenField(nb, 1, x.getBytes(UTF8));
+                    for (String y : outs) writeLenField(nb, 2, y.getBytes(UTF8));
+                    Reader nr = new Reader(raw, 0, raw.length);
+                    while (nr.more()) {
+                        int s0 = nr.pos;
+                        long k = nr.varint();
+                        int f = (int) (k >>> 3), w = (int) (k & 7);
+                        nr.skip(w);
+                        if ((f == 1 || f == 2) && w == 2) continue;
+                        nb.write(raw, s0, nr.pos - s0);
+                    }
+                    writeLenField(g, 1, nb.toByteArray());
+                    for (String[] c : back) {
+                        writeLenField(g, 1, node("Cast", "", new String[]{c[0]}, new String[]{c[1]}, c[1] + "_from_double", "to",
+                                Integer.parseInt(c[2])));
+                    }
+                }
+                return g.toByteArray();
+            }
+        });
+        return unmoved;
+    }
+
     /** name → Long (INT), Float (FLOAT), long[] (INTS) for the attributes a rewrite needs. */
     private static java.util.Map<String, Object> attributes(byte[] node) throws IOException {
         java.util.Map<String, Object> m = new java.util.HashMap<String, Object>();
@@ -680,6 +960,8 @@ public final class OnnxPatcher {
     public static final class Node {
         public String opType = "", domain = "", name = "";
         public final java.util.List<String> inputs = new java.util.ArrayList<String>(), outputs = new java.util.ArrayList<String>();
+        /** INT, FLOAT and INTS attributes (see attributes()). */
+        public java.util.Map<String, Object> attrs = new java.util.HashMap<String, Object>();
     }
 
     /**
@@ -753,6 +1035,7 @@ public final class OnnxPatcher {
                 default: r.skip(w);
             }
         }
+        n.attrs = attributes(b);
         return n;
     }
 

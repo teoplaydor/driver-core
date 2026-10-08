@@ -33,6 +33,7 @@ import ai.onnxruntime.OrtLoggingLevel;
 import ai.onnxruntime.OrtSession;
 import io.github.teoplaydor.semsearch.core.OnnxPatcher;
 import io.github.teoplaydor.semsearch.core.OrtProfile;
+import io.github.teoplaydor.semsearch.core.QnnBuild;
 import io.github.teoplaydor.semsearch.core.QnnLog;
 import io.github.teoplaydor.semsearch.core.QnnRuntime;
 
@@ -44,9 +45,8 @@ import io.github.teoplaydor.semsearch.core.QnnRuntime;
  *
  * <p>The NPU compiles a graph for fixed shapes: one session per patch count (token budget), batch 1, compiled
  * once and kept as a QNN context next to the graph, so later starts skip the compilation. When QNN cannot
- * compile it, the reasons come from the log (see QnnLog). Nodes QNN names in its errors are kept on the CPU (the
- * same node in every layer) and the compilation is tried again; when it names none, a tiny graph tells whether
- * the NPU compiles anything at all, and a bisection over the graph finds the node that breaks it.
+ * compile it, the reasons come from the log (QnnLog) and QnnBuild finds the node to blame and keeps it on the
+ * CPU, then compiles again.
  */
 public final class NpuService extends Service {
     static final String DESCRIPTOR = "io.github.teoplaydor.semsearch.NpuService";
@@ -155,28 +155,16 @@ public final class NpuService extends Service {
     }
 
     /**
-     * @param cpu   ONNX Runtime's name-based node assignment keeping nodes on the CPU ("" for none)
      * @param log   compilation: the session logs what QNN took and refused, and QNN its warnings and errors
      * @param deep  QNN's longest graph optimisation (faster runs), else its default
      */
-    private OrtSession.SessionOptions options(int patches, String cpu, boolean log, boolean deep) throws Exception {
-        return options(graph, patches, cpu, log, deep);
-    }
-
-    private OrtSession.SessionOptions options(File model, int patches, String cpu, boolean log, boolean deep) throws Exception {
+    private OrtSession.SessionOptions options(File model, int patches, boolean log, boolean deep) throws Exception {
         OrtSession.SessionOptions o = new OrtSession.SessionOptions();
         // basic optimisations only: later fusions would put back ops the NPU cannot run
         o.setOptimizationLevel(OrtSession.SessionOptions.OptLevel.BASIC_OPT);
         o.setIntraOpNumThreads(2);
         o.setSessionLogLevel(log ? OrtLoggingLevel.ORT_LOGGING_LEVEL_INFO : OrtLoggingLevel.ORT_LOGGING_LEVEL_WARNING);
-        for (List<String> dims : OnnxPatcher.inputDims(model).values()) {
-            for (int i = 0; i < dims.size() && i < 2; i++) {
-                String d = dims.get(i);
-                if (d.isEmpty() || Character.isDigit(d.charAt(0)) || "?".equals(d)) continue;
-                o.setSymbolicDimensionValue(d, i == 0 ? 1 : patches);
-            }
-        }
-        if (!cpu.isEmpty()) o.addConfigEntry("session.name_based_layer_assignment", cpu);
+        for (Map.Entry<String, Long> d : dims(model, patches).entrySet()) o.setSymbolicDimensionValue(d.getKey(), d.getValue());
         Map<String, String> qnn = new HashMap<String, String>();
         qnn.put("backend_path", new File(libDir, "libQnnHtp.so").getAbsolutePath());
         qnn.put("htp_performance_mode", "burst");
@@ -184,6 +172,19 @@ public final class NpuService extends Service {
         if (deep) qnn.put("htp_graph_finalization_optimization_mode", "3");
         o.addQnn(qnn);
         return o;
+    }
+
+    /** Fixed sizes for the graph's symbolic dimensions: batch 1, this many patches. */
+    private static Map<String, Long> dims(File model, int patches) throws IOException {
+        Map<String, Long> out = new LinkedHashMap<String, Long>();
+        for (List<String> dims : OnnxPatcher.inputDims(model).values()) {
+            for (int i = 0; i < dims.size() && i < 2; i++) {
+                String d = dims.get(i);
+                if (d.isEmpty() || Character.isDigit(d.charAt(0)) || "?".equals(d)) continue;
+                out.put(d, i == 0 ? 1L : (long) patches);
+            }
+        }
+        return out;
     }
 
     /** The compiled NPU graph for this many patches: from the saved QNN context, or compiled now and saved. */
@@ -195,7 +196,7 @@ public final class NpuService extends Service {
         if (ctx.exists() && ctx.lastModified() < graph.lastModified()) ctx.delete(); // made from an older graph
         if (ctx.exists()) {
             try {
-                s = env.createSession(ctx.getPath(), options(patches, "", false, true));
+                s = env.createSession(ctx.getPath(), options(graph, patches, false, true));
             } catch (Exception stale) {
                 ctx.delete();
             }
@@ -205,94 +206,67 @@ public final class NpuService extends Service {
         return s;
     }
 
-    /** Time for all compilations of one graph, the bisection included. */
+    /** Time for all compilations of one graph, the search for a culprit included. */
     private static final long COMPILE_BUDGET_MS = 15 * 60 * 1000;
 
     /**
-     * Compiles the graph for the NPU and saves the QNN context. When QNN cannot build the graph, the nodes its
-     * errors name are kept on the CPU (the same node in every layer) and it is tried again; when it names none,
-     * a tiny graph shows whether the NPU compiles anything at all, and a bisection finds the node that breaks
-     * the graph. The error says what QNN said and what was tried.
+     * Compiles the graph for the NPU and saves the QNN context (see QnnBuild: when QNN refuses the graph, the
+     * node to blame is kept on the CPU and it is compiled again). Nodes kept on the CPU are noted, so a later
+     * compilation starts from there.
      */
-    private OrtSession compile(int patches) throws Exception {
-        File ctx = context(patches);
-        long deadline = android.os.SystemClock.elapsedRealtime() + COMPILE_BUDGET_MS;
-        List<OnnxPatcher.Node> nodes = null;
-        LinkedHashSet<String> cpu = new LinkedHashSet<String>();
-        Map<String, Integer> cpuOps = new LinkedHashMap<String, Integer>();
-        boolean deep = true, canaryChecked = false;
-        StringBuilder tries = new StringBuilder();
-        for (int attempt = 1; ; attempt++) {
-            String what = (deep ? "оптимизация QNN 3" : "оптимизация QNN по умолчанию")
-                    + (cpuOps.isEmpty() ? "" : ", на процессоре " + ops(cpuOps));
-            OrtSession.SessionOptions o = options(patches, QnnLog.cpuAssignment(cpu), true, deep);
-            o.addConfigEntry("ep.context_enable", "1");
-            o.addConfigEntry("ep.context_file_path", ctx.getPath());
-            o.addConfigEntry("ep.context_embed_mode", "1");
-            LogTail tail = LogTail.start();
-            long t0 = android.os.SystemClock.elapsedRealtime();
-            OrtSession s = null;
-            Exception failure = null;
-            try {
-                s = env.createSession(graph.getPath(), o);
-            } catch (Exception e) {
-                failure = e;
-            }
-            QnnLog log = QnnLog.parse(tail != null ? tail.finish() : Collections.<String>emptyList());
-            long sec = (android.os.SystemClock.elapsedRealtime() - t0 + 500) / 1000;
-            tries.append(tries.length() > 0 ? "; " : "").append(attempt).append(") ").append(what).append(", ").append(sec).append(" с");
-            if (failure == null) {
-                writeText(note(patches, "qnn"), "сборка: " + tries + "\n" + log.summary(4));
+    private OrtSession compile(final int patches) throws Exception {
+        final File ctx = context(patches);
+        Set<String> start = new LinkedHashSet<String>();
+        for (String l : readText(note(patches, "cpu")).split("\n")) if (!l.trim().isEmpty()) start.add(l.trim());
+        QnnBuild.Outcome o = QnnBuild.run(graph, start, new QnnBuild.Npu() {
+            @Override
+            public QnnBuild.Failure compile(File g, boolean save, boolean deep) throws Exception {
+                OrtSession.SessionOptions so = options(g, patches, save, deep);
+                if (save) {
+                    so.addConfigEntry("ep.context_enable", "1");
+                    so.addConfigEntry("ep.context_file_path", ctx.getPath());
+                    so.addConfigEntry("ep.context_embed_mode", "1");
+                } else {
+                    so.addConfigEntry("session.disable_prepacking", "1");
+                }
+                LogTail tail = save ? LogTail.start() : null;
                 try {
-                    // runs log quietly: the same graph again, from the context just saved
-                    OrtSession quiet = env.createSession(ctx.getPath(), options(patches, "", false, deep));
-                    s.close();
-                    return quiet;
+                    env.createSession(g.getPath(), so).close();
+                    if (tail != null) tail.finish();
+                    return null;
                 } catch (Exception e) {
-                    return s;
+                    QnnLog log = QnnLog.parse(tail != null ? tail.finish() : Collections.<String>emptyList());
+                    return new QnnBuild.Failure(e.getMessage() != null ? e.getMessage() : e.toString(), log);
+                } finally {
+                    so.close();
                 }
             }
-            String msg = failure.getMessage() != null ? failure.getMessage() : failure.toString();
-            tries.append(" — ").append(msg.length() > 120 ? msg.substring(0, 120) + "…" : msg.trim());
-            boolean graphFailed = msg.contains("finalize QNN graph") || msg.contains("compose Qnn graph");
-            boolean timeLeft = android.os.SystemClock.elapsedRealtime() < deadline;
-            if (graphFailed && timeLeft && attempt < 8) {
-                if (nodes == null) nodes = OnnxPatcher.nodes(graph, new HashMap<String, Long>());
-                int before = cpu.size();
-                for (OnnxPatcher.Node n : log.failingNodes(nodes)) keepOnCpu(nodes, n, cpu, cpuOps);
-                if (cpu.size() > before) continue;
-                if (!canaryChecked) {
-                    canaryChecked = true;
-                    String canary = canary();
-                    tries.append("; крошечный граф (MatMul, Add, Softmax): ").append(canary == null ? "собирается" : "не собирается — " + canary);
-                    if (canary != null) {
-                        throw new Exception(msg.trim() + "\n  NPU не собирает даже крошечный граф, дело не в модели: " + canary
-                                + "\n  " + log.summary(8) + "\n  попытки: " + tries);
-                    }
-                }
-                int culprit = bisect(nodes, cpu, patches, deadline, tries);
-                if (culprit >= 0) {
-                    OnnxPatcher.Node c = nodes.get(culprit);
-                    tries.append(" → ломает узел №").append(culprit + 1).append(" из ").append(nodes.size()).append(": ")
-                            .append(c.opType).append(' ').append(c.name);
-                    keepOnCpu(nodes, c, cpu, cpuOps);
-                    if (cpu.size() > before) continue;
-                }
-                if (deep) {
-                    deep = false;
-                    continue;
-                }
-            }
-            String summary = log.summary(10);
-            throw new Exception(msg.trim() + (summary.isEmpty() ? "" : "\n  " + summary)
-                    + (attempt == 1 && tries.indexOf(";") < 0 ? "\n  сборка шла " + sec + " с" : "\n  попытки: " + tries));
-        }
-    }
 
-    /** The node, in every layer, goes to the CPU. */
-    private static void keepOnCpu(List<OnnxPatcher.Node> nodes, OnnxPatcher.Node n, Set<String> cpu, Map<String, Integer> cpuOps) {
-        for (String name : QnnLog.inEveryLayer(nodes, n)) {
-            if (cpu.add(name)) cpuOps.put(n.opType, cpuOps.containsKey(n.opType) ? cpuOps.get(n.opType) + 1 : 1);
+            @Override
+            public String canary() {
+                return NpuService.this.canary();
+            }
+
+            @Override
+            public Map<String, OnnxPatcher.TensorType> types(File g) throws Exception {
+                return QnnBuild.tensorTypes(env, g, dims(g, patches));
+            }
+
+            @Override
+            public long nowMs() {
+                return android.os.SystemClock.elapsedRealtime();
+            }
+        }, COMPILE_BUDGET_MS);
+        writeText(note(patches, "qnn"), o.report);
+        if (!o.ok) throw new Exception(o.report);
+        StringBuilder cpu = new StringBuilder();
+        for (String n : o.cpu) cpu.append(n).append('\n');
+        writeText(note(patches, "cpu"), cpu.toString());
+        try {
+            // runs log quietly: the graph again, from the context just saved
+            return env.createSession(ctx.getPath(), options(graph, patches, false, true));
+        } finally {
+            if (o.compiled != null && !o.compiled.equals(graph)) o.compiled.delete();
         }
     }
 
@@ -307,7 +281,7 @@ public final class NpuService extends Service {
             } finally {
                 out.close();
             }
-            OrtSession.SessionOptions o = options(f, 0, "", true, true);
+            OrtSession.SessionOptions o = options(f, 0, true, true);
             tail = LogTail.start();
             OrtSession s = env.createSession(f.getPath(), o);
             QnnLog log = QnnLog.parse(tail != null ? tail.finish() : Collections.<String>emptyList());
@@ -321,50 +295,6 @@ public final class NpuService extends Service {
         } finally {
             f.delete();
         }
-    }
-
-    /**
-     * Bisection over the graph's nodes in order: QNN may take only the first k (the others, and those already
-     * kept off the NPU, stay on the CPU). Returns the index of the node whose addition breaks the compilation,
-     * or -1 when the time ran out.
-     */
-    private int bisect(final List<OnnxPatcher.Node> nodes, final Set<String> cpu, final int patches, final long deadline,
-                       final StringBuilder tries) {
-        final int[] steps = {0};
-        final long t0 = android.os.SystemClock.elapsedRealtime();
-        try {
-            int c = QnnLog.firstBreaking(nodes.size(), new QnnLog.Probe() {
-                @Override
-                public boolean compiles(int k) throws Exception {
-                    if (android.os.SystemClock.elapsedRealtime() > deadline) throw new java.util.concurrent.TimeoutException();
-                    steps[0]++;
-                    List<String> off = new ArrayList<String>(cpu);
-                    for (int i = k; i < nodes.size(); i++) off.add(nodes.get(i).name);
-                    OrtSession.SessionOptions o = options(patches, QnnLog.cpuAssignment(off), false, false);
-                    o.addConfigEntry("session.disable_prepacking", "1");
-                    try {
-                        env.createSession(graph.getPath(), o).close();
-                        return true;
-                    } catch (Exception e) {
-                        return false;
-                    }
-                }
-            });
-            tries.append("; поиск: ").append(steps[0]).append(" сборок, ")
-                    .append((android.os.SystemClock.elapsedRealtime() - t0 + 500) / 1000).append(" с");
-            return c;
-        } catch (Exception e) {
-            tries.append("; поиск прерван после ").append(steps[0]).append(" сборок — кончилось время");
-            return -1;
-        }
-    }
-
-    private static String ops(Map<String, Integer> m) {
-        StringBuilder sb = new StringBuilder();
-        for (Map.Entry<String, Integer> e : m.entrySet()) {
-            sb.append(sb.length() > 0 ? ", " : "").append(e.getKey()).append(" ×").append(e.getValue());
-        }
-        return sb.toString();
     }
 
     private File context(int patches) {
@@ -474,7 +404,7 @@ public final class NpuService extends Service {
     private synchronized String profile(int patches, int patchDim) throws Exception {
         session(patches); // makes sure the context exists
         File ctx = context(patches);
-        OrtSession.SessionOptions o = options(patches, "", false, true);
+        OrtSession.SessionOptions o = options(graph, patches, false, true);
         File prefix = new File(getCacheDir(), "npu-profile");
         o.enableProfiling(prefix.getPath());
         OrtSession s = env.createSession(ctx.exists() ? ctx.getPath() : graph.getPath(), o);

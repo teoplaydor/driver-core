@@ -17,8 +17,7 @@ import io.github.teoplaydor.semsearch.core.QnnLog;
  * lines in ONNX Runtime's Android format) and finds how much QNN took, what it refused and why, the error code,
  * and QNN's errors — those while compiling apart from those while it checked single nodes (seen on the phone:
  * a ReduceMax on integers it refuses, which stays on the CPU anyway). The node a compile error names is found in
- * the graph (every node carries a unique token), with the same node in every layer; ONNX Runtime matches the
- * assignment to its CPU provider (its log says so) and the results do not change. The bisection finds the
+ * the graph (every node carries a unique token), with the same node in every layer. The bisection finds the
  * node that breaks a compilation; the tiny graph that tells whether the NPU compiles anything runs.
  * usage: QnnLogTest <graph rewritten for QNN (two encoder layers)>
  */
@@ -33,10 +32,6 @@ public class QnnLogTest {
     static final String ORT = "[V:onnxruntime:, qnn_backend_manager.cc:466 QnnLogging] ";
 
     public static void main(String[] args) throws Exception {
-        if (args.length == 3 && args[0].equals("--assign")) {
-            assignOnly(new File(args[1]), args[2]);
-            return;
-        }
         File graph = new File(args[0]);
         List<OnnxPatcher.Node> nodes = OnnxPatcher.nodes(graph, new HashMap<String, Long>());
         String softmax = null;
@@ -88,9 +83,6 @@ public class QnnLogTest {
         check(failing.size() == 1 && failing.get(0).name.equals(softmax), "QNN's error points at " + (failing.isEmpty() ? "nothing" : failing.get(0).name));
         List<String> every = QnnLog.inEveryLayer(nodes, failing.get(0));
         check(every.size() == 2 && every.contains(softmax), "the same node in every layer: " + every);
-        String cpu = QnnLog.cpuAssignment(new ArrayList<String>(Arrays.asList(every.get(0), every.get(1), every.get(0), "bad,name", "=x")));
-        String t0 = every.get(0).replaceAll(".*(_N\\d+N)$", "$1"), t1 = every.get(1).replaceAll(".*(_N\\d+N)$", "$1");
-        check(cpu.equals("CPUExecutionProvider(" + t0 + ", " + t1 + ")"), "assignment to the CPU provider by tokens: " + cpu);
         check(QnnLog.parse(Arrays.asList("V/onnxruntime: " + ORT + "QnnDsp <E> no names here")).failingNodes(nodes).isEmpty(),
                 "no node named: nothing to move");
 
@@ -112,30 +104,7 @@ public class QnnLogTest {
         }
         check(found, "bisection finds the breaking node (1526 nodes: ≤ 12 compilations)");
 
-        // ONNX Runtime takes the assignment (here only the CPU exists, so results stay the same) and rejects a bad one
         OrtEnvironment env = OrtEnvironment.getEnvironment();
-        int s = 24, d = 32;
-        float[] x = new float[s * d], mask = new float[s * s];
-        for (int i = 0; i < x.length; i++) x[i] = (float) Math.sin(i * 0.37) * 2;
-        float[] plain = run(env, graph, x, mask, s, d, null), assigned = run(env, graph, x, mask, s, d, cpu);
-        check(Arrays.equals(plain, assigned), "same features with the nodes assigned to the CPU");
-        String err = null;
-        try {
-            run(env, graph, x, mask, s, d, "cpu(=" + softmax + ")");
-        } catch (Exception e) {
-            err = e.getMessage();
-        }
-        check(err != null && err.contains("exact-match"), "ONNX Runtime reads the option: " + err);
-        // its log: the rule went to the CPU provider (a child process, where ONNX Runtime's log is readable)
-        ProcessBuilder pb = new ProcessBuilder(new File(System.getProperty("java.home"), "bin/java").getPath(), "-cp",
-                System.getProperty("java.class.path"), "QnnLogTest", "--assign", graph.getPath(), cpu).redirectErrorStream(true);
-        Process p = pb.start();
-        java.io.BufferedReader r = new java.io.BufferedReader(new java.io.InputStreamReader(p.getInputStream(), "UTF-8"));
-        String line, matched = null;
-        while ((line = r.readLine()) != null) if (line.contains("LayeringIndex created")) matched = line.replaceAll(".*\\] ", "");
-        p.waitFor();
-        check(matched != null && matched.contains("Matched 2 out of 2 rules"), "ONNX Runtime matched both tokens to its CPU provider: " + matched);
-
         // the tiny graph: valid, and softmax rows sum to one
         File canary = new File(graph.getParentFile(), "canary.onnx");
         java.nio.file.Files.write(canary.toPath(), OnnxPatcher.canaryModel());
@@ -156,33 +125,5 @@ public class QnnLogTest {
             System.exit(1);
         }
         System.out.println("QNN log: all ok");
-    }
-
-    /** Creates a session with the assignment and ONNX Runtime's info log on (read by the parent). */
-    static void assignOnly(File graph, String cpu) throws Exception {
-        OrtEnvironment env = OrtEnvironment.getEnvironment(ai.onnxruntime.OrtLoggingLevel.ORT_LOGGING_LEVEL_INFO, "t");
-        OrtSession.SessionOptions o = new OrtSession.SessionOptions();
-        o.setSessionLogLevel(ai.onnxruntime.OrtLoggingLevel.ORT_LOGGING_LEVEL_INFO);
-        o.setSymbolicDimensionValue("batch", 1);
-        o.setSymbolicDimensionValue("patches", 24);
-        o.addConfigEntry("session.name_based_layer_assignment", cpu);
-        env.createSession(graph.getPath(), o).close();
-    }
-
-    static float[] run(OrtEnvironment env, File graph, float[] x, float[] mask, int s, int d, String cpu) throws Exception {
-        OrtSession.SessionOptions o = new OrtSession.SessionOptions();
-        o.setSymbolicDimensionValue("batch", 1);
-        o.setSymbolicDimensionValue("patches", s);
-        if (cpu != null) o.addConfigEntry("session.name_based_layer_assignment", cpu);
-        OrtSession sess = env.createSession(graph.getPath(), o);
-        Map<String, OnnxTensor> in = new HashMap<String, OnnxTensor>();
-        in.put("pixel_values", OnnxTensor.createTensor(env, FloatBuffer.wrap(x), new long[]{1, s, d}));
-        in.put("attention_bias", OnnxTensor.createTensor(env, FloatBuffer.wrap(mask), new long[]{1, 1, s, s}));
-        OrtSession.Result r = sess.run(in);
-        float[] out = ((OnnxTensor) r.get(0)).getFloatBuffer().array().clone();
-        r.close();
-        for (OnnxTensor t : in.values()) t.close();
-        sess.close();
-        return out;
     }
 }
