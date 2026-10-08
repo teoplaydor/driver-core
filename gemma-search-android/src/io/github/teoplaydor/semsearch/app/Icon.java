@@ -13,7 +13,7 @@ import android.graphics.drawable.Drawable;
 final class Icon extends Drawable {
     static final int SEARCH = 0, CLOSE = 1, BACK = 2, TUNE = 3, IMAGE = 4, SHARE = 5, OPEN = 6, SIMILAR = 7, PLAY = 8,
             PLUS = 9, NOTE = 10, TRASH = 11, CHECK = 12, CHEVRON = 13, STOP = 14, DOWNLOAD = 15, VIDEO = 16, INFO = 17,
-            GRID = 18, TAG = 19;
+            GRID = 18, TAG = 19, ALBUMS = 20;
 
     private final int kind;
     private final Paint p = new Paint(Paint.ANTI_ALIAS_FLAG);
@@ -57,6 +57,22 @@ final class Icon extends Drawable {
         p.setStyle(Paint.Style.STROKE);
         path.reset();
         switch (kind) {
+            case ALBUMS: // two pictures stacked: albums
+                r.set(7.5f, 4, 20, 16.5f);
+                c.drawRoundRect(r, 2.5f, 2.5f, p);
+                path.moveTo(4, 9);
+                path.lineTo(4, 18.5f);
+                path.quadTo(4, 20, 5.5f, 20);
+                path.lineTo(15, 20);
+                c.drawPath(path, p);
+                path.reset();
+                path.moveTo(10, 14);
+                path.lineTo(13, 10.5f);
+                path.lineTo(15.5f, 13);
+                path.lineTo(17, 11.5f);
+                path.lineTo(18.5f, 13.5f);
+                c.drawPath(path, p);
+                break;
             case TAG: // a price tag: what the picture is labelled with
                 path.moveTo(4, 5.5f);
                 path.lineTo(4, 11);

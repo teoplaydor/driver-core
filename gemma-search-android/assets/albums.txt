@@ -1,0 +1,54 @@
+# Albums by meaning: a name and the words (English, from photo_tags.txt) whose pictures it gathers.
+# One per line: Название<TAB>word|word|word. A picture joins an album when it stands out on one of its words.
+Люди	people|person|group of people|crowd|group photo
+Селфи	selfie
+Портреты	portrait|face
+Дети	child|children|baby
+Семья	family|couple
+Собаки	dog|puppy
+Кошки	cat|kitten
+Птицы	bird|pigeon|duck
+Другие животные	horse|cow|sheep|goat|rabbit|hamster|squirrel|fox|bear|deer|monkey|elephant|giraffe|lion|tiger|zoo
+Рыбы и море	fish|aquarium|dolphin|turtle|underwater
+Еда	food|meal|breakfast|lunch|dinner|pizza|burger|sushi|pasta|salad|soup|meat|steak|barbecue
+Сладкое	cake|dessert|ice cream|chocolate|cookies|pancakes
+Фрукты и овощи	fruit|apple|banana|strawberry|watermelon|vegetables|berries|mushrooms
+Напитки	coffee|tea|wine|beer|cocktail|juice
+Рестораны и кафе	restaurant|cafe
+Природа	nature|landscape|field|meadow
+Море и пляж	sea|ocean|beach|sand|waves|island
+Горы	mountains|hills|rocks
+Лес	forest|trees|tree
+Реки и озёра	lake|river|waterfall|pond
+Цветы	flowers|rose|tulips|garden|houseplant
+Закаты и рассветы	sunset|sunrise
+Небо	sky|clouds|rainbow|night sky|stars|moon
+Снег и зима	snow|winter|ice|skiing
+Город	city|street|architecture|building|skyscraper|square|old town
+Ночной город	night city|city lights
+Достопримечательности	monument|church|temple|castle|museum|bridge
+Дом	interior|living room|bedroom|kitchen|bathroom|room|furniture
+Машины	car|cars|car interior
+Транспорт	bus|tram|train|metro|truck|motorcycle|bicycle|scooter|boat|ship|yacht
+Путешествия	travel|vacation|airport|airplane|airplane window|hotel|train station
+Праздники	party|birthday|celebration|new year|christmas|christmas tree|fireworks|balloons|gift
+Свадьбы	wedding
+Концерты	concert|festival|dance
+Спорт	sport|gym|football|basketball|tennis|running|swimming|swimming pool|cycling
+Походы	hiking|camping|fishing|picnic
+Документы	document|paper document|contract|form|passport|invoice
+Чеки и билеты	receipt|ticket|boarding pass|price list
+Скриншоты	screenshot|app|web page|settings screen
+Переписки	chat|message|email
+Карты и маршруты	map|navigation
+Мемы и комиксы	meme|comic
+Текст и заметки	text|handwriting|notes|whiteboard|book page|newspaper|poster
+Таблицы и графики	spreadsheet|chart|diagram|schedule|calendar|presentation slide
+Код	code
+QR-коды	qr code|barcode
+Техника	phone|computer|laptop|keyboard|monitor|television|headphones|camera|watch
+Одежда и обувь	clothes|dress|shoes|sneakers|jacket|hat|bag|backpack|jewelry
+Игрушки	toys|teddy bear
+Искусство	painting|drawing|sculpture|graffiti
+Музыка	guitar|piano|musical instrument
+Учёба и работа	school|university|classroom|library|office|meeting|work|study

@@ -476,6 +476,24 @@ public class UiShots {
         shot(a, "07b-viewer-tags");
         a.onBackPressed();
         settle(700);
+        // albums by meaning, from the rail
+        call(a, "showAlbums");
+        waitFor("albums", () -> {
+            View sh = byName(a.getWindow().getDecorView(), "Sheet");
+            if (sh == null) return false;
+            List<View> st = new ArrayList<View>(Collections.singletonList(sh));
+            while (!st.isEmpty()) {
+                View v = st.remove(st.size() - 1);
+                if (v instanceof android.widget.TextView && String.valueOf(((android.widget.TextView) v).getText()).matches("\\d+ файл.*")) return true;
+                if (v instanceof android.widget.TextView && String.valueOf(((android.widget.TextView) v).getText()).startsWith("Пока не из чего")) return true;
+                if (v instanceof ViewGroup) for (int i = 0; i < ((ViewGroup) v).getChildCount(); i++) st.add(((ViewGroup) v).getChildAt(i));
+            }
+            return false;
+        });
+        settle(900);
+        shot(a, "07c-albums");
+        a.onBackPressed();
+        settle(700);
         q.setText("");
         call(a, "hideSearch");
         settle(900);

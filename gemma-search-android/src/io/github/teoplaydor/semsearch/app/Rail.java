@@ -13,8 +13,8 @@ import android.widget.LinearLayout;
 
 /**
  * The translucent vertical panel under the thumb: settings on top, the four filters (a highlight
- * glides between them), "new note" while notes are shown, and search at the bottom where the thumb
- * rests. Icons only; a filter's name flashes in a small chip beside the panel when it changes.
+ * glides between them), albums by meaning, "new note" while notes are shown, and search at the bottom where the
+ * thumb rests. Icons only; a filter's name flashes in a small chip beside the panel when it changes.
  */
 final class Rail extends FrameLayout {
     interface Listener {
@@ -25,6 +25,8 @@ final class Rail extends FrameLayout {
         void settingsTapped();
 
         void newNoteTapped();
+
+        void albumsTapped();
     }
 
     static final int[] FILTER_ICONS = {Icon.GRID, Icon.IMAGE, Icon.VIDEO, Icon.NOTE};
@@ -81,6 +83,15 @@ final class Rail extends FrameLayout {
             filters[i] = b;
             column.addView(b, size(c, 46));
         }
+        ImageView albums = button(c, Icon.ALBUMS, Ui.TEXT2, "Альбомы");
+        albums.setOnClickListener(new OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                l.albumsTapped();
+            }
+        });
+        column.addView(divider(c), dividerParams(c));
+        column.addView(albums, size(c, 46));
         plus = button(c, Icon.PLUS, Ui.TEXT, "Новая заметка");
         plus.setOnClickListener(new OnClickListener() {
             @Override

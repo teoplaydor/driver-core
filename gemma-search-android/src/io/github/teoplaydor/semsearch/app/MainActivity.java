@@ -258,6 +258,12 @@ public final class MainActivity extends Activity implements Engine.Listener, Vie
         section.setSingleLine(true);
         section.setEllipsize(TextUtils.TruncateAt.END);
         section.setVisibility(View.GONE);
+        section.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                showMoreResults();
+            }
+        });
         info.addView(section, new LinearLayout.LayoutParams(-2, -2)); // wrap: the bubble follows the text
         status = Ui.text(this, "", 12.5f, Ui.TEXT2, Ui.REGULAR);
         status.setVisibility(View.GONE);
@@ -379,6 +385,11 @@ public final class MainActivity extends Activity implements Engine.Listener, Vie
             @Override
             public void newNoteTapped() {
                 noteEditor();
+            }
+
+            @Override
+            public void albumsTapped() {
+                showAlbums();
             }
         });
         root.addView(rail, new FrameLayout.LayoutParams(-2, -2, Gravity.BOTTOM | Gravity.END));
@@ -626,6 +637,10 @@ public final class MainActivity extends Activity implements Engine.Listener, Vie
         });
     }
 
+    /** The less sure results of the last search, added on a tap on the line above the grid. */
+    private List<IndexStore.Item> moreResults;
+    private List<IndexStore.Item> shownResults;
+
     private void showResults(Engine.SearchResult r, Exception e, String label) {
         if (e != null) {
             sectionText("Не получилось: " + e.getMessage());
@@ -633,10 +648,109 @@ public final class MainActivity extends Activity implements Engine.Listener, Vie
         }
         List<IndexStore.Item> list = new ArrayList<IndexStore.Item>();
         for (IndexStore.Hit h : r.hits) list.add(h.item);
+        List<IndexStore.Item> more = new ArrayList<IndexStore.Item>();
+        for (IndexStore.Hit h : r.more) more.add(h.item);
         resultsLabel = label;
+        shownResults = list;
+        moreResults = more.isEmpty() ? null : more;
         setItems(list, true);
-        sectionText(list.isEmpty() ? label : label + " · " + list.size());
+        String text;
+        if (list.isEmpty()) text = label;
+        else if (r.nearestOnly) text = label + " · точных совпадений нет, ближайшие " + list.size();
+        else text = label + " · " + list.size();
+        if (moreResults != null) text += " · ещё " + more.size() + " менее похожих ›";
+        sectionText(text);
         updateEmpty();
+    }
+
+    /** Albums by meaning (Engine.albums) in a sheet; one opens as results. */
+    void showAlbums() {
+        if (!engine.ready()) {
+            toast(engine.hasModelFiles() ? "Модель ещё загружается" : "Сначала скачайте модель");
+            return;
+        }
+        final Sheet s = new Sheet(this, "Альбомы по смыслу");
+        final TextView note = Ui.text(this, "Собираю альбомы… (в первый раз — до полуминуты: словарь переводится в векторы)", 13,
+                Ui.TEXT2, Ui.REGULAR);
+        note.setLineSpacing(0, 1.25f);
+        note.setPadding(0, 0, 0, dp(12));
+        s.body().addView(note);
+        s.show(root);
+        engine.albums(new Engine.Callback<List<Engine.Album>>() {
+            @Override
+            public void done(List<Engine.Album> albums, Exception e) {
+                if (s.isClosing()) return;
+                if (e != null) {
+                    note.setText("Не получилось: " + e.getMessage());
+                    return;
+                }
+                if (albums.isEmpty()) {
+                    note.setText("Пока не из чего собрать альбомы — проиндексируйте больше фото");
+                    return;
+                }
+                note.setText("Фото, которые модель явно относит к теме; одно фото может быть в нескольких альбомах");
+                for (final Engine.Album a : albums) s.body().addView(albumRow(s, a));
+            }
+        });
+    }
+
+    private View albumRow(final Sheet s, final Engine.Album a) {
+        LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        row.setPadding(0, dp(6), 0, dp(6));
+        for (int i = 0; i < 3; i++) {
+            MasonryView.Thumb t = new MasonryView.Thumb(this);
+            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(dp(52), dp(52));
+            lp.rightMargin = dp(4);
+            row.addView(t, lp);
+            if (i < a.items.size()) thumbInto(t, a.items.get(i), 160);
+        }
+        LinearLayout text = new LinearLayout(this);
+        text.setOrientation(LinearLayout.VERTICAL);
+        text.setPadding(dp(10), 0, 0, 0);
+        text.addView(Ui.text(this, a.name, 15, Ui.TEXT, Ui.MEDIUM));
+        text.addView(Ui.text(this, a.items.size() + " " + plural(a.items.size(), "файл", "файла", "файлов"), 12.5f, Ui.TEXT2, Ui.REGULAR));
+        row.addView(text, new LinearLayout.LayoutParams(0, -2, 1));
+        row.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                s.dismiss();
+                showAlbum(a);
+            }
+        });
+        Ui.pressable(row);
+        return row;
+    }
+
+    private static String plural(int n, String one, String few, String many) {
+        int m10 = n % 10, m100 = n % 100;
+        if (m10 == 1 && m100 != 11) return one;
+        if (m10 >= 2 && m10 <= 4 && (m100 < 12 || m100 > 14)) return few;
+        return many;
+    }
+
+    /** An album's pictures in the grid, as results. */
+    private void showAlbum(Engine.Album a) {
+        hideKeyboard();
+        resultsLabel = "Альбом «" + a.name + "»";
+        shownResults = a.items;
+        moreResults = null;
+        setItems(a.items, true);
+        sectionText(resultsLabel + " · " + a.items.size());
+        updateEmpty();
+    }
+
+    /** The less sure results after the sure ones. */
+    private void showMoreResults() {
+        if (moreResults == null || shownResults == null || resultsLabel == null) return;
+        List<IndexStore.Item> all = new ArrayList<IndexStore.Item>(shownResults);
+        all.addAll(moreResults);
+        int sure = shownResults.size(), more = moreResults.size();
+        moreResults = null;
+        shownResults = all;
+        setItems(all, true);
+        sectionText(resultsLabel + " · " + sure + " + " + more + " менее похожих");
     }
 
     // ------------------------------------------------------------------ empty states

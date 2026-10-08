@@ -1001,9 +1001,19 @@ public final class Engine {
     // ------------------------------------------------------------------ search
 
     public static final class SearchResult {
+        /** What clearly matches (IndexStore.Tiers), or the nearest few when nothing does ({@link #nearestOnly}). */
         public List<IndexStore.Hit> hits;
+        /** The less sure ones, shown on request. */
+        public List<IndexStore.Hit> more = new ArrayList<IndexStore.Hit>();
+        public boolean nearestOnly;
         public long millis;
         public String label;
+
+        void set(IndexStore.Tiers t) {
+            hits = t.sure;
+            more = t.more;
+            nearestOnly = t.nearestOnly;
+        }
     }
 
     public void search(final String query, final boolean photos, final boolean videos, final boolean notes,
@@ -1017,8 +1027,8 @@ public final class Engine {
                     boolean withNotes = notes && notesUsable;
                     QueryVectors qv = queryVectors(query, photos || videos, withNotes, bridgeMode());
                     SearchResult r = new SearchResult();
-                    r.hits = store.search(qv.media, mediaDims(), qv.notes, notesDims(), photos, videos, withNotes,
-                            photo == model, 90, -1);
+                    r.set(store.searchTiers(qv.media, mediaDims(), qv.notes, notesDims(), photos, videos, withNotes,
+                            photo == model, -1));
                     r.millis = System.currentTimeMillis() - t0;
                     r.label = "«" + query + "»" + (qv.english != null ? " → для фото «" + qv.english + "»" : "");
                     post(cb, r, null);
@@ -1175,7 +1185,7 @@ public final class Engine {
                     }
                     SearchResult r = new SearchResult();
                     boolean same = photo == model && notesUsable;
-                    r.hits = store.search(q, mediaDims(), q, mediaDims(), photos, videos, notes && same, true, 90, -1);
+                    r.set(store.searchTiers(q, mediaDims(), q, mediaDims(), photos, videos, notes && same, true, -1));
                     r.millis = System.currentTimeMillis() - t0;
                     r.label = "похожие на выбранное фото";
                     post(cb, r, null);
@@ -1197,8 +1207,8 @@ public final class Engine {
                 boolean same = photo != null && photo == model && notesUsable;
                 boolean note = item.kind == IndexStore.KIND_NOTE;
                 int dims = note ? notesDims() : mediaDims();
-                r.hits = store.search(item.emb, dims, item.emb, dims, (photos && (!note || same)), (videos && (!note || same)),
-                        notes && (note || same) && notesUsable, true, 90, item.id);
+                r.set(store.searchTiers(item.emb, dims, item.emb, dims, (photos && (!note || same)), (videos && (!note || same)),
+                        notes && (note || same) && notesUsable, true, item.id));
                 r.millis = System.currentTimeMillis() - t0;
                 r.label = "похожие";
                 post(cb, r, null);
@@ -1233,6 +1243,63 @@ public final class Engine {
                         throw new IllegalStateException("индекс построен другой моделью — переиндексируйте галерею");
                     }
                     post(cb, t.rank(item.emb), null);
+                } catch (Exception e) {
+                    post(cb, null, e);
+                }
+            }
+        });
+    }
+
+    /** An album by meaning (core.Albums): its name and pictures, best first. */
+    public static final class Album {
+        public final String name;
+        public final List<IndexStore.Item> items;
+
+        Album(String name, List<IndexStore.Item> items) {
+            this.name = name;
+            this.items = items;
+        }
+    }
+
+    private List<Album> albums;
+    private int albumsAt = -1;
+    private Embedder albumsModel;
+
+    /**
+     * Albums by meaning (assets/albums.txt, core.Albums) of the photos and videos in the index, biggest first; made
+     * again when the index has grown or shrunk by a tenth, or the model changed.
+     */
+    public void albums(final Callback<List<Album>> cb) {
+        ml.submit(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    requireModel();
+                    List<IndexStore.Item> media = store.media();
+                    if (albums == null || albumsModel != photo || Math.abs(media.size() - albumsAt) > Math.max(10, albumsAt / 10)) {
+                        PhotoTags t = photoTags();
+                        int dim = t.vecs.length > 0 ? t.vecs[0].length : 0;
+                        List<IndexStore.Item> usable = new ArrayList<IndexStore.Item>();
+                        List<float[]> vecs = new ArrayList<float[]>();
+                        for (IndexStore.Item it : media) {
+                            if (it.emb == null || it.emb.length != dim) continue;
+                            usable.add(it);
+                            vecs.add(it.emb);
+                        }
+                        if (usable.isEmpty() && !media.isEmpty()) throw new IllegalStateException("индекс построен другой моделью — переиндексируйте галерею");
+                        List<io.github.teoplaydor.semsearch.core.Albums.Def> defs =
+                                io.github.teoplaydor.semsearch.core.Albums.parse(ctx.getAssets().open("albums.txt"));
+                        List<Album> out = new ArrayList<Album>();
+                        for (io.github.teoplaydor.semsearch.core.Albums.Album a : io.github.teoplaydor.semsearch.core.Albums.build(defs, t, vecs)) {
+                            List<IndexStore.Item> items = new ArrayList<IndexStore.Item>(a.pictures.size());
+                            for (int i : a.pictures) items.add(usable.get(i));
+                            out.add(new Album(a.name, items));
+                        }
+                        albums = out;
+                        albumsAt = media.size();
+                        albumsModel = photo;
+                    }
+                    post(cb, albums, null);
                 } catch (Exception e) {
                     post(cb, null, e);
                 }
@@ -3141,7 +3208,7 @@ public final class Engine {
 
     /** "How many recent photos/videos" choices in the settings. */
     public static final int[] PHOTO_LIMITS = {100, 300, 1000, 3000, Integer.MAX_VALUE};
-    public static final int[] VIDEO_LIMITS = {0, 10, 30, 100};
+    public static final int[] VIDEO_LIMITS = {0, 10, 30, 100, 300, 1000, Integer.MAX_VALUE};
 
     public int photoLimit() {
         return PHOTO_LIMITS[Math.max(0, Math.min(PHOTO_LIMITS.length - 1, prefs.getInt("photo_limit", 4)))];

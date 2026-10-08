@@ -59,7 +59,7 @@ public class ViewerTest {
         Application app = RuntimeEnvironment.getApplication();
         File dir = new File(app.getCacheDir(), "media");
         assertTrue(dir.mkdirs());
-        for (int i = 0; i < 18; i++) {
+        for (int i = 0; i < 24; i++) {
             FakeMediaStore.ROWS.add(new FakeMediaStore.Row(100 + i, false, 1700000000L - i, "IMG_" + i + ".png", 64, 48,
                     AppIndexingTest.png(dir, i % 6)));
         }
@@ -75,7 +75,7 @@ public class ViewerTest {
         Robo.waitFor("ready", e::ready);
         e.startIndex(1000, 0);
         Robo.waitFor("indexed", () -> !e.indexing && e.idxTotal > 0);
-        assertEquals(18, e.store().count(IndexStore.KIND_PHOTO));
+        assertEquals(24, e.store().count(IndexStore.KIND_PHOTO));
         a.onEngineChanged();
         Robo.settle(800);
         View root = a.getWindow().getDecorView();
@@ -114,7 +114,26 @@ public class ViewerTest {
         Robo.waitFor("search", () -> String.valueOf(((TextView) Robo.field(a, "section")).getText()).startsWith("«собака»"));
         Robo.settle(700);
         assertNull(Robo.byName(root, "Viewer"));
-        System.out.println("search from the word: " + ((TextView) Robo.field(a, "section")).getText());
+        String found = String.valueOf(((TextView) Robo.field(a, "section")).getText());
+        System.out.println("search from the word: " + found);
+        // precise: the 4 dog photos of 24, not a fixed number of the nearest
+        assertTrue(found, found.equals("«собака» · 4") || found.startsWith("«собака» · 4 · ещё "));
+        @SuppressWarnings("unchecked")
+        List<IndexStore.Item> dogs = (List<IndexStore.Item>) Robo.call(Robo.field(a, "gallery"), "items");
+        assertEquals(4, dogs.size());
+        for (IndexStore.Item it : dogs) assertTrue(Arrays.equals(it.emb, dog));
+
+        // albums by meaning: «Собаки» with the 4 dog photos, opened as results
+        Robo.call(a, "showAlbums");
+        Robo.waitFor("albums", () -> textView(Robo.byName(root, "Sheet"), "Собаки") != null);
+        Robo.settle(300);
+        System.out.println("albums: " + Robo.allText(Robo.byName(root, "Sheet")).replace('\n', ' '));
+        TextView dogsAlbum = textView(Robo.byName(root, "Sheet"), "Собаки");
+        ((View) dogsAlbum.getParent().getParent()).performClick();
+        Robo.settle(700);
+        assertEquals("Альбом «Собаки» · 4", String.valueOf(((TextView) Robo.field(a, "section")).getText()));
+        a.onBackPressed();
+        Robo.settle(500);
 
         // a short swipe up: the photo comes back to the middle; a long one up — the viewer closes; the same down
         a.onBackPressed();

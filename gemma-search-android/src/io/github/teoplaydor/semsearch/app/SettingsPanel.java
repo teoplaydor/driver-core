@@ -497,8 +497,10 @@ final class SettingsPanel extends FrameLayout implements Engine.Listener {
         videosValue = row(card, "Видео", null, new Runnable() {
             @Override
             public void run() {
-                Sheet.choose(root(), "Видео", new String[]{"Не индексировать", "Последние 10", "Последние 30", "Последние 100"},
-                        new String[]{null, "по " + Engine.VIDEO_FRAMES + " кадра из каждого", null, null},
+                Sheet.choose(root(), "Видео", new String[]{"Не индексировать", "Последние 10", "Последние 30", "Последние 100",
+                                "Последние 300", "Последние 1000", "Все"},
+                        new String[]{null, "по " + Engine.VIDEO_FRAMES + " кадра из каждого", null, null, null, null,
+                                "видео, которое не открывается за минуту, пропускается"},
                         e.prefs().getInt("video_limit", 1), new Sheet.Choice() {
                             @Override
                             public void chosen(int i) {
@@ -925,7 +927,7 @@ final class SettingsPanel extends FrameLayout implements Engine.Listener {
         int pl = e.prefs().getInt("photo_limit", 4);
         photosValue.setText(pl >= 4 ? "все" : Engine.PHOTO_LIMITS[pl] + " последних");
         int vl = e.prefs().getInt("video_limit", 1);
-        videosValue.setText(vl == 0 ? "нет" : Engine.VIDEO_LIMITS[vl] + " последних");
+        videosValue.setText(vl == 0 ? "нет" : vl >= Engine.VIDEO_LIMITS.length - 1 ? "все" : Engine.VIDEO_LIMITS[vl] + " последних");
         detailValue.setText(new String[]{"быстрая", "средняя", "максимальная", "авто"}[Math.max(0, Math.min(3,
                 e.prefs().getInt("photo_detail", Engine.DETAIL_AUTO)))]);
         accelValue.setText(shortAccel(fast ? (e.accelLabel.isEmpty() ? "проверяю…" : e.accelLabel) : Engine.ACCEL_NAMES[e.accel()]));

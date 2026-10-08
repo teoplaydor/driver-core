@@ -218,6 +218,101 @@ public final class IndexStore {
         return all.size() > limit ? new ArrayList<Hit>(all.subList(0, limit)) : all;
     }
 
+    /**
+     * Search results in two tiers: what clearly stands out from a typical item, and the less sure rest (shown on
+     * request). There is no fixed count: as many as stand out.
+     */
+    public static final class Tiers {
+        public final List<Hit> sure = new ArrayList<Hit>(), more = new ArrayList<Hit>();
+        /** Nothing stood out: {@link #sure} holds the nearest few instead. */
+        public boolean nearestOnly;
+    }
+
+    /**
+     * An item stands out at {@link #SURE_Z} robust deviations above the median similarity of its group (photos and
+     * videos, or notes): the median and the median absolute deviation (×1.4826) over every item, so the items that do
+     * match do not widen the spread. From {@link #MORE_Z}, less sure. A group under {@link #SMALL_GROUP} items has no
+     * typical item to tell: all of it, by score.
+     */
+    public static final double SURE_Z = 3.5, MORE_Z = 2.0;
+    static final int SMALL_GROUP = 20, NEAREST = 6, MORE_MAX = 600;
+    /** The least spread taken as real (cosines): a gallery of near-copies has none. */
+    static final float MIN_SPREAD = 0.02f;
+
+    public synchronized Tiers searchTiers(float[] qMedia, int mediaDims, float[] qNotes, int notesDims, boolean photos,
+                                          boolean videos, boolean notes, boolean sameSpace, long excludeId) {
+        List<Hit> media = (photos || videos) && qMedia != null
+                ? rank(qMedia, mediaDims, photos, videos, false, excludeId) : new ArrayList<Hit>();
+        List<Hit> nt = notes && qNotes != null ? rank(qNotes, notesDims, false, false, true, excludeId) : new ArrayList<Hit>();
+        Tiers tm = tiers(media), tn = tiers(nt), out = new Tiers();
+        List<Hit> sureM = new ArrayList<Hit>(), sureN = new ArrayList<Hit>(), moreM = new ArrayList<Hit>(tm.more),
+                moreN = new ArrayList<Hit>(tn.more);
+        boolean any = (!tm.nearestOnly && !tm.sure.isEmpty()) || (!tn.nearestOnly && !tn.sure.isEmpty());
+        if (any) {
+            // a group with nothing standing out gives its nearest to "more", not to the results
+            if (tm.nearestOnly) moreM.addAll(0, tm.sure);
+            else sureM.addAll(tm.sure);
+            if (tn.nearestOnly) moreN.addAll(0, tn.sure);
+            else sureN.addAll(tn.sure);
+        } else {
+            out.nearestOnly = !tm.sure.isEmpty() || !tn.sure.isEmpty();
+            sureM.addAll(tm.sure);
+            sureN.addAll(tn.sure);
+        }
+        out.sure.addAll(merge(sureM, sureN, sameSpace));
+        out.more.addAll(merge(moreM, moreN, sameSpace));
+        return out;
+    }
+
+    /** One group's tiers ({@code sorted} by score, best first). */
+    static Tiers tiers(List<Hit> sorted) {
+        Tiers t = new Tiers();
+        int n = sorted.size();
+        if (n == 0) return t;
+        if (n < SMALL_GROUP) {
+            t.sure.addAll(sorted);
+            return t;
+        }
+        float median = sorted.get(n / 2).score;
+        float[] dev = new float[n];
+        for (int i = 0; i < n; i++) dev[i] = Math.abs(sorted.get(i).score - median);
+        java.util.Arrays.sort(dev);
+        double sd = Math.max(MIN_SPREAD, 1.4826 * dev[n / 2]);
+        for (Hit h : sorted) {
+            double z = (h.score - median) / sd;
+            if (z >= SURE_Z) t.sure.add(h);
+            else if (z >= MORE_Z && t.more.size() < MORE_MAX) t.more.add(h);
+            else break;
+        }
+        if (t.sure.isEmpty()) {
+            t.nearestOnly = true;
+            for (int i = 0; i < Math.min(NEAREST, n); i++) t.sure.add(sorted.get(i));
+            t.more.removeAll(t.sure);
+        }
+        return t;
+    }
+
+    /** Photos/videos and notes together: by score in one space, else interleaved by reciprocal rank. */
+    private static List<Hit> merge(List<Hit> media, List<Hit> nt, boolean sameSpace) {
+        List<Hit> all = new ArrayList<Hit>(media.size() + nt.size());
+        all.addAll(media);
+        all.addAll(nt);
+        if (sameSpace || media.isEmpty() || nt.isEmpty()) {
+            Collections.sort(all, BY_SCORE);
+            return all;
+        }
+        final java.util.IdentityHashMap<Hit, Double> rrf = new java.util.IdentityHashMap<Hit, Double>();
+        for (int i = 0; i < media.size(); i++) rrf.put(media.get(i), 1.0 / (10 + i));
+        for (int i = 0; i < nt.size(); i++) rrf.put(nt.get(i), 1.0 / (10 + i));
+        Collections.sort(all, new Comparator<Hit>() {
+            @Override
+            public int compare(Hit a, Hit b) {
+                return Double.compare(rrf.get(b), rrf.get(a));
+            }
+        });
+        return all;
+    }
+
     private static final Comparator<Hit> BY_SCORE = new Comparator<Hit>() {
         @Override
         public int compare(Hit a, Hit b) {

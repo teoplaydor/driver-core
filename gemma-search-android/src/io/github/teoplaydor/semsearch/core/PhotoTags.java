@@ -34,7 +34,7 @@ public final class PhotoTags {
     /** Below this many pictures in the gallery sample, words are scored against the picture's own similarities. */
     public static final int MIN_SAMPLE = 8;
     /** The least spread of a word's similarity taken as real (cosines). */
-    static final double MIN_SPREAD = 0.01;
+    static final double MIN_SPREAD = 0.02;
 
     public final String[] en, ru;
     public final float[][] vecs;
