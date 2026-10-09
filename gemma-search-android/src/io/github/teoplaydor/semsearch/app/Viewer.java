@@ -10,6 +10,7 @@ import android.graphics.RectF;
 import android.graphics.drawable.GradientDrawable;
 import android.media.MediaPlayer;
 import android.net.Uri;
+import android.util.TypedValue;
 import android.view.Gravity;
 import android.view.MotionEvent;
 import android.view.VelocityTracker;
@@ -26,6 +27,8 @@ import android.widget.VideoView;
 import java.text.DateFormat;
 import java.util.Date;
 import java.util.List;
+
+import io.github.teoplaydor.semsearch.core.NoteText;
 
 /**
  * Full-screen viewer over the gallery: grows out of the tapped tile, swipes left/right through the
@@ -92,6 +95,29 @@ final class Viewer extends FrameLayout {
 
         /** Closes the viewer and shows the album. */
         void openAlbum(Engine.Album a);
+
+        /** The note changed in its editor. */
+        void editNote(IndexStore.Item note);
+
+        /** A note to this photo (a new one, or one of those it has). */
+        void noteToPhoto(IndexStore.Item photo);
+
+        /** How many notes the photo has. */
+        int notesOf(IndexStore.Item photo);
+
+        /** The photo the note was made to, if it is in the gallery. */
+        IndexStore.Item linkedPhoto(IndexStore.Item note);
+
+        /** That photo shown (the note's viewer gives way to it). */
+        void openPhoto(IndexStore.Item photo);
+
+        /** A box of the note ticked or unticked. */
+        void tick(IndexStore.Item note, int line);
+
+        void setPinned(IndexStore.Item note, boolean pinned);
+
+        /** A reminder of the note chosen (or taken away). */
+        void remind(IndexStore.Item note);
     }
 
     private final Host host;
@@ -358,7 +384,7 @@ final class Viewer extends FrameLayout {
         final IndexStore.Item it = items.get(index);
         Context c = getContext();
         title.setText(DateFormat.getDateInstance(DateFormat.LONG).format(new Date(it.date)));
-        subtitle.setText(it.kind == IndexStore.KIND_NOTE ? "Заметка" : it.title != null ? it.title : "");
+        subtitle.setText(it.kind == IndexStore.KIND_NOTE ? noteState(it) : it.title != null ? it.title : "");
         actions.removeAllViews();
         loadFaces(it);
         if (it.kind == IndexStore.KIND_NOTE) {
@@ -379,6 +405,25 @@ final class Viewer extends FrameLayout {
             }
         });
         if (it.kind == IndexStore.KIND_NOTE) {
+            action(Icon.EDIT, "Изменить", new Runnable() {
+                @Override
+                public void run() {
+                    host.editNote(it);
+                }
+            });
+            action(Icon.PIN, it.pinned ? "Открепить" : "Закрепить", new Runnable() {
+                @Override
+                public void run() {
+                    host.setPinned(it, !it.pinned);
+                    updateChrome();
+                }
+            });
+            action(Icon.BELL, it.remind > 0 ? "Напоминание" : "Напомнить", new Runnable() {
+                @Override
+                public void run() {
+                    host.remind(it);
+                }
+            });
             action(Icon.TRASH, "Удалить", new Runnable() {
                 @Override
                 public void run() {
@@ -403,6 +448,13 @@ final class Viewer extends FrameLayout {
                     }
                 });
             }
+            int notes = host.notesOf(it);
+            action(Icon.NOTE, notes == 0 ? "Заметка" : "Заметки · " + notes, new Runnable() {
+                @Override
+                public void run() {
+                    host.noteToPhoto(it);
+                }
+            });
             action(Icon.OPEN, "Открыть", new Runnable() {
                 @Override
                 public void run() {
@@ -410,6 +462,22 @@ final class Viewer extends FrameLayout {
                 }
             });
         }
+    }
+
+    /** «Заметка», and whether it is pinned, when it reminds, when it was changed. */
+    private static String noteState(IndexStore.Item it) {
+        StringBuilder b = new StringBuilder("Заметка");
+        if (it.pinned) b.append(" · закреплена");
+        if (it.remind > 0) b.append(" · напомнит ").append(NoteEditor.when(it.remind));
+        if (it.edited > 0) b.append(" · изменена ").append(DateFormat.getDateInstance(DateFormat.MEDIUM).format(new Date(it.edited)));
+        return b.toString();
+    }
+
+    /** The note shown again (changed in its editor, pinned, its reminder set). */
+    void refreshNote() {
+        if (items.isEmpty()) return;
+        pages[1].bind(items.get(index));
+        updateChrome();
     }
 
     /** The photo shown. */
@@ -606,8 +674,18 @@ final class Viewer extends FrameLayout {
         b.addView(Ui.icon(c, icon, Ui.TEXT, 26), new LinearLayout.LayoutParams(Ui.dp(c, 26), Ui.dp(c, 26)));
         TextView t = Ui.text(c, label, 11.5f, Ui.TEXT2, Ui.MEDIUM);
         t.setGravity(Gravity.CENTER);
-        t.setPadding(0, Ui.dp(c, 6), 0, 0);
-        b.addView(t);
+        t.setPadding(Ui.dp(c, 2), Ui.dp(c, 6), Ui.dp(c, 2), 0);
+        // one line: with six actions in the row a long word gets smaller rather than broken in two
+        t.setMaxLines(1);
+        float sp = c.getResources().getDisplayMetrics().scaledDensity;
+        try {
+            // TextView.setAutoSizeTextTypeUniformWithConfiguration (API 26, newer than the platform built against)
+            TextView.class.getMethod("setAutoSizeTextTypeUniformWithConfiguration", int.class, int.class, int.class, int.class)
+                    .invoke(t, Math.round(9 * sp), Math.round(11.5f * sp), 1, TypedValue.COMPLEX_UNIT_PX);
+        } catch (Exception e) {
+            // the label as it is
+        }
+        b.addView(t, new LinearLayout.LayoutParams(-1, -2));
         b.setOnClickListener(new OnClickListener() {
             @Override
             public void onClick(View v) {
@@ -705,20 +783,55 @@ final class Viewer extends FrameLayout {
             }
         }
 
-        private void showNote(IndexStore.Item it) {
-            Context c = getContext();
+        private void showNote(final IndexStore.Item it) {
+            final Context c = getContext();
             noteView = new ScrollView(c);
             noteView.setFillViewport(true);
             noteView.setVerticalScrollBarEnabled(false);
             FrameLayout holder = new FrameLayout(c);
-            TextView t = Ui.text(c, it.body, 19, Ui.TEXT, Ui.REGULAR);
-            t.setLineSpacing(0, 1.35f);
-            t.setTextIsSelectable(true);
-            t.setBackground(Ui.round(c, Ui.NOTE, 24));
-            t.setPadding(Ui.dp(c, 24), Ui.dp(c, 24), Ui.dp(c, 24), Ui.dp(c, 24));
+            LinearLayout card = new LinearLayout(c);
+            card.setOrientation(LinearLayout.VERTICAL);
+            card.setBackground(Ui.round(c, Ui.NOTE, 24));
+            card.setPadding(Ui.dp(c, 24), Ui.dp(c, 20), Ui.dp(c, 24), Ui.dp(c, 22));
+            // the photo it was made to: tap — the photo
+            final IndexStore.Item photo = host.linkedPhoto(it);
+            if (photo != null) {
+                LinearLayout to = new LinearLayout(c);
+                to.setGravity(Gravity.CENTER_VERTICAL);
+                to.setPadding(0, 0, 0, Ui.dp(c, 14));
+                MasonryView.Thumb thumb = new MasonryView.Thumb(c);
+                Bitmap b = host.thumb(photo);
+                if (b != null) thumb.setImageBitmap(b);
+                to.addView(thumb, new LinearLayout.LayoutParams(Ui.dp(c, 64), Ui.dp(c, 64)));
+                TextView tl = Ui.text(c, "К фото ›", 13.5f, Ui.TEXT2, Ui.MEDIUM);
+                tl.setPadding(Ui.dp(c, 12), 0, 0, 0);
+                to.addView(tl);
+                to.setOnClickListener(new OnClickListener() {
+                    @Override
+                    public void onClick(View v) {
+                        host.openPhoto(photo);
+                    }
+                });
+                card.addView(to);
+            }
+            // the text: a list's items with boxes to tick, the rest as text to select and copy
+            String[] lines = NoteText.lines(it.body);
+            StringBuilder run = new StringBuilder();
+            for (int i = 0; i <= lines.length; i++) {
+                int box = i < lines.length ? NoteText.box(lines[i]) : 0;
+                if (i == lines.length || box != 0) {
+                    String t = run.toString().replaceAll("^\\n+|\\n+$", "");
+                    if (!t.isEmpty()) card.addView(noteText(c, t));
+                    run.setLength(0);
+                    if (i < lines.length) card.addView(item(c, it, i, NoteText.rest(lines[i]), box == 2));
+                    continue;
+                }
+                if (run.length() > 0) run.append('\n');
+                run.append(lines[i]);
+            }
             FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(-1, -2, Gravity.CENTER);
             lp.setMargins(Ui.dp(c, 20), Ui.dp(c, 90), Ui.dp(c, 20), Ui.dp(c, 110));
-            holder.addView(t, lp);
+            holder.addView(card, lp);
             holder.setOnClickListener(new OnClickListener() {
                 @Override
                 public void onClick(View v) {
@@ -727,6 +840,43 @@ final class Viewer extends FrameLayout {
             });
             noteView.addView(holder, new ScrollView.LayoutParams(-1, -1));
             addView(noteView, new LayoutParams(-1, -1));
+        }
+
+        private TextView noteText(Context c, String t) {
+            TextView v = Ui.text(c, t, 19, Ui.TEXT, Ui.REGULAR);
+            v.setLineSpacing(0, 1.35f);
+            v.setTextIsSelectable(true);
+            v.setPadding(0, Ui.dp(c, 4), 0, Ui.dp(c, 4));
+            return v;
+        }
+
+        /** A list's item: its box (ticked: dimmed and struck through); a tap ticks or unticks it. */
+        private View item(Context c, final IndexStore.Item it, final int line, String text, boolean done) {
+            LinearLayout row = new LinearLayout(c);
+            row.setGravity(Gravity.CENTER_VERTICAL);
+            row.setPadding(0, Ui.dp(c, 6), 0, Ui.dp(c, 6));
+            TextView box = new TextView(c);
+            box.setGravity(Gravity.CENTER);
+            box.setBackground(done ? Ui.round(c, Ui.ACCENT, 7) : Ui.outline(c, 0x00000000, Ui.TEXT2, 7));
+            if (done) {
+                box.setCompoundDrawablesWithIntrinsicBounds(new Icon(Icon.CHECK, Ui.ON_ACCENT, Ui.dp(c, 2.2f)), null, null, null);
+                box.setPadding(Ui.dp(c, 1), 0, 0, 0);
+            }
+            row.addView(box, new LinearLayout.LayoutParams(Ui.dp(c, 24), Ui.dp(c, 24)));
+            TextView t = Ui.text(c, text, 19, done ? Ui.TEXT3 : Ui.TEXT, Ui.REGULAR);
+            if (done) t.setPaintFlags(t.getPaintFlags() | android.graphics.Paint.STRIKE_THRU_TEXT_FLAG);
+            t.setPadding(Ui.dp(c, 14), 0, 0, 0);
+            row.addView(t, new LinearLayout.LayoutParams(0, -2, 1));
+            row.setContentDescription((done ? "Сделано: " : "Сделать: ") + text);
+            row.setOnClickListener(new OnClickListener() {
+                @Override
+                public void onClick(View v) {
+                    host.tick(it, line);
+                    bind(it);
+                }
+            });
+            Ui.pressable(row);
+            return row;
         }
 
         void startVideo() {

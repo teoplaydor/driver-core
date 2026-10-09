@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The app icon's long-press menu: a new note, a note dictated at once. -->
+<shortcuts xmlns:android="http://schemas.android.com/apk/res/android">
+    <shortcut
+        android:enabled="true"
+        android:icon="@drawable/ic_shortcut_note"
+        android:shortcutId="new_note"
+        android:shortcutLongLabel="@string/shortcut_note_long"
+        android:shortcutShortLabel="@string/shortcut_note">
+        <intent
+            android:action="io.github.teoplaydor.semsearch.NEW_NOTE"
+            android:targetClass="io.github.teoplaydor.semsearch.app.MainActivity"
+            android:targetPackage="io.github.teoplaydor.semsearch" />
+    </shortcut>
+    <shortcut
+        android:enabled="true"
+        android:icon="@drawable/ic_shortcut_voice"
+        android:shortcutId="voice_note"
+        android:shortcutLongLabel="@string/shortcut_voice_long"
+        android:shortcutShortLabel="@string/shortcut_voice">
+        <intent
+            android:action="io.github.teoplaydor.semsearch.NEW_NOTE"
+            android:targetClass="io.github.teoplaydor.semsearch.app.MainActivity"
+            android:targetPackage="io.github.teoplaydor.semsearch">
+            <extra
+                android:name="voice"
+                android:value="true" />
+        </intent>
+    </shortcut>
+</shortcuts>

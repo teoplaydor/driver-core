@@ -446,7 +446,11 @@ final class MasonryView extends ViewGroup {
         t.setScaleX(1f);
         t.setScaleY(1f);
         IndexStore.Item it = items.get(i);
-        t.badge.setVisibility(it.kind == IndexStore.KIND_VIDEO ? VISIBLE : GONE);
+        // a video's play mark; a pinned note's pin
+        boolean pin = it.kind == IndexStore.KIND_NOTE && it.pinned;
+        t.badge.setVisibility(it.kind == IndexStore.KIND_VIDEO || pin ? VISIBLE : GONE);
+        t.badge.setImageDrawable(new Icon(pin ? Icon.PIN : Icon.VIDEO, pin ? Ui.ACCENT : 0xFFE6ECF2, Ui.dp(getContext(), 1.7f)));
+        t.badge.setBackground(pin ? null : Ui.round(getContext(), 0x66000000, 13));
         if (it.kind == IndexStore.KIND_NOTE) {
             t.setBackground(Ui.round(getContext(), Ui.NOTE, 10));
             t.img.setVisibility(GONE);

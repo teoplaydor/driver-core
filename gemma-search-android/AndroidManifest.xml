@@ -15,6 +15,11 @@
     <uses-permission android:name="android.permission.WAKE_LOCK" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+    <!-- reminders of notes at the minute set -->
+    <uses-permission
+        android:name="android.permission.SCHEDULE_EXACT_ALARM"
+        android:maxSdkVersion="32" />
+    <uses-permission android:name="android.permission.USE_EXACT_ALARM" />
 
     <application
         android:allowBackup="false"
@@ -49,7 +54,23 @@
                 <category android:name="android.intent.category.DEFAULT" />
                 <data android:mimeType="text/plain" />
             </intent-filter>
+            <!-- long press on the app's icon: a new note, a note by voice -->
+            <meta-data
+                android:name="android.app.shortcuts"
+                android:resource="@xml/shortcuts" />
         </activity>
+        <!-- text shared from any app straight into a new note -->
+        <activity-alias
+            android:name=".app.ToNotes"
+            android:exported="true"
+            android:label="@string/to_notes_label"
+            android:targetActivity=".app.MainActivity">
+            <intent-filter>
+                <action android:name="android.intent.action.SEND" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="text/plain" />
+            </intent-filter>
+        </activity-alias>
         <!-- the vision encoder on the Snapdragon NPU: its own ONNX Runtime build (QNN), its own process -->
         <service
             android:name=".app.NpuService"
@@ -67,6 +88,9 @@
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
                 android:value="On-device indexing of the user's own photos while the phone is not in use" />
         </service>
+        <receiver
+            android:name=".app.Reminders"
+            android:exported="false" />
         <receiver
             android:name=".app.BootReceiver"
             android:exported="true">

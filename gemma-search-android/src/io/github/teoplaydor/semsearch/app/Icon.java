@@ -13,7 +13,8 @@ import android.graphics.drawable.Drawable;
 final class Icon extends Drawable {
     static final int SEARCH = 0, CLOSE = 1, BACK = 2, TUNE = 3, IMAGE = 4, SHARE = 5, OPEN = 6, SIMILAR = 7, PLAY = 8,
             PLUS = 9, NOTE = 10, TRASH = 11, CHECK = 12, CHEVRON = 13, STOP = 14, DOWNLOAD = 15, VIDEO = 16, INFO = 17,
-            GRID = 18, TAG = 19, ALBUMS = 20, HIDE = 21, SHOW = 22, LOCK = 23, PERSON = 24, SCAN = 25;
+            GRID = 18, TAG = 19, ALBUMS = 20, HIDE = 21, SHOW = 22, LOCK = 23, PERSON = 24, SCAN = 25, EDIT = 26, PIN = 27,
+            BELL = 28, MIC = 29, LIST = 30;
 
     private final int kind;
     private final Paint p = new Paint(Paint.ANTI_ALIAS_FLAG);
@@ -241,6 +242,59 @@ final class Icon extends Drawable {
                 line(c, 12, 4.5f, 12, 15);
                 poly(c, 7.5f, 10.5f, 12, 15, 16.5f, 10.5f);
                 line(c, 5.5f, 19, 18.5f, 19);
+                break;
+            case EDIT: // a pencil
+                path.moveTo(5, 19);
+                path.lineTo(5.8f, 15.2f);
+                path.lineTo(15.5f, 5.5f);
+                path.lineTo(18.5f, 8.5f);
+                path.lineTo(8.8f, 18.2f);
+                path.close();
+                c.drawPath(path, p);
+                line(c, 13.5f, 7.5f, 16.5f, 10.5f);
+                break;
+            case PIN: // a push pin: kept first
+                path.moveTo(9, 4.5f);
+                path.lineTo(15, 4.5f);
+                path.lineTo(14, 10);
+                path.lineTo(17, 13.5f);
+                path.lineTo(7, 13.5f);
+                path.lineTo(10, 10);
+                path.close();
+                c.drawPath(path, p);
+                line(c, 12, 13.5f, 12, 20);
+                break;
+            case BELL: // a bell: a reminder
+                path.moveTo(6, 16.5f);
+                path.lineTo(6, 11);
+                path.quadTo(6, 5.5f, 12, 5.5f);
+                path.quadTo(18, 5.5f, 18, 11);
+                path.lineTo(18, 16.5f);
+                path.lineTo(19.5f, 17.5f);
+                path.lineTo(4.5f, 17.5f);
+                path.close();
+                c.drawPath(path, p);
+                line(c, 10.3f, 20, 13.7f, 20);
+                line(c, 12, 3.5f, 12, 5.5f);
+                break;
+            case MIC: // a microphone: dictation
+                r.set(9, 3.5f, 15, 14);
+                c.drawRoundRect(r, 3, 3, p);
+                path.moveTo(6, 11);
+                path.quadTo(6, 17.5f, 12, 17.5f);
+                path.quadTo(18, 17.5f, 18, 11);
+                c.drawPath(path, p);
+                line(c, 12, 17.5f, 12, 20.5f);
+                break;
+            case LIST: // boxes with lines: a list to tick off
+                r.set(4, 5, 8, 9);
+                c.drawRoundRect(r, 1, 1, p);
+                r.set(4, 15, 8, 19);
+                c.drawRoundRect(r, 1, 1, p);
+                poly(c, 4.8f, 16.8f, 5.8f, 18, 7.6f, 15.6f);
+                line(c, 11, 7, 20, 7);
+                line(c, 11, 17, 20, 17);
+                line(c, 11, 12, 17, 12);
                 break;
             case INFO:
                 c.drawCircle(12, 12, 8, p);

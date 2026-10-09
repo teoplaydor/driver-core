@@ -2,4 +2,9 @@
 <resources>
     <string name="app_name">Смысловой поиск</string>
     <string name="share_label">Найти похожее</string>
+    <string name="to_notes_label">В заметки</string>
+    <string name="shortcut_note">Заметка</string>
+    <string name="shortcut_note_long">Новая заметка</string>
+    <string name="shortcut_voice">Голосом</string>
+    <string name="shortcut_voice_long">Заметка голосом</string>
 </resources>

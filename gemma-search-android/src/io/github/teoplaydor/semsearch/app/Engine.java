@@ -29,6 +29,7 @@ import io.github.teoplaydor.semsearch.core.ImagePreprocessor;
 import io.github.teoplaydor.semsearch.core.LiteRtEmbedder;
 import io.github.teoplaydor.semsearch.core.LiteRtRuntime;
 import io.github.teoplaydor.semsearch.core.ModelConfig;
+import io.github.teoplaydor.semsearch.core.NoteText;
 import io.github.teoplaydor.semsearch.core.OnnxPatcher;
 import io.github.teoplaydor.semsearch.core.OrtProfile;
 import io.github.teoplaydor.semsearch.core.PatternSource;
@@ -214,6 +215,7 @@ public final class Engine {
                 // what is hidden is hidden from the first frame on, before any model is loaded
                 applyHidden(s);
                 store = s;
+                restoreReminders(s);
                 faceStore = new FaceStore(Engine.this.ctx);
                 scanFaces();
                 try {
@@ -295,6 +297,7 @@ public final class Engine {
                 notesUsable = true;
                 state = State.READY;
                 status = "test model";
+                embedWaitingNotes();
                 notifyChanged();
                 refreshAdult();
             }
@@ -564,9 +567,10 @@ public final class Engine {
             }
             if (notesSig != null && !notesSig.equals(prefs.getString("notes_sig", ""))) {
                 step = "переиндексация заметок";
-                for (IndexStore.Item n : store.notes()) store.updateEmbedding(n, model.embedDocument(n.body));
+                for (IndexStore.Item n : store.notes()) store.updateEmbedding(n, model.embedDocument(NoteText.plain(n.body)));
                 prefs.edit().putString("notes_sig", notesSig).apply();
             }
+            embedWaitingNotes();
             notesUsable = notesSig != null;
             loadedFull = full;
             state = State.READY;
@@ -1038,6 +1042,7 @@ public final class Engine {
                     SearchResult r = new SearchResult();
                     r.set(store.searchTiers(qv.media, mediaDims(), qv.notes, notesDims(), photos, videos, withNotes,
                             photo == model, -1));
+                    if (notes) withWords(r, query);
                     r.millis = System.currentTimeMillis() - t0;
                     r.label = "«" + query + "»" + (qv.english != null ? " → для фото «" + qv.english + "»" : "");
                     post(cb, r, null);
@@ -1046,6 +1051,35 @@ public final class Engine {
                 }
             }
         });
+    }
+
+    /**
+     * The notes that have the query's words as they are (a code, a name, the start of a word: what meaning alone may
+     * miss) first among the results; the rest as they were.
+     */
+    private void withWords(SearchResult r, String query) {
+        List<IndexStore.Hit> exact = new ArrayList<IndexStore.Hit>();
+        java.util.Set<Long> ids = new java.util.HashSet<Long>();
+        for (IndexStore.Item n : store.notes()) {
+            if (NoteText.hasWords(n.body, query)) {
+                exact.add(new IndexStore.Hit(n, 1f));
+                ids.add(n.id);
+            }
+        }
+        if (exact.isEmpty()) return;
+        List<IndexStore.Hit> rest = new ArrayList<IndexStore.Hit>();
+        for (IndexStore.Hit h : r.hits) if (!ids.contains(h.item.id)) rest.add(h);
+        List<IndexStore.Hit> more = new ArrayList<IndexStore.Hit>();
+        for (IndexStore.Hit h : r.more) if (!ids.contains(h.item.id)) more.add(h);
+        if (r.nearestOnly) {
+            // nothing matched by meaning: those nearest go to «more», the notes with the words are the results
+            more.addAll(0, rest);
+            rest.clear();
+            r.nearestOnly = false;
+        }
+        exact.addAll(rest);
+        r.hits = exact;
+        r.more = more;
     }
 
     public int bridgeMode() {
@@ -1210,6 +1244,11 @@ public final class Engine {
         ml.submit(new Runnable() {
             @Override
             public void run() {
+                if (item.emb.length == 0) {
+                    // a note written before the model was loaded: what it means is not known yet
+                    post(cb, null, new IllegalStateException("модель ещё не загружена"));
+                    return;
+                }
                 long t0 = System.currentTimeMillis();
                 SearchResult r = new SearchResult();
                 // Notes and pictures are only comparable when one model embedded both.
@@ -2234,13 +2273,27 @@ public final class Engine {
     // ------------------------------------------------------------------ notes
 
     public void addNote(final String text, final Callback<IndexStore.Item> cb) {
+        addNote(text, null, false, 0, cb);
+    }
+
+    /**
+     * A new note — to a photo or video when {@code to} is one (it shows with it), pinned, with a reminder at
+     * {@code remind} (0: none). Written at once; its vector (what it means, for search) made now when the model is
+     * loaded, else once it is.
+     */
+    public void addNote(final String text, final IndexStore.Item to, final boolean pinned, final long remind,
+                        final Callback<IndexStore.Item> cb) {
         ml.submit(new Runnable() {
             @Override
             public void run() {
                 try {
-                    requireModel();
-                    float[] e = model.embedDocument(text);
-                    IndexStore.Item it = store.add(IndexStore.KIND_NOTE, -1, null, null, text, System.currentTimeMillis(), e);
+                    IndexStore.Item it = store.add(IndexStore.KIND_NOTE, to != null ? to.mediaId : -1, to != null ? to.uri : null,
+                            null, text, System.currentTimeMillis(), noteVector(text));
+                    if (pinned) store.setPinned(it, true);
+                    if (remind > 0) {
+                        store.setRemind(it, remind);
+                        Reminders.schedule(ctx, it);
+                    }
                     post(cb, it, null);
                     notifyChanged();
                 } catch (Exception e) {
@@ -2250,7 +2303,116 @@ public final class Engine {
         });
     }
 
+    /** A note's new text: its vector again when what it says changed (ticking a box does not change that). */
+    public void updateNote(final IndexStore.Item it, final String text, final Callback<IndexStore.Item> cb) {
+        ml.submit(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    boolean same = it.emb.length > 0 && NoteText.plain(text).equals(NoteText.plain(it.body));
+                    store.updateNote(it, text, same ? it.emb : noteVector(text), System.currentTimeMillis());
+                    if (it.remind > 0) Reminders.schedule(ctx, it); // the notification shows the new text
+                    post(cb, it, null);
+                    notifyChanged();
+                } catch (Exception e) {
+                    post(cb, null, e);
+                }
+            }
+        });
+    }
+
+    /** A box of the note ticked or unticked: the text changed at once (in memory), written behind. */
+    public void tick(final IndexStore.Item it, int line) {
+        final String body = NoteText.toggle(it.body, line);
+        it.body = body;
+        ml.submit(new Runnable() {
+            @Override
+            public void run() {
+                store.updateBody(it, body);
+                notifyChanged();
+            }
+        });
+    }
+
+    public void setPinned(final IndexStore.Item it, final boolean pinned) {
+        it.pinned = pinned;
+        ml.submit(new Runnable() {
+            @Override
+            public void run() {
+                store.setPinned(it, pinned);
+                notifyChanged();
+            }
+        });
+    }
+
+    /** A reminder of the note at {@code at} (0: none any more). */
+    public void setReminder(final IndexStore.Item it, final long at) {
+        it.remind = at;
+        ml.submit(new Runnable() {
+            @Override
+            public void run() {
+                store.setRemind(it, at);
+                Reminders.schedule(ctx, it);
+                notifyChanged();
+            }
+        });
+    }
+
+    /** {@code r} run on the model's thread once the index is open (and the reminders set again). */
+    void afterOpen(Runnable r) {
+        ml.submit(r);
+    }
+
+    /** A reminder set for {@code at} went off (Reminders): none set on the note any more, if it is still that one. */
+    void reminded(final long id, final long at, final Runnable then) {
+        ml.submit(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    IndexStore.Item it = store == null ? null : store.find(id);
+                    if (it != null && it.remind > 0 && it.remind == at) {
+                        store.setRemind(it, 0);
+                        notifyChanged();
+                    }
+                } finally {
+                    then.run();
+                }
+            }
+        });
+    }
+
+    /** Reminders set again when the app starts (alarms do not outlive a reboot); those missed meanwhile shown now. */
+    private void restoreReminders(IndexStore s) {
+        long now = System.currentTimeMillis();
+        for (IndexStore.Item it : s.reminders()) {
+            if (it.remind > now) {
+                Reminders.schedule(ctx, it);
+            } else {
+                Reminders.notify(ctx, it.id, it.body);
+                s.setRemind(it, 0);
+            }
+        }
+    }
+
+    /** Notes written before the model was there: what they mean, now (on the model's thread, the model loaded). */
+    private void embedWaitingNotes() {
+        for (IndexStore.Item n : store.unembeddedNotes()) {
+            try {
+                store.updateEmbedding(n, model.embedDocument(NoteText.plain(n.body)));
+            } catch (Exception e) {
+                android.util.Log.w("SemSearch", "a note's vector", e);
+            }
+        }
+    }
+
+    /** What the note means (for search), or nothing yet when the model is not loaded (made once it is). */
+    private float[] noteVector(String text) throws Exception {
+        if (model == null || state != State.READY) return new float[0];
+        return model.embedDocument(NoteText.plain(text));
+    }
+
     public void deleteItem(final IndexStore.Item it) {
+        if (it.kind == IndexStore.KIND_NOTE) Reminders.cancel(ctx, it.id);
         ml.submit(new Runnable() {
             @Override
             public void run() {

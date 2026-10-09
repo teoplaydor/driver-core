@@ -49,9 +49,17 @@ public class AppFlowTest {
         assertEquals(Engine.State.NO_MODEL, e.state);
         assertTrue(Robo.allText(root), Robo.allText(root).contains("Скачать модель"));
 
-        // "no model" flows explain what to do and don't crash
+        // "no model" flows explain what to do and don't crash; a note can be written all the same (what it means is
+        // worked out once the model is there)
         Robo.call(a, "noteEditor");
-        assertEquals("Сначала скачайте модель", ShadowToast.getTextOfLatestToast());
+        Robo.settle(400);
+        Object editor = Robo.field(a, "noteEditor");
+        assertNotNull("the editor opens without the model", editor);
+        ((EditText) Robo.field(editor, "text")).setText("Записка до модели");
+        a.onBackPressed();
+        Robo.waitFor("kept without the model", () -> e.store().count(IndexStore.KIND_NOTE) == 1);
+        final IndexStore.Item early = e.store().notes().get(0);
+        assertEquals("no vector yet", 0, early.emb.length);
         Robo.call(a, "requestMediaAndIndex");
         assertEquals("Сначала скачайте модель", ShadowToast.getTextOfLatestToast());
         Robo.call(a, "runBenchmark");
@@ -71,6 +79,9 @@ public class AppFlowTest {
         }
         e.attachModelForTest(new Robo.FakeEmbedder());
         Robo.waitFor("ready", e::ready);
+        Robo.waitFor("the early note's vector, once the model is there", () -> early.emb.length == 768);
+        e.deleteItem(early);
+        Robo.waitFor("gone", () -> e.store().count(IndexStore.KIND_NOTE) == 0);
         Robo.settle(300);
         assertTrue(Robo.allText(root), Robo.allText(root).contains("Галерея ещё не проиндексирована"));
 

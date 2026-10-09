@@ -26,6 +26,9 @@ public final class IndexStore {
         public String uri, title, body;
         public long date;
         public float[] emb;
+        /** A note: kept first among the notes; when to remind of it (0: never); when last changed (0: never). */
+        public boolean pinned;
+        public long remind, edited;
         float[] norms = new float[DIMS.length];
 
         void computeNorms() {
@@ -52,19 +55,26 @@ public final class IndexStore {
     private HashSet<Long> hidden = new HashSet<Long>();
 
     public IndexStore(Context ctx) {
-        SQLiteOpenHelper helper = new SQLiteOpenHelper(ctx, "index.db", null, 1) {
+        SQLiteOpenHelper helper = new SQLiteOpenHelper(ctx, "index.db", null, 2) {
             @Override
             public void onCreate(SQLiteDatabase d) {
                 d.execSQL("CREATE TABLE items (id INTEGER PRIMARY KEY AUTOINCREMENT, kind INTEGER, media_id INTEGER,"
-                        + " uri TEXT, title TEXT, body TEXT, date INTEGER, emb BLOB)");
+                        + " uri TEXT, title TEXT, body TEXT, date INTEGER, emb BLOB, pinned INTEGER DEFAULT 0,"
+                        + " remind INTEGER DEFAULT 0, edited INTEGER DEFAULT 0)");
             }
 
             @Override
             public void onUpgrade(SQLiteDatabase d, int o, int n) {
+                // 2: notes pinned, reminded of, edited
+                if (o < 2) {
+                    d.execSQL("ALTER TABLE items ADD COLUMN pinned INTEGER DEFAULT 0");
+                    d.execSQL("ALTER TABLE items ADD COLUMN remind INTEGER DEFAULT 0");
+                    d.execSQL("ALTER TABLE items ADD COLUMN edited INTEGER DEFAULT 0");
+                }
             }
         };
         db = helper.getWritableDatabase();
-        Cursor c = db.rawQuery("SELECT id, kind, media_id, uri, title, body, date, emb FROM items", null);
+        Cursor c = db.rawQuery("SELECT id, kind, media_id, uri, title, body, date, emb, pinned, remind, edited FROM items", null);
         try {
             while (c.moveToNext()) {
                 Item it = new Item();
@@ -77,6 +87,9 @@ public final class IndexStore {
                 it.date = c.getLong(6);
                 byte[] b = c.getBlob(7);
                 it.emb = b == null ? new float[0] : VectorMath.fromBytes(b);
+                it.pinned = c.getInt(8) != 0;
+                it.remind = c.getLong(9);
+                it.edited = c.getLong(10);
                 it.computeNorms();
                 track(it, true);
                 items.add(it);
@@ -114,6 +127,67 @@ public final class IndexStore {
         items.add(it);
         track(it, true);
         return it;
+    }
+
+    /** A note's new text and its vector (empty: to be made once the model is there); {@code edited} when. */
+    public synchronized void updateNote(Item it, String body, float[] emb, long edited) {
+        ContentValues v = new ContentValues();
+        v.put("body", body);
+        v.put("emb", VectorMath.toBytes(emb));
+        v.put("edited", edited);
+        db.update("items", v, "id = ?", new String[]{String.valueOf(it.id)});
+        it.body = body;
+        it.emb = emb;
+        it.edited = edited;
+        it.computeNorms();
+    }
+
+    /** A note's text only (a box ticked: what it says is the same, its vector too). */
+    public synchronized void updateBody(Item it, String body) {
+        ContentValues v = new ContentValues();
+        v.put("body", body);
+        db.update("items", v, "id = ?", new String[]{String.valueOf(it.id)});
+        it.body = body;
+    }
+
+    public synchronized void setPinned(Item it, boolean pinned) {
+        ContentValues v = new ContentValues();
+        v.put("pinned", pinned ? 1 : 0);
+        db.update("items", v, "id = ?", new String[]{String.valueOf(it.id)});
+        it.pinned = pinned;
+    }
+
+    public synchronized void setRemind(Item it, long at) {
+        ContentValues v = new ContentValues();
+        v.put("remind", at);
+        db.update("items", v, "id = ?", new String[]{String.valueOf(it.id)});
+        it.remind = at;
+    }
+
+    public synchronized Item find(long id) {
+        for (Item it : items) if (it.id == id) return it;
+        return null;
+    }
+
+    /** The notes made to this photo or video (its MediaStore id), newest first. */
+    public synchronized List<Item> notesOf(long mediaId) {
+        List<Item> out = new ArrayList<Item>();
+        for (Item it : notes()) if (it.mediaId == mediaId && mediaId >= 0) out.add(it);
+        return out;
+    }
+
+    /** The notes still without a vector (written before the model was there). */
+    public synchronized List<Item> unembeddedNotes() {
+        List<Item> out = new ArrayList<Item>();
+        for (Item it : items) if (it.kind == KIND_NOTE && it.emb.length == 0) out.add(it);
+        return out;
+    }
+
+    /** The notes with a reminder set. */
+    public synchronized List<Item> reminders() {
+        List<Item> out = new ArrayList<Item>();
+        for (Item it : items) if (it.kind == KIND_NOTE && it.remind > 0) out.add(it);
+        return out;
     }
 
     public synchronized void updateEmbedding(Item it, float[] emb) {
@@ -196,7 +270,8 @@ public final class IndexStore {
             if (isHidden(it)) continue;
             if ((it.kind == KIND_PHOTO && photos) || (it.kind == KIND_VIDEO && videos) || (it.kind == KIND_NOTE && notes)) out.add(it);
         }
-        Collections.sort(out, new Comparator<Item>() {
+        // the notes alone: the pinned ones first
+        Collections.sort(out, notes && !photos && !videos ? PINNED_NEWEST : new Comparator<Item>() {
             @Override
             public int compare(Item a, Item b) {
                 return Long.compare(b.date, a.date);
@@ -212,17 +287,21 @@ public final class IndexStore {
         return out;
     }
 
+    /** The notes, pinned ones first, newest first. */
     public synchronized List<Item> notes() {
         List<Item> out = new ArrayList<Item>();
         for (Item it : items) if (it.kind == KIND_NOTE) out.add(it);
-        Collections.sort(out, new Comparator<Item>() {
-            @Override
-            public int compare(Item a, Item b) {
-                return Long.compare(b.date, a.date);
-            }
-        });
+        Collections.sort(out, PINNED_NEWEST);
         return out;
     }
+
+    static final Comparator<Item> PINNED_NEWEST = new Comparator<Item>() {
+        @Override
+        public int compare(Item a, Item b) {
+            if (a.pinned != b.pinned) return a.pinned ? -1 : 1;
+            return Long.compare(b.date, a.date);
+        }
+    };
 
     /** Cosine search over the first {@code dims} components (Matryoshka truncation). */
     public synchronized List<Hit> search(float[] q, int dims, boolean photos, boolean videos, boolean notes,

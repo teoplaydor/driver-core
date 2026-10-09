@@ -46,7 +46,10 @@ import java.util.concurrent.Executors;
  * Settings live in a panel, the viewer opens over the grid, notes are one tab of the gallery.
  */
 public final class MainActivity extends Activity implements Engine.Listener, Viewer.Host, MasonryView.Host {
-    private static final int REQ_PICK_IMAGE = 7, REQ_MEDIA = 8, REQ_IDLE = 9;
+    private static final int REQ_PICK_IMAGE = 7, REQ_MEDIA = 8, REQ_IDLE = 9, REQ_VOICE = 10, REQ_NOTIFY = 11;
+    /** A new note (the app icon's shortcut; with EXTRA_VOICE dictated at once), a note shown (its reminder tapped). */
+    static final String ACTION_NEW_NOTE = "io.github.teoplaydor.semsearch.NEW_NOTE",
+            ACTION_OPEN_NOTE = "io.github.teoplaydor.semsearch.OPEN_NOTE", EXTRA_VOICE = "voice";
     private static final int RECENT_LIMIT = 3000;
 
     /** Test hook: thumbnails for items that have no MediaStore entry (screenshots on Robolectric). */
@@ -72,6 +75,12 @@ public final class MainActivity extends Activity implements Engine.Listener, Vie
     private Viewer viewer;
     private SettingsPanel settings;
     private ScanPanel scan;
+    /** The note being written or changed. */
+    NoteEditor noteEditor;
+    /** Where dictated text goes once the recogniser answers. */
+    private Engine.Callback<String> dictated;
+    /** A note to show once the index is there (a reminder tapped while the app was starting). */
+    private long noteToOpen = -1;
     private Sheet sheet;
     /** The accelerator check's progress sheet while it is open, and since when the person waits for a check. */
     private Sheet benchSheet;
@@ -204,6 +213,10 @@ public final class MainActivity extends Activity implements Engine.Listener, Vie
                 return;
             }
         }
+        if (noteEditor != null && !noteEditor.isClosing()) {
+            noteEditor.done();
+            return;
+        }
         if (scan != null && !scan.isClosing()) {
             if (!scan.back()) scan.close();
             return;
@@ -238,7 +251,42 @@ public final class MainActivity extends Activity implements Engine.Listener, Vie
     }
 
     private void handleIntent(Intent intent) {
-        if (intent == null || !Intent.ACTION_SEND.equals(intent.getAction())) return;
+        if (intent == null) return;
+        if (ACTION_NEW_NOTE.equals(intent.getAction())) {
+            setIntent(new Intent());
+            if (noteEditor != null) noteEditor.done();
+            openNoteEditor(null, null, null);
+            Object voice = intent.getExtras() == null ? null : intent.getExtras().get(EXTRA_VOICE);
+            if ((Boolean.TRUE.equals(voice) || "true".equals(voice)) && noteEditor != null) {
+                final NoteEditor e = noteEditor;
+                dictate(new Engine.Callback<String>() {
+                    @Override
+                    public void done(String said, Exception err) {
+                        if (said != null && !e.isClosing()) e.insert(said.trim());
+                    }
+                });
+            }
+            return;
+        }
+        if (ACTION_OPEN_NOTE.equals(intent.getAction())) {
+            setIntent(new Intent());
+            if (noteEditor != null) noteEditor.done();
+            noteToOpen = intent.getLongExtra(Reminders.EXTRA_NOTE, -1);
+            openPendingNote();
+            return;
+        }
+        // text shared «В заметки» (the share target named so): a new note with it
+        if (Intent.ACTION_SEND.equals(intent.getAction()) && intent.getComponent() != null
+                && intent.getComponent().getClassName().endsWith(".ToNotes")) {
+            setIntent(new Intent());
+            String subject = intent.getStringExtra(Intent.EXTRA_SUBJECT), text = intent.getStringExtra(Intent.EXTRA_TEXT);
+            String body = (subject != null && !subject.trim().isEmpty() && (text == null || !text.contains(subject.trim()))
+                    ? subject.trim() + "\n" : "") + (text != null ? text.trim() : "");
+            if (noteEditor != null) noteEditor.done();
+            openNoteEditor(null, null, body);
+            return;
+        }
+        if (!Intent.ACTION_SEND.equals(intent.getAction())) return;
         if (!engine.ready()) {
             pendingShare = intent;
             toast("Модель ещё загружается — поиск начнётся сам");
@@ -1323,6 +1371,7 @@ public final class MainActivity extends Activity implements Engine.Listener, Vie
 
     @Override
     public void onEngineChanged() {
+        openPendingNote();
         if (engine.prefs().getBoolean("g_report_unseen", false) && !isFinishing()) {
             // the automatic check after "Check the NPU" finished: show what it found, once
             engine.prefs().edit().putBoolean("g_report_unseen", false).apply();
@@ -1632,59 +1681,181 @@ public final class MainActivity extends Activity implements Engine.Listener, Vie
         settings = null;
     }
 
+    /** A new note (the rail's «+»). */
     private void noteEditor() {
-        if (!engine.ready()) {
-            toast("Сначала скачайте модель");
+        openNoteEditor(null, null, null);
+    }
+
+    /** The editor: a note changed, or a new one (to a photo; with some text to start from). */
+    void openNoteEditor(IndexStore.Item note, IndexStore.Item photo, String start) {
+        // one open at a time; one on its way out (kept already) does not stand in the way
+        if (noteEditor != null && !noteEditor.isClosing()) return;
+        noteEditor = new NoteEditor(this, note, photo, start);
+        noteEditor.open(root);
+    }
+
+    void noteEditorClosed(NoteEditor e) {
+        if (noteEditor == e) noteEditor = null;
+        if (viewer != null && !viewer.isClosing()) viewer.refreshNote();
+    }
+
+    /**
+     * What the editor holds, kept: a new note added (unless empty), a note changed — its text, pin and reminder — or,
+     * emptied, deleted.
+     */
+    void saveNote(NoteEditor e, final String text, IndexStore.Item photo) {
+        IndexStore.Item note = e.note;
+        if (e.remind > 0 && (note == null || note.remind != e.remind)) askNotifications();
+        if (note == null) {
+            if (text.trim().isEmpty()) return;
+            engine.addNote(text, photo, e.pinned, e.remind, new Engine.Callback<IndexStore.Item>() {
+                @Override
+                public void done(IndexStore.Item it, Exception err) {
+                    if (err != null) toast("Не сохранилось: " + err.getMessage());
+                    else if (resultsLabel == null) showRecent(false);
+                }
+            });
             return;
         }
-        final Sheet s = new Sheet(this, "Новая заметка");
-        final EditText t = new EditText(this);
-        t.setHint("Например: пароль от Wi-Fi на даче — на холодильнике");
-        t.setTextColor(Ui.TEXT);
-        t.setHintTextColor(Ui.TEXT3);
-        t.setTextSize(16);
-        t.setTypeface(Ui.font(this, Ui.REGULAR));
-        t.setMinLines(4);
-        t.setGravity(Gravity.TOP | Gravity.START);
-        t.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_MULTI_LINE | InputType.TYPE_TEXT_FLAG_CAP_SENTENCES);
-        t.setBackground(Ui.round(this, Ui.SURFACE2, 18));
-        t.setPadding(dp(16), dp(14), dp(16), dp(14));
-        s.body().addView(t, new LinearLayout.LayoutParams(-1, -2));
-        LinearLayout row = new LinearLayout(this);
-        row.setPadding(0, dp(14), 0, 0);
-        TextView samples = Sheet.button(this, "Примеры", false);
-        samples.setOnClickListener(new View.OnClickListener() {
+        if (text.trim().isEmpty()) {
+            engine.deleteItem(note);
+            if (viewer != null) viewer.close();
+            removeFromGrid(note);
+            toast("Пустая заметка удалена");
+            return;
+        }
+        if (!text.equals(note.body)) engine.updateNote(note, text, null);
+        if (e.pinned != note.pinned) engine.setPinned(note, e.pinned);
+        if (e.remind != note.remind) engine.setReminder(note, e.remind);
+        if (resultsLabel == null) showRecent(false);
+    }
+
+    void confirmDeleteNote(final NoteEditor e) {
+        sheet = Sheet.confirm(root, "Удалить заметку?", null, "Удалить", new Runnable() {
             @Override
-            public void onClick(View v) {
-                addSamples();
-                s.dismiss();
+            public void run() {
+                engine.deleteItem(e.note);
+                e.close();
+                if (viewer != null) viewer.close();
+                removeFromGrid(e.note);
             }
         });
-        TextView save = Sheet.button(this, "Сохранить", true);
-        save.setOnClickListener(new View.OnClickListener() {
-            @Override
-            public void onClick(View v) {
-                String text = t.getText().toString().trim();
-                if (text.isEmpty()) return;
-                engine.addNote(text, new Engine.Callback<IndexStore.Item>() {
+    }
+
+    private void removeFromGrid(IndexStore.Item it) {
+        List<IndexStore.Item> left = new ArrayList<IndexStore.Item>(gallery.items());
+        if (left.remove(it)) {
+            gallery.setItems(left, filter == 3 ? 2 : 3, false);
+            updateEmpty();
+        }
+    }
+
+    /**
+     * When to remind: in an hour, this evening, tomorrow morning, or a day and time chosen; «Без напоминания» when one
+     * is set. The time chosen (0: none) to {@code cb}; nothing when the sheet is closed.
+     */
+    void chooseReminder(long current, final Engine.Callback<Long> cb) {
+        final java.util.Calendar now = java.util.Calendar.getInstance();
+        final java.util.List<String> labels = new java.util.ArrayList<String>();
+        final java.util.List<Long> times = new java.util.ArrayList<Long>();
+        labels.add("Через час");
+        times.add(System.currentTimeMillis() + 3_600_000L);
+        if (now.get(java.util.Calendar.HOUR_OF_DAY) < 19) {
+            labels.add("Сегодня вечером, в 19:00");
+            times.add(at(0, 19));
+        }
+        labels.add("Завтра утром, в 9:00");
+        times.add(at(1, 9));
+        labels.add("Выбрать день и время…");
+        times.add(-1L);
+        if (current > 0) {
+            labels.add("Без напоминания");
+            times.add(0L);
+        }
+        sheet = Sheet.choose(root, current > 0 ? "Напомнит " + NoteEditor.when(current) : "Напомнить", labels.toArray(new String[0]),
+                null, -1, new Sheet.Choice() {
                     @Override
-                    public void done(IndexStore.Item it, Exception e) {
-                        if (e != null) toast("Ошибка: " + e.getMessage());
-                        else if (resultsLabel == null) showRecent(true);
+                    public void chosen(int i) {
+                        long t = times.get(i);
+                        if (t >= 0) cb.done(t, null);
+                        else pickDayAndTime(cb);
                     }
                 });
-                hideKeyboard();
-                s.dismiss();
-            }
-        });
-        LinearLayout.LayoutParams l1 = new LinearLayout.LayoutParams(0, dp(50), 1);
-        LinearLayout.LayoutParams l2 = new LinearLayout.LayoutParams(0, dp(50), 2);
-        l2.leftMargin = dp(10);
-        row.addView(samples, l1);
-        row.addView(save, l2);
-        s.body().addView(row);
-        sheet = s.show(root);
-        t.requestFocus();
+    }
+
+    /** Today (+{@code days}) at {@code hour}:00. */
+    private static long at(int days, int hour) {
+        java.util.Calendar c = java.util.Calendar.getInstance();
+        c.add(java.util.Calendar.DAY_OF_YEAR, days);
+        c.set(java.util.Calendar.HOUR_OF_DAY, hour);
+        c.set(java.util.Calendar.MINUTE, 0);
+        c.set(java.util.Calendar.SECOND, 0);
+        c.set(java.util.Calendar.MILLISECOND, 0);
+        return c.getTimeInMillis();
+    }
+
+    private void pickDayAndTime(final Engine.Callback<Long> cb) {
+        final java.util.Calendar c = java.util.Calendar.getInstance();
+        c.add(java.util.Calendar.HOUR_OF_DAY, 1);
+        android.app.DatePickerDialog d = new android.app.DatePickerDialog(this, android.app.AlertDialog.THEME_DEVICE_DEFAULT_DARK,
+                new android.app.DatePickerDialog.OnDateSetListener() {
+                    @Override
+                    public void onDateSet(android.widget.DatePicker v, int y, int m, int day) {
+                        c.set(y, m, day);
+                        new android.app.TimePickerDialog(MainActivity.this, android.app.AlertDialog.THEME_DEVICE_DEFAULT_DARK,
+                                new android.app.TimePickerDialog.OnTimeSetListener() {
+                                    @Override
+                                    public void onTimeSet(android.widget.TimePicker v, int h, int min) {
+                                        c.set(java.util.Calendar.HOUR_OF_DAY, h);
+                                        c.set(java.util.Calendar.MINUTE, min);
+                                        c.set(java.util.Calendar.SECOND, 0);
+                                        if (c.getTimeInMillis() <= System.currentTimeMillis()) {
+                                            toast("Это время уже прошло");
+                                            return;
+                                        }
+                                        cb.done(c.getTimeInMillis(), null);
+                                    }
+                                }, c.get(java.util.Calendar.HOUR_OF_DAY), 0, true).show();
+                    }
+                }, c.get(java.util.Calendar.YEAR), c.get(java.util.Calendar.MONTH), c.get(java.util.Calendar.DAY_OF_MONTH));
+        d.getDatePicker().setMinDate(System.currentTimeMillis() - 1000);
+        d.show();
+    }
+
+    /** Android 13+: notifications are asked for (a reminder is one). */
+    private void askNotifications() {
+        if (Build.VERSION.SDK_INT >= 33 && checkSelfPermission("android.permission.POST_NOTIFICATIONS") != PackageManager.PERMISSION_GRANTED) {
+            requestPermissions(new String[]{"android.permission.POST_NOTIFICATIONS"}, REQ_NOTIFY);
+        }
+    }
+
+    /** Speech to text by the phone's recogniser (Google's or the maker's), in the phone's language. */
+    void dictate(Engine.Callback<String> cb) {
+        Intent i = new Intent(android.speech.RecognizerIntent.ACTION_RECOGNIZE_SPEECH);
+        i.putExtra(android.speech.RecognizerIntent.EXTRA_LANGUAGE_MODEL, android.speech.RecognizerIntent.LANGUAGE_MODEL_FREE_FORM);
+        i.putExtra(android.speech.RecognizerIntent.EXTRA_PROMPT, "Говорите — текст попадёт в заметку");
+        try {
+            dictated = cb;
+            startActivityForResult(i, REQ_VOICE);
+        } catch (Exception e) {
+            dictated = null;
+            toast("На телефоне нет распознавания речи — можно диктовать с клавиатуры (значок микрофона)");
+        }
+    }
+
+    /** The note a reminder was tapped for, shown (as soon as the index is open). */
+    private void openPendingNote() {
+        if (noteToOpen < 0 || engine.store() == null) return;
+        IndexStore.Item it = engine.store().find(noteToOpen);
+        noteToOpen = -1;
+        if (it == null) {
+            toast("Этой заметки уже нет");
+            return;
+        }
+        if (viewer != null) viewer.close();
+        if (scan != null) scan.close();
+        viewer = new Viewer(this, this, new ArrayList<IndexStore.Item>(java.util.Collections.singletonList(it)), 0);
+        viewer.open(root);
     }
 
     private void addSamples() {
@@ -1848,6 +2019,85 @@ public final class MainActivity extends Activity implements Engine.Listener, Vie
         leave(OVER_NONE);
         if (viewer != null) viewer.close();
         showAlbum(a);
+    }
+
+    @Override
+    public void editNote(IndexStore.Item note) {
+        openNoteEditor(note, null, null);
+    }
+
+    /** A note to the photo: a new one when it has none; else its notes to choose from, and a new one. */
+    @Override
+    public void noteToPhoto(final IndexStore.Item photo) {
+        final List<IndexStore.Item> notes = engine.store() == null ? new ArrayList<IndexStore.Item>() : engine.store().notesOf(photo.mediaId);
+        if (notes.isEmpty()) {
+            openNoteEditor(null, photo, null);
+            return;
+        }
+        String[] options = new String[notes.size() + 1];
+        for (int i = 0; i < notes.size(); i++) options[i] = io.github.teoplaydor.semsearch.core.NoteText.title(notes.get(i).body, 60);
+        options[notes.size()] = "Новая заметка к фото";
+        sheet = Sheet.choose(root, "Заметки к фото", options, null, -1, new Sheet.Choice() {
+            @Override
+            public void chosen(int i) {
+                if (i < notes.size()) openNoteEditor(notes.get(i), null, null);
+                else openNoteEditor(null, photo, null);
+            }
+        });
+    }
+
+    @Override
+    public int notesOf(IndexStore.Item photo) {
+        return engine.store() == null ? 0 : engine.store().notesOf(photo.mediaId).size();
+    }
+
+    @Override
+    public IndexStore.Item linkedPhoto(IndexStore.Item note) {
+        if (note.mediaId < 0 || engine.store() == null) return null;
+        for (IndexStore.Item m : engine.store().media()) if (m.mediaId == note.mediaId && m.kind != IndexStore.KIND_NOTE) return m;
+        return null;
+    }
+
+    @Override
+    public void openPhoto(IndexStore.Item photo) {
+        if (viewer != null) viewer.close();
+        final IndexStore.Item p = photo;
+        ui.postDelayed(new Runnable() {
+            @Override
+            public void run() {
+                if (viewer != null) return;
+                int pos = gallery.items().indexOf(p);
+                viewer = pos >= 0 ? new Viewer(MainActivity.this, MainActivity.this, new ArrayList<IndexStore.Item>(gallery.items()), pos)
+                        : new Viewer(MainActivity.this, MainActivity.this, new ArrayList<IndexStore.Item>(java.util.Collections.singletonList(p)), 0);
+                viewer.open(root);
+            }
+        }, 260);
+    }
+
+    @Override
+    public void tick(IndexStore.Item note, int line) {
+        engine.tick(note, line);
+    }
+
+    @Override
+    public void setPinned(IndexStore.Item note, boolean pinned) {
+        engine.setPinned(note, pinned);
+        toast(pinned ? "Закреплена — первой среди заметок" : "Откреплена");
+        if (resultsLabel == null) showRecent(false);
+    }
+
+    @Override
+    public void remind(final IndexStore.Item note) {
+        chooseReminder(note.remind, new Engine.Callback<Long>() {
+            @Override
+            public void done(Long at, Exception e) {
+                if (at == null) return;
+                if (at > 0) askNotifications();
+                engine.setReminder(note, at);
+                toast(at > 0 ? "Напомнит " + NoteEditor.when(at) : "Напоминание убрано");
+                if (viewer != null) viewer.refreshNote();
+            }
+        });
     }
 
     void downloadFaces() {
@@ -2479,5 +2729,12 @@ public final class MainActivity extends Activity implements Engine.Listener, Vie
     protected void onActivityResult(int code, int result, Intent data) {
         super.onActivityResult(code, result, data);
         if (code == REQ_PICK_IMAGE && result == RESULT_OK && data != null && data.getData() != null) runImageSearch(data.getData());
+        if (code == REQ_VOICE) {
+            Engine.Callback<String> cb = dictated;
+            dictated = null;
+            java.util.ArrayList<String> said = result == RESULT_OK && data != null
+                    ? data.getStringArrayListExtra(android.speech.RecognizerIntent.EXTRA_RESULTS) : null;
+            if (cb != null && said != null && !said.isEmpty()) cb.done(said.get(0), null);
+        }
     }
 }
