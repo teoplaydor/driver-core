@@ -309,6 +309,17 @@ screenshot	скриншот
 text	текст
 document	документ
 paper document	бумажный документ
+sheet of paper	лист бумаги
+printed page	печатная страница
+certificate	справка
+bill	квитанция
+id card	удостоверение
+business card	визитка
+diploma	диплом
+paper letter	бумажное письмо
+envelope	конверт
+instruction manual	инструкция
+label	этикетка
 receipt	чек
 ticket	билет
 boarding pass	посадочный талон

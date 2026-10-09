@@ -1259,14 +1259,9 @@ public final class Engine {
         });
     }
 
-    /** Words of «Что на фото» that make a photo a document (paper to print), and those that make it a screen. */
-    static final java.util.Set<String> DOC_WORDS = new java.util.HashSet<String>(java.util.Arrays.asList("документ", "бумажный документ",
-            "текст", "чек", "анкета", "страница книги", "газета", "заметки", "паспорт", "билет", "тетрадь")),
-            SCREEN_WORDS = new java.util.HashSet<String>(java.util.Arrays.asList("скриншот", "веб-страница"));
-
     /**
-     * Whether a photo shows a document — paper to make a scan of for printing: one of its words (PhotoTags, as «Что на
-     * фото») is a document's, none a screen's, and it is no screenshot.
+     * Whether a photo shows a document — to make a scan of for printing, of any kind and size (PhotoTags.document: a
+     * sheet, a receipt, a ticket, a passport, a card, a book's page...) — and is no screenshot.
      */
     public void isDocument(final IndexStore.Item item, final Callback<Boolean> cb) {
         ml.submit(new Runnable() {
@@ -1283,12 +1278,7 @@ public final class Engine {
                         post(cb, false, null);
                         return;
                     }
-                    boolean doc = false, screen = false;
-                    for (String w : t.rank(item.emb)) {
-                        doc |= DOC_WORDS.contains(w);
-                        screen |= SCREEN_WORDS.contains(w);
-                    }
-                    post(cb, doc && !screen, null);
+                    post(cb, t.document(item.emb), null);
                 } catch (Exception e) {
                     post(cb, false, null);
                 }

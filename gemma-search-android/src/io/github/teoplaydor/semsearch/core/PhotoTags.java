@@ -133,6 +133,85 @@ public final class PhotoTags {
      * small to calibrate on, against the picture's own mean similarity ({@link #SMALL_Z}).
      */
     public List<String> rank(float[] picture) {
+        double[][] sc = scores(picture);
+        final double[] s = sc[0], z = sc[1], e = sc[2];
+        double median = sc[3][0];
+        Integer[] order = new Integer[vecs.length];
+        for (int t = 0; t < order.length; t++) order[t] = t;
+        Arrays.sort(order, new Comparator<Integer>() {
+            @Override
+            public int compare(Integer a, Integer b) {
+                return Double.compare(e[b], e[a]);
+            }
+        });
+        // a small gallery: no typical picture to stand out from, so the words clearly above the picture's own level
+        double minZ = sampled < MIN_SAMPLE ? SMALL_Z : MIN_Z;
+        List<String> out = new ArrayList<String>();
+        double best = Double.NaN;
+        for (int t : order) {
+            if (s[t] < median || z[t] < minZ) continue;
+            if (Double.isNaN(best)) best = e[t];
+            if (e[t] < RELATIVE * best || out.size() >= MAX) break;
+            out.add(ru[t]);
+        }
+        return out;
+    }
+
+    /**
+     * Of these words (Russian, as {@link #rank} gives them; null: of all), the one the picture matches best — by its excess over a
+     * typical picture of the gallery, among those above the median of the picture's own similarities — as {its
+     * z-score, its excess}; null when none is. Unlike {@link #rank}, no cut relative to the picture's other words: a
+     * contract held in a hand stays a contract when «рука» stands out more.
+     */
+    public double[] best(float[] picture, java.util.Set<String> words) {
+        double[][] sc = scores(picture);
+        double[] out = null;
+        for (int t = 0; t < vecs.length; t++) {
+            if (words != null && !words.contains(ru[t]) || sc[0][t] < sc[3][0]) continue;
+            if (out == null || sc[2][t] > out[1]) out = new double[]{sc[1][t], sc[2][t], 0};
+        }
+        // and how many words (of all, above the median too) stand out more
+        if (out != null) for (int t = 0; t < vecs.length; t++) if (sc[0][t] >= sc[3][0] && sc[2][t] > out[1]) out[2]++;
+        return out;
+    }
+
+    /**
+     * What makes a photo a document — something to scan and print, of any size and kind: a sheet of any paper, a
+     * receipt, a ticket, a passport, a card, a book's page, a notebook, a letter, a form... (Russian, as in
+     * assets/photo_tags.txt) — and what makes it a screen (a screenshot, a monitor photographed: no paper to cut out).
+     */
+    public static final java.util.Set<String> DOC_WORDS = new java.util.HashSet<String>(Arrays.asList("документ", "бумажный документ",
+            "лист бумаги", "печатная страница", "текст", "рукописный текст", "договор", "анкета", "справка", "квитанция", "счёт",
+            "чек", "билет", "посадочный талон", "паспорт", "удостоверение", "визитка", "банковская карта", "диплом",
+            "бумажное письмо", "конверт", "инструкция", "страница книги", "книга", "газета", "тетрадь", "заметки", "доска",
+            "меню", "прайс", "рецепт", "расписание", "таблица", "схема", "этикетка", "афиша")),
+            SCREEN_WORDS = new java.util.HashSet<String>(Arrays.asList("скриншот", "веб-страница", "экран, снятый на камеру",
+                    "приложение", "настройки", "переписка", "сообщение"));
+    /**
+     * A document word must stand out as a word shown does ({@link #MIN_Z}), by at least this much of the picture's most
+     * outstanding word (a word shown needs {@link #RELATIVE}: a contract held in a hand, «рука» first), and be among
+     * this many of its most outstanding words.
+     */
+    public static final double DOC_RELATIVE = 0.4;
+    public static final int DOC_PLACE = 8;
+
+    /**
+     * Whether the picture shows a document ({@link #DOC_WORDS}): its best document word stands out ({@link #MIN_Z},
+     * {@link #DOC_RELATIVE}, {@link #DOC_PLACE}) — as one of the words for it would, any of the many kinds, not only the
+     * few at the top; and no screen word stands out more.
+     */
+    public boolean document(float[] picture) {
+        double minZ = sampled < MIN_SAMPLE ? SMALL_Z : MIN_Z;
+        double[] doc = best(picture, DOC_WORDS), screen = best(picture, SCREEN_WORDS), any = best(picture, null);
+        if (doc == null || doc[0] < minZ || doc[2] >= DOC_PLACE || doc[1] < DOC_RELATIVE * any[1]) return false;
+        return screen == null || screen[0] < minZ || screen[1] <= doc[1];
+    }
+
+    /**
+     * Each word's similarity to the picture, its z-score and its excess over a typical picture of the gallery (with a
+     * gallery too small to calibrate on, over the picture's own mean), and {the median of the similarities}.
+     */
+    private double[][] scores(float[] picture) {
         final double[] s = new double[vecs.length], z = new double[vecs.length], e = new double[vecs.length];
         for (int t = 0; t < vecs.length; t++) s[t] = dot(vecs[t], picture);
         double[] sorted = s.clone();
@@ -155,25 +234,7 @@ public final class PhotoTags {
                 z[t] = e[t] / sd;
             }
         }
-        Integer[] order = new Integer[vecs.length];
-        for (int t = 0; t < order.length; t++) order[t] = t;
-        Arrays.sort(order, new Comparator<Integer>() {
-            @Override
-            public int compare(Integer a, Integer b) {
-                return Double.compare(e[b], e[a]);
-            }
-        });
-        // a small gallery: no typical picture to stand out from, so the words clearly above the picture's own level
-        double minZ = sampled < MIN_SAMPLE ? SMALL_Z : MIN_Z;
-        List<String> out = new ArrayList<String>();
-        double best = Double.NaN;
-        for (int t : order) {
-            if (s[t] < median || z[t] < minZ) continue;
-            if (Double.isNaN(best)) best = e[t];
-            if (e[t] < RELATIVE * best || out.size() >= MAX) break;
-            out.add(ru[t]);
-        }
-        return out;
+        return new double[][]{s, z, e, {median}};
     }
 
     // ---------------------------------------------------------------- cache

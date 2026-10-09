@@ -302,6 +302,40 @@ public class DocScanTest {
             check(l1 > 0 && l2 > 0 && Math.abs(l1 - l2) <= 3, "the contract page: the bottom row's labels on one row");
         }
 
+        // 9. documents that are no sheet of A4: a receipt (narrow, long, small on the photo), a bank card (coloured, on a
+        // light table), a passport spread (patterned pages), a note far away (a twenty-fifth of the photo). Each found,
+        // cut out in its own proportions
+        String[] otherNames = {"a receipt", "a bank card", "a passport spread", "a small note far away"};
+        BufferedImage[] otherTex = {receipt(), bankCard(), passport(), sheet(500, 700, 0, null, new Color(240, 238, 232))};
+        // as a phone sees them (f = 1300 px): each where it lies on the table, leaning back, turned a little
+        double[][][] otherCorners = {
+                projectAt(0.08, 0.27, Math.toRadians(20), Math.toRadians(4), 0.6, 1300, 1600, 1200, -0.03, 0.01),
+                projectAt(0.0856, 0.054, Math.toRadians(15), Math.toRadians(-3), 0.45, 1300, 1600, 1200, 0.02, -0.01),
+                projectAt(0.25, 0.176, Math.toRadians(22), Math.toRadians(2), 0.5, 1300, 1600, 1200, 0, 0),
+                projectAt(0.105, 0.148, Math.toRadians(18), Math.toRadians(-5), 0.6, 1300, 1600, 1200, 0.04, 0.02)};
+        float[][] otherQuads = new float[4][8];
+        for (int i = 0; i < 4; i++) for (int k = 0; k < 8; k++) otherQuads[i][k] = (float) otherCorners[i][k / 2][k % 2];
+        int[][] otherBg = {{60, 45, 30, 20}, {205, 205, 200, 10}, {50, 52, 58, 15}, {60, 45, 30, 20}};
+        for (int i = 0; i < otherNames.length; i++) {
+            BufferedImage oph = render(otherTex[i], otherQuads[i], 1600, 1200, otherBg[i]);
+            ImageIO.write(oph, "jpg", new File(out, "9-photo-" + i + ".jpg"));
+            int[] op = px(oph);
+            DocScan.Sheet os = DocScan.findSheet(op, 1600, 1200);
+            double want = (double) otherTex[i].getHeight() / otherTex[i].getWidth();
+            if (os == null) {
+                check(false, otherNames[i] + ": found");
+                continue;
+            }
+            DocScan.Image oc = DocScan.clearRim(DocScan.dewarp(op, 1600, 1200, os, 2000));
+            save(oc, new File(out, "9-cut-" + i + ".png"));
+            double got = (double) oc.h / oc.w;
+            double off = 0;
+            for (int k = 0; k < 8; k++) off = Math.max(off, Math.abs(os.corners[k] - otherQuads[i][k]));
+            System.out.println(String.format(Locale.ROOT, "  %s: corners off by %.1f px at most, cut %dx%d (%.3f, the real %.3f)",
+                    otherNames[i], off, oc.w, oc.h, got, want));
+            check(off <= 15 && Math.abs(got / want - 1) < 0.08, otherNames[i] + ": found, cut out in its proportions");
+        }
+
         // 4. a sheet on a white table: nothing apart from it to cut by
         BufferedImage white = new BufferedImage(1200, 900, BufferedImage.TYPE_INT_RGB);
         Graphics2D gw = white.createGraphics();
@@ -329,6 +363,19 @@ public class DocScanTest {
             // leaning back: the top further away
             double Y = yr * Math.cos(tilt), Z = dist - yr * Math.sin(tilt);
             out[i] = new double[]{f * xr / Z + w / 2.0, f * Y / Z + h / 2.0 + 60};
+        }
+        return out;
+    }
+
+    /** The same, its middle moved across ({@code ox}) and along ({@code oy}) its own plane (metres): off the photo's middle. */
+    static double[][] projectAt(double sw, double sh, double tilt, double turn, double dist, double f, int w, int h, double ox, double oy) {
+        double[][] corners = {{-sw / 2, -sh / 2}, {sw / 2, -sh / 2}, {sw / 2, sh / 2}, {-sw / 2, sh / 2}};
+        double[][] out = new double[4][];
+        for (int i = 0; i < 4; i++) {
+            double x = corners[i][0], y = corners[i][1];
+            double xr = x * Math.cos(turn) - y * Math.sin(turn) + ox, yr = x * Math.sin(turn) + y * Math.cos(turn) + oy;
+            double Y = yr * Math.cos(tilt), Z = dist - yr * Math.sin(tilt);
+            out[i] = new double[]{f * xr / Z + w / 2.0, f * Y / Z + h / 2.0};
         }
         return out;
     }
@@ -378,6 +425,93 @@ public class DocScanTest {
                 b.setRGB(x, y, c);
             }
         }
+        return b;
+    }
+
+    /** The same on a table of this colour ({r, g, b, noise}). */
+    static BufferedImage render(BufferedImage tex, float[] q, int w, int h, int[] bg) {
+        BufferedImage b = render(tex, q, w, h);
+        // the table: where render drew it (its own brown), this colour instead
+        BufferedImage onDark = render(tex, q, w, h);
+        Random r = new Random(9);
+        double tw = tex.getWidth(), th = tex.getHeight();
+        java.awt.geom.Path2D.Float shape = new java.awt.geom.Path2D.Float();
+        shape.moveTo(q[0], q[1]);
+        for (int i = 1; i < 4; i++) shape.lineTo(q[2 * i], q[2 * i + 1]);
+        shape.closePath();
+        for (int y = 0; y < h; y++) {
+            for (int x = 0; x < w; x++) {
+                if (shape.contains(x + 0.5, y + 0.5)) continue;
+                int n = r.nextInt(bg[3] + 1) - bg[3] / 2;
+                int cr = Math.max(0, Math.min(255, bg[0] + n)), cg = Math.max(0, Math.min(255, bg[1] + n)), cb = Math.max(0, Math.min(255, bg[2] + n));
+                b.setRGB(x, y, (cr << 16) | (cg << 8) | cb);
+            }
+        }
+        return b;
+    }
+
+    /** A shop receipt: narrow white paper, short lines of small print, a total in bold. */
+    static BufferedImage receipt() {
+        BufferedImage b = new BufferedImage(300, 1000, BufferedImage.TYPE_INT_RGB);
+        Graphics2D g = b.createGraphics();
+        g.setColor(new Color(246, 245, 240));
+        g.fillRect(0, 0, 300, 1000);
+        g.setColor(new Color(40, 40, 45));
+        Random r = new Random(3);
+        for (int y = 60; y < 900; y += 22) {
+            int x = 25;
+            while (x < 250) {
+                int ww = 8 + r.nextInt(30);
+                g.fillRect(x, y, Math.min(ww, 275 - x), 8);
+                x += ww + 6;
+            }
+            if (y > 700 && y < 760) g.fillRect(25, y, 250, 12);
+        }
+        g.dispose();
+        return b;
+    }
+
+    /** A bank card: blue, a gold chip, the number and the name in light letters. */
+    static BufferedImage bankCard() {
+        BufferedImage b = new BufferedImage(856, 540, BufferedImage.TYPE_INT_RGB);
+        Graphics2D g = b.createGraphics();
+        g.setPaint(new java.awt.GradientPaint(0, 0, new Color(25, 60, 150), 856, 540, new Color(50, 100, 190)));
+        g.fillRect(0, 0, 856, 540);
+        g.setColor(new Color(212, 175, 90));
+        g.fillRoundRect(90, 190, 120, 90, 14, 14);
+        g.setColor(new Color(230, 235, 245));
+        for (int k = 0; k < 4; k++) g.fillRect(90 + k * 175, 330, 150, 34);
+        g.fillRect(90, 430, 380, 26);
+        g.dispose();
+        return b;
+    }
+
+    /** A passport spread: two beige pages with a fine wavy pattern, a photo, lines of print, the fold between. */
+    static BufferedImage passport() {
+        BufferedImage b = new BufferedImage(1250, 880, BufferedImage.TYPE_INT_RGB);
+        Graphics2D g = b.createGraphics();
+        g.setColor(new Color(228, 218, 196));
+        g.fillRect(0, 0, 1250, 880);
+        g.setColor(new Color(205, 190, 165));
+        for (int y = -40; y < 920; y += 9) {
+            java.awt.geom.Path2D.Float wave = new java.awt.geom.Path2D.Float();
+            wave.moveTo(0, y);
+            for (int x = 0; x <= 1250; x += 10) wave.lineTo(x, y + 6 * Math.sin(x / 40.0 + y / 30.0));
+            g.draw(wave);
+        }
+        g.setColor(new Color(150, 140, 125));
+        g.fillRect(623, 0, 4, 880);
+        g.setColor(new Color(120, 110, 100));
+        g.fillRect(700, 120, 210, 270);
+        g.setColor(new Color(40, 40, 50));
+        Random r = new Random(8);
+        for (int y = 140; y < 800; y += 48) {
+            int x = y < 420 ? 950 : 700;
+            int ww = 60 + r.nextInt(180);
+            g.fillRect(x, y, Math.min(ww, 1200 - x), 14);
+        }
+        for (int y = 520; y < 820; y += 40) g.fillRect(80, y, 300 + r.nextInt(150), 12);
+        g.dispose();
         return b;
     }
 

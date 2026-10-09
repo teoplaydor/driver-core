@@ -130,7 +130,7 @@ final class ScanPanel extends FrameLayout {
         frame.addView(editor, new LayoutParams(-1, -1));
         column.addView(frame, new LinearLayout.LayoutParams(-1, 0, 1));
 
-        status = Ui.text(c, "Ищу лист на фото…", 13, Ui.TEXT2, Ui.REGULAR);
+        status = Ui.text(c, "Ищу документ на фото…", 13, Ui.TEXT2, Ui.REGULAR);
         status.setGravity(Gravity.CENTER);
         status.setPadding(Ui.dp(c, 16), Ui.dp(c, 8), Ui.dp(c, 16), Ui.dp(c, 4));
         column.addView(status);
@@ -138,7 +138,7 @@ final class ScanPanel extends FrameLayout {
         LinearLayout toggles = new LinearLayout(c);
         toggles.setGravity(Gravity.CENTER);
         toggles.setPadding(Ui.dp(c, 12), Ui.dp(c, 8), Ui.dp(c, 12), 0);
-        pageChip = chip("Лист", new Runnable() {
+        pageChip = chip("Документ", new Runnable() {
             @Override
             public void run() {
                 if (page == null) return;
@@ -275,7 +275,7 @@ final class ScanPanel extends FrameLayout {
         on(pageChip, page != null && usePage, page != null);
         on(levelChip, level, true);
         for (int i = 0; i < 3; i++) on(modeChips[i], mode == i, true);
-        pageChip.setText(page == null && src != null ? "Лист не найден" : "Лист");
+        pageChip.setText(page == null && src != null ? "Не найден" : "Документ");
         on(edgesChip, manual, src != null);
         on(turnChip, false, src != null);
     }
@@ -379,8 +379,8 @@ final class ScanPanel extends FrameLayout {
         }
         int[] out = DocScan.scan(levelled.px, levelled.w, levelled.h, mode);
         final Bitmap bmp = Bitmap.createBitmap(out, levelled.w, levelled.h, Bitmap.Config.ARGB_8888);
-        final String note = (withPage ? (manual ? "Края заданы вручную" : "Лист вырезан и выпрямлен")
-                : page == null ? "Лист не найден — всё фото, «Края…» — задать углы" : "Всё фото")
+        final String note = (withPage ? (manual ? "Края заданы вручную" : "Документ вырезан и выпрямлен")
+                : page == null ? "Документ не найден — всё фото, «Края…» — задать углы" : "Всё фото")
                 + (turns == 1 ? ", повёрнут на 90° по часовой" : turns == 2 ? ", повёрнут на 180°" : turns == 3 ? ", повёрнут на 90° против часовой" : "")
                 + (level ? levelNote() : "")
                 + " · " + levelled.w + "×" + levelled.h + " · " + (System.currentTimeMillis() - t0) + " мс";
@@ -595,7 +595,7 @@ final class ScanPanel extends FrameLayout {
         editor.setVisibility(VISIBLE);
         controls.setVisibility(GONE);
         editBar.setVisibility(VISIBLE);
-        status.setText("Перетащите углы на углы листа");
+        status.setText("Перетащите углы на углы документа");
     }
 
     private void endEdit(boolean apply) {

@@ -78,6 +78,15 @@ public final class MainActivity extends Activity implements Engine.Listener, Vie
     private BenchView benchView;
     private long benchAskedMs;
 
+    /** While pictures are chosen (a long press): how many, and what can be done with them. */
+    private LinearLayout chooseBar;
+    private TextView chooseCount, choosePdf;
+    /** Whether a picture is a document (Engine.isDocument), as found out for those chosen; those being asked. */
+    private final Map<Long, Boolean> docOf = new java.util.HashMap<Long, Boolean>();
+    private final java.util.Set<Long> docAsked = new java.util.HashSet<Long>();
+    /** The PDF made of the chosen documents last (tests look at it). */
+    PdfJob pdfJob;
+
     /** What the grid shows: the recent gallery, or results of the last search (label). */
     private String resultsLabel;
 
@@ -207,6 +216,10 @@ public final class MainActivity extends Activity implements Engine.Listener, Vie
             settings.close();
             return;
         }
+        if (gallery.choosing()) {
+            gallery.stopChoosing();
+            return;
+        }
         if (!places.isEmpty()) {
             back(places.remove(places.size() - 1));
             return;
@@ -317,6 +330,64 @@ public final class MainActivity extends Activity implements Engine.Listener, Vie
         FrameLayout.LayoutParams il = new FrameLayout.LayoutParams(-2, -2, Gravity.TOP | Gravity.CENTER_HORIZONTAL);
         il.setMargins(dp(16), dp(10), dp(16), 0);
         root.addView(info, il);
+
+        // top, while pictures are chosen: how many, a scan of the documents among them as one PDF, share, all, stop
+        chooseBar = new LinearLayout(this);
+        chooseBar.setGravity(Gravity.CENTER_VERTICAL);
+        chooseBar.setBackground(Ui.round(this, Rail.BACKGROUND, 26));
+        chooseBar.setElevation(dp(5));
+        chooseBar.setPadding(dp(2), 0, dp(6), 0);
+        chooseBar.setVisibility(View.GONE);
+        chooseBar.setClickable(true);
+        ImageView stopChoosing = Ui.icon(this, Icon.CLOSE, Ui.TEXT, 44);
+        stopChoosing.setContentDescription("Отменить выбор");
+        stopChoosing.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                gallery.stopChoosing();
+            }
+        });
+        chooseBar.addView(stopChoosing, new LinearLayout.LayoutParams(dp(44), dp(44)));
+        chooseCount = Ui.text(this, "", 15, Ui.TEXT, Ui.MEDIUM);
+        chooseCount.setSingleLine(true);
+        chooseCount.setEllipsize(TextUtils.TruncateAt.END);
+        chooseBar.addView(chooseCount, new LinearLayout.LayoutParams(0, -2, 1));
+        choosePdf = Ui.text(this, "Скан в PDF", 13.5f, Ui.ON_ACCENT, Ui.SEMIBOLD);
+        choosePdf.setGravity(Gravity.CENTER);
+        choosePdf.setBackground(Ui.round(this, Ui.ACCENT, 16));
+        choosePdf.setPadding(dp(12), 0, dp(12), 0);
+        choosePdf.setVisibility(View.GONE);
+        Ui.pressable(choosePdf);
+        choosePdf.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                pdfOfChosen();
+            }
+        });
+        LinearLayout.LayoutParams pdl = new LinearLayout.LayoutParams(-2, dp(34));
+        pdl.rightMargin = dp(2);
+        chooseBar.addView(choosePdf, pdl);
+        ImageView shareChosen = Ui.icon(this, Icon.SHARE, Ui.TEXT, 44);
+        shareChosen.setContentDescription("Поделиться выбранными");
+        shareChosen.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                shareChosen();
+            }
+        });
+        chooseBar.addView(shareChosen, new LinearLayout.LayoutParams(dp(44), dp(44)));
+        ImageView all = Ui.icon(this, Icon.CHECK, Ui.TEXT, 44);
+        all.setContentDescription("Выбрать все");
+        all.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                gallery.chooseAll();
+            }
+        });
+        chooseBar.addView(all, new LinearLayout.LayoutParams(dp(44), dp(44)));
+        FrameLayout.LayoutParams cbl = new FrameLayout.LayoutParams(-1, dp(52), Gravity.TOP);
+        cbl.setMargins(dp(10), dp(10), dp(10), 0);
+        root.addView(chooseBar, cbl);
 
         // bottom: the search field, opened from the rail's search button
         searchBar = new LinearLayout(this);
@@ -1885,7 +1956,7 @@ public final class MainActivity extends Activity implements Engine.Listener, Vie
             }
         }));
         s.body().addView(header("Документ"));
-        s.body().addView(actionRow(Icon.SCAN, "Скан для печати", "выровнять лист и текст, ч/б как на сканере", new Runnable() {
+        s.body().addView(actionRow(Icon.SCAN, "Скан для печати", "вырезать документ — лист, чек, паспорт, карту — выровнять текст, ч/б как на сканере", new Runnable() {
             @Override
             public void run() {
                 s.dismiss();
@@ -2302,13 +2373,100 @@ public final class MainActivity extends Activity implements Engine.Listener, Vie
 
     @Override
     public void open(int index) {
-        openViewer(index);
+        // while choosing a tap chooses (or un-chooses)
+        if (gallery.choosing()) gallery.toggle(index);
+        else openViewer(index);
     }
 
+    /** A long press starts choosing pictures with this one (similar ones are in the viewer: «Похожие»). */
     @Override
     public void longPress(int index) {
         gallery.performHapticFeedback(android.view.HapticFeedbackConstants.LONG_PRESS);
-        runSimilar(gallery.items().get(index));
+        if (gallery.choosing()) {
+            gallery.toggle(index);
+        } else {
+            hideKeyboard();
+            gallery.startChoosing(index);
+        }
+    }
+
+    @Override
+    public void choosingChanged() {
+        boolean on = gallery.choosing();
+        if (on && chooseBar.getVisibility() != View.VISIBLE) Ui.fadeIn(chooseBar, 150);
+        if (!on && chooseBar.getVisibility() == View.VISIBLE) Ui.fadeOut(chooseBar, 150);
+        info.animate().alpha(on ? 0f : 1f).setDuration(150).start();
+        gallery.setTopInset(on ? dp(62) : 0);
+        if (!on) return;
+        List<IndexStore.Item> chosen = gallery.chosenItems();
+        chooseCount.setText(chosen.isEmpty() ? "Выберите фото" : "Выбрано: " + chosen.size());
+        // the documents among them (found out once per picture): a scan of them as one PDF on offer
+        int photos = 0;
+        boolean doc = false;
+        for (final IndexStore.Item it : chosen) {
+            if (it.kind != IndexStore.KIND_PHOTO) continue;
+            photos++;
+            Boolean d = docOf.get(it.id);
+            if (d != null) {
+                doc |= d;
+            } else if (docAsked.add(it.id)) {
+                engine.isDocument(it, new Engine.Callback<Boolean>() {
+                    @Override
+                    public void done(Boolean yes, Exception e) {
+                        docOf.put(it.id, yes != null && yes);
+                        docAsked.remove(it.id);
+                        if (gallery.choosing()) choosingChanged();
+                    }
+                });
+            }
+        }
+        choosePdf.setText(photos <= 1 ? "Скан в PDF" : "Скан в PDF · " + photos);
+        choosePdf.setVisibility(doc ? View.VISIBLE : View.GONE);
+    }
+
+    /**
+     * The chosen photos (documents among them) scanned into one PDF, a page each in the order chosen — all chosen photos
+     * (a page the document finder missed still belongs), not videos or notes.
+     */
+    void pdfOfChosen() {
+        List<IndexStore.Item> photos = new ArrayList<IndexStore.Item>();
+        for (IndexStore.Item it : gallery.chosenItems()) if (it.kind == IndexStore.KIND_PHOTO) photos.add(it);
+        if (photos.isEmpty()) return;
+        gallery.stopChoosing();
+        pdfJob = new PdfJob(this, photos);
+        sheet = pdfJob.start(root);
+    }
+
+    /** The chosen pictures (and notes, as text) to another app at once. */
+    void shareChosen() {
+        ArrayList<Uri> uris = new ArrayList<Uri>();
+        StringBuilder text = new StringBuilder();
+        boolean images = false, videos = false;
+        for (IndexStore.Item it : gallery.chosenItems()) {
+            if (it.kind == IndexStore.KIND_NOTE) {
+                if (it.body != null) text.append(text.length() > 0 ? "\n\n" : "").append(it.body);
+                continue;
+            }
+            uris.add(Uri.parse(it.uri));
+            images |= it.kind == IndexStore.KIND_PHOTO;
+            videos |= it.kind == IndexStore.KIND_VIDEO;
+        }
+        if (uris.isEmpty() && text.length() == 0) return;
+        Intent i = new Intent(uris.size() > 1 ? Intent.ACTION_SEND_MULTIPLE : Intent.ACTION_SEND);
+        if (uris.isEmpty()) {
+            i.setType("text/plain");
+        } else {
+            i.setType(images && videos ? "*/*" : videos ? "video/*" : "image/*");
+            if (uris.size() > 1) i.putParcelableArrayListExtra(Intent.EXTRA_STREAM, uris);
+            else i.putExtra(Intent.EXTRA_STREAM, uris.get(0));
+            i.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+        }
+        if (text.length() > 0) i.putExtra(Intent.EXTRA_TEXT, text.toString());
+        try {
+            startActivity(Intent.createChooser(i, "Поделиться"));
+        } catch (Exception e) {
+            toast("Некуда отправить");
+        }
     }
 
     @Override

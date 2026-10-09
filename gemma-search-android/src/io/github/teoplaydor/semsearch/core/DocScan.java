@@ -114,12 +114,26 @@ public final class DocScan {
         return s == null ? null : s.corners;
     }
 
-    /** The sheet with its edges as curves (see {@link #findPage}), or null. */
+    /**
+     * The sheet with its edges as curves (see {@link #findPage}), or null. A document of any kind and size — a sheet, a
+     * receipt, a card, a passport spread, a note a twenty-fifth of the photo: first as light paper on something darker
+     * ({@link #byPaper}); when that finds nothing, as whatever stands out from what lies around it at the photo's edges
+     * ({@link #byContrast}: a blue card on a light table).
+     */
     public static Sheet findSheet(int[] argb, int w, int h) {
         double[] scale = new double[1];
         int[] size = new int[2];
         int[] g = smallGray(argb, w, h, 800, scale, size);
         int sw = size[0], sh = size[1];
+        Sheet s = byPaper(g, sw, sh, w, h, scale[0]);
+        return s != null ? s : byContrast(argb, w, h, sw, sh, (int) scale[0]);
+    }
+
+    /**
+     * Light paper on something darker: the light side of the photo's grey levels (Otsu) where it is smooth, its
+     * largest region; two pages side by side across a fold (a passport, a book) one region.
+     */
+    static Sheet byPaper(int[] g, int sw, int sh, int w, int h, double k) {
         int t = otsu(g);
         // the two sides of the threshold must differ: a sheet on a darker table
         long lo = 0, hi = 0, nlo = 0, nhi = 0;
@@ -142,6 +156,7 @@ public final class DocScan {
         int[] label = new int[g.length];
         int[] stack = new int[g.length];
         int bestLabel = 0, bestSize = 0, next = 0;
+        java.util.List<Integer> sizes = new java.util.ArrayList<Integer>();
         for (int i = 0; i < g.length; i++) {
             if (!bright[i] || label[i] != 0) continue;
             next++;
@@ -169,13 +184,15 @@ public final class DocScan {
                     stack[top++] = p + sw;
                 }
             }
+            sizes.add(n);
             if (n > bestSize) {
                 bestSize = n;
                 bestLabel = next;
             }
         }
-        // a sheet may be small on the photo (a fifth of it, less when the letters take up much of it)
-        if (bestSize < g.length / 25) return null;
+        // a sheet may be small on the photo (a receipt, a card, a note: a hundredth of it and more, less when the letters
+        // take up much of it)
+        if (bestSize < g.length / 100) return null;
         // back out to its edge: the smoothness test (a window) and the opening took a few pixels off it
         for (int it = 0; it < 3; it++) {
             java.util.List<Integer> grow = new java.util.ArrayList<Integer>();
@@ -187,12 +204,175 @@ public final class DocScan {
             }
             for (int i : grow) label[i] = bestLabel;
         }
+        // two pages side by side, the fold between them a dark line: the second largest region, nearly as large, along
+        // the first across a gap of a few pixels — one, the gap filled; kept when that makes a sheet
+        int second = 0, secondSize = 0;
+        for (int i = 0; i < sizes.size(); i++) {
+            if (i + 1 != bestLabel && sizes.get(i) > secondSize) {
+                secondSize = sizes.get(i);
+                second = i + 1;
+            }
+        }
+        if (second != 0 && secondSize >= 0.4 * bestSize && alongside(label, bestLabel, second, sw, sh, 4) >= 2 * Math.sqrt(secondSize)) {
+            int[] both = label.clone();
+            for (int i = 0; i < both.length; i++) if (both[i] == second) both[i] = bestLabel;
+            bridge(both, bestLabel, sw, sh, 4);
+            Sheet spread = shapeOf(both, bestLabel, sw, sh, w, h, k);
+            if (spread != null) return spread;
+        }
+        return shapeOf(label, bestLabel, sw, sh, w, h, k);
+    }
+
+    /**
+     * Whatever stands out from what lies around it at the photo's edges: the colours of a band along them (their median,
+     * and how far they stray from it) — the table, the cloth — and every pixel further from that than they stray (four
+     * times over, 30 levels at least); with what it encloses (the letters, a card's darker print), its largest region,
+     * opened by two pixels (no bridge to a shadow, a cable).
+     */
+    static Sheet byContrast(int[] argb, int w, int h, int sw, int sh, int f) {
+        int n = sw * sh;
+        int[] r = new int[n], gr = new int[n], b = new int[n];
+        for (int y = 0; y < sh; y++) {
+            for (int x = 0; x < sw; x++) {
+                int sr = 0, sg = 0, sb = 0;
+                for (int dy = 0; dy < f; dy++) {
+                    for (int dx = 0; dx < f; dx++) {
+                        int p = argb[(y * f + dy) * w + x * f + dx];
+                        sr += (p >> 16) & 0xFF;
+                        sg += (p >> 8) & 0xFF;
+                        sb += p & 0xFF;
+                    }
+                }
+                int i = y * sw + x;
+                r[i] = sr / (f * f);
+                gr[i] = sg / (f * f);
+                b[i] = sb / (f * f);
+            }
+        }
+        int band = Math.max(2, (int) Math.round(0.03 * Math.min(sw, sh)));
+        java.util.List<Integer> ring = new java.util.ArrayList<Integer>();
+        for (int y = 0; y < sh; y++) {
+            for (int x = 0; x < sw; x++) {
+                if (x < band || y < band || x >= sw - band || y >= sh - band) ring.add(y * sw + x);
+            }
+        }
+        int[] mr = new int[ring.size()], mg = new int[ring.size()], mb = new int[ring.size()];
+        for (int i = 0; i < mr.length; i++) {
+            mr[i] = r[ring.get(i)];
+            mg[i] = gr[ring.get(i)];
+            mb[i] = b[ring.get(i)];
+        }
+        java.util.Arrays.sort(mr);
+        java.util.Arrays.sort(mg);
+        java.util.Arrays.sort(mb);
+        int br = mr[mr.length / 2], bg = mg[mg.length / 2], bb = mb[mb.length / 2];
+        double[] d = new double[ring.size()];
+        for (int i = 0; i < d.length; i++) {
+            int p = ring.get(i);
+            d[i] = Math.sqrt(sq(r[p] - br) + sq(gr[p] - bg) + sq(b[p] - bb));
+        }
+        java.util.Arrays.sort(d);
+        double far = Math.max(30, 4 * d[d.length / 2] + 10);
+        boolean[] apart = new boolean[n];
+        for (int i = 0; i < n; i++) apart[i] = Math.sqrt(sq(r[i] - br) + sq(gr[i] - bg) + sq(b[i] - bb)) > far;
+        // what it encloses
+        int[] mark = new int[n];
+        for (int i = 0; i < n; i++) mark[i] = apart[i] ? 1 : 0;
+        boolean[] out = outside(mark, 1, sw, sh);
+        for (int i = 0; i < n; i++) apart[i] = !out[i];
+        boolean[] solid = open(apart, sw, sh, 2);
+        int[] label = new int[n];
+        int[] stack = new int[n];
+        int bestLabel = 0, bestSize = 0, next = 0;
+        for (int i = 0; i < n; i++) {
+            if (!solid[i] || label[i] != 0) continue;
+            next++;
+            int size = 0, top = 0;
+            stack[top++] = i;
+            label[i] = next;
+            while (top > 0) {
+                int p = stack[--top];
+                size++;
+                int x = p % sw, y = p / sw;
+                int[] nb = {x > 0 ? p - 1 : -1, x < sw - 1 ? p + 1 : -1, y > 0 ? p - sw : -1, y < sh - 1 ? p + sw : -1};
+                for (int q : nb) {
+                    if (q >= 0 && solid[q] && label[q] == 0) {
+                        label[q] = next;
+                        stack[top++] = q;
+                    }
+                }
+            }
+            if (size > bestSize) {
+                bestSize = size;
+                bestLabel = next;
+            }
+        }
+        if (bestSize < n / 100) return null;
+        for (int it = 0; it < 2; it++) {
+            java.util.List<Integer> grow = new java.util.ArrayList<Integer>();
+            for (int i = 0; i < n; i++) {
+                if (label[i] == bestLabel || !apart[i]) continue;
+                int x = i % sw, y = i / sw;
+                if (x > 0 && label[i - 1] == bestLabel || x < sw - 1 && label[i + 1] == bestLabel
+                        || y > 0 && label[i - sw] == bestLabel || y < sh - 1 && label[i + sw] == bestLabel) grow.add(i);
+            }
+            for (int i : grow) label[i] = bestLabel;
+        }
+        return shapeOf(label, bestLabel, sw, sh, w, h, f);
+    }
+
+    private static int sq(int v) {
+        return v * v;
+    }
+
+    /** How many pixels of region {@code a} have a pixel of region {@code b} within {@code r} (across and down). */
+    static int alongside(int[] label, int a, int b, int sw, int sh, int r) {
+        int count = 0;
+        for (int i = 0; i < label.length; i++) {
+            if (label[i] != a) continue;
+            int x = i % sw, y = i / sw;
+            boolean near = false;
+            for (int d = 1; d <= r && !near; d++) {
+                near = x + d < sw && label[i + d] == b || x - d >= 0 && label[i - d] == b
+                        || y + d < sh && label[i + d * sw] == b || y - d >= 0 && label[i - d * sw] == b;
+            }
+            if (near) count++;
+        }
+        return count;
+    }
+
+    /** Thin gaps in the region closed: a pixel with the region on both sides of it within {@code r}, across or down. */
+    static void bridge(int[] label, int region, int sw, int sh, int r) {
+        java.util.List<Integer> fill = new java.util.ArrayList<Integer>();
+        for (int i = 0; i < label.length; i++) {
+            if (label[i] == region) continue;
+            int x = i % sw, y = i / sw;
+            boolean l = false, rt = false, u = false, dn = false;
+            for (int d = 1; d <= r; d++) {
+                l |= x - d >= 0 && label[i - d] == region;
+                rt |= x + d < sw && label[i + d] == region;
+                u |= y - d >= 0 && label[i - d * sw] == region;
+                dn |= y + d < sh && label[i + d * sw] == region;
+            }
+            if (l && rt || u && dn) fill.add(i);
+        }
+        for (int i : fill) label[i] = region;
+    }
+
+    /**
+     * The sheet a region of the small picture (scale {@code k}) is, or null: its corners (furthest along the two
+     * diagonals), its edges as curves through its edge pixels; a convex four-cornered shape the region fills, not a
+     * blob, sides no shorter than 8% of the photo's shorter side, a hundredth of the photo at least (a bank card half a
+     * metre away).
+     */
+    static Sheet shapeOf(int[] label, int bestLabel, int sw, int sh, int w, int h, double k) {
+        int n = sw * sh;
         // its corners: furthest along the two diagonals
         double minS = 1e9, maxS = -1e9, minD = 1e9, maxD = -1e9;
         int[] c = new int[8];
         int touch = 0;
         boolean left = false, right = false, topB = false, bottom = false;
-        for (int i = 0; i < g.length; i++) {
+        for (int i = 0; i < n; i++) {
             if (label[i] != bestLabel) continue;
             int x = i % sw, y = i / sw;
             left |= x == 0;
@@ -227,7 +407,6 @@ public final class DocScan {
         for (int i = 0; i < 8; i++) small[i] = c[i] + 0.5;
         boolean[] out = outside(label, bestLabel, sw, sh);
         small = refine(small, label, bestLabel, out, sw, sh);
-        double k = scale[0];
         // the edges as curves through the edge pixels (a bent sheet), a little inside (no sliver of the table along
         // them); the corners where they meet
         java.util.List<double[]>[] sides = sidePoints(small, label, bestLabel, out, sw, sh, 0.1 * Math.min(sw, sh));
@@ -262,7 +441,7 @@ public final class DocScan {
         }
         // a sheet: a convex four-cornered shape the region fills, not a blob
         double area = Math.abs(quadArea(q));
-        if (!convex(q) || area < 0.06 * w * h) return null;
+        if (!convex(q) || area < 0.01 * w * h) return null;
         // the region with its holes (the letters) filled — all that the outside does not reach — fills the shape
         int filled = 0;
         for (boolean o : out) if (!o) filled++;
@@ -628,6 +807,10 @@ public final class DocScan {
         double wh;
         double f2 = Math.abs(n2[2] * n3[2]) < 1e-9 ? -1 : -(n2[0] * n3[0] + n2[1] * n3[1]) / (n2[2] * n3[2]);
         double size = Math.max(w, h);
+        // a phone's camera: its focal length between half the photo's longer side (the widest lens) and four times it
+        // (a zoom); out of that (a small document: a pixel off at a corner moves the vanishing points by far), a usual
+        // one, as long as there is perspective to measure with it
+        if (!(f2 > Math.pow(0.5 * size, 2) && f2 < Math.pow(4 * size, 2)) && Math.abs(n2[2]) + Math.abs(n3[2]) > 1e-3) f2 = Math.pow(0.9 * size, 2);
         if (f2 > Math.pow(0.3 * size, 2) && f2 < Math.pow(10 * size, 2)) {
             wh = Math.sqrt((n2[0] * n2[0] + n2[1] * n2[1]) / f2 + n2[2] * n2[2]) / Math.sqrt((n3[0] * n3[0] + n3[1] * n3[1]) / f2 + n3[2] * n3[2]);
         } else {

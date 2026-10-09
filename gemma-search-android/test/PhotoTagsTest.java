@@ -130,6 +130,24 @@ public class PhotoTagsTest {
         check(night.size() >= 3 && night.get(0).equals("ночной город") && night.containsAll(Arrays.asList("город", "ночь")),
                 "a city at night: ночной город first, город and ночь too");
 
+        // documents of any kind — not only a sheet of paper — and not a screen; in a gallery where a third of the
+        // pictures are documents too (their typical similarity raised)
+        String[] docScenes = {"sunset sea beach", "contract paper", "city night", "receipt", "cat sofa", "passport",
+                "flowers field", "snow hills", "book page"};
+        List<float[]> docGallery = new ArrayList<float[]>();
+        for (int n = 0; n < 63; n++) docGallery.add(bag(docScenes[n % docScenes.length]));
+        real.calibrate(docGallery);
+        String[] docs = {"contract hand", "receipt table", "business card table", "passport", "ticket", "book page", "envelope",
+                "id card", "handwriting notebook", "printed page"};
+        String[] notDocs = {"screenshot web page", "photo of a screen chat", "dog", "cat sofa", "sunset sea beach", "city night",
+                "woman portrait", "man smile", "children park", "family dinner", "person face"};
+        StringBuilder missed = new StringBuilder(), taken = new StringBuilder();
+        for (String d0 : docs) if (!real.document(bag(d0))) missed.append(" «").append(d0).append("»");
+        for (String n0 : notDocs) if (real.document(bag(n0))) taken.append(" «").append(n0).append("»");
+        check(missed.length() == 0, "documents of any kind found: a contract in a hand, a receipt, a business card, a passport, a "
+                + "ticket, a book's page, an envelope, an ID card, a notebook, a printed page" + (missed.length() > 0 ? " — missed:" + missed : ""));
+        check(taken.length() == 0, "no screen, no dog, no sea, no person taken for one" + (taken.length() > 0 ? " — taken:" + taken : ""));
+
         File cache = new File(args[1], "photo_tags.bin");
         cache.delete();
         PhotoTags.writeCache(cache, Arrays.asList(w), vec);

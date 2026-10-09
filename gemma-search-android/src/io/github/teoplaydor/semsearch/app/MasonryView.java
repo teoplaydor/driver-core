@@ -47,6 +47,9 @@ final class MasonryView extends ViewGroup {
         void longPress(int index);
 
         void dragStarted();
+
+        /** Choosing began or ended, or what is chosen changed. */
+        void choosingChanged();
     }
 
     /**
@@ -95,6 +98,10 @@ final class MasonryView extends ViewGroup {
         final ImageView badge;
         long key = -1;
         int index = -1;
+        /** While pictures are being chosen: 1 not chosen (an empty ring), 2 chosen (a check, a frame); 0 otherwise. */
+        int mark;
+        private final Paint markPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final android.graphics.Path tick = new android.graphics.Path();
 
         Tile(Context c) {
             super(c);
@@ -112,6 +119,49 @@ final class MasonryView extends ViewGroup {
             LayoutParams bl = new LayoutParams(Ui.dp(c, 26), Ui.dp(c, 26), Gravity.TOP | Gravity.END);
             bl.setMargins(0, Ui.dp(c, 6), Ui.dp(c, 6), 0);
             addView(badge, bl);
+            setWillNotDraw(false);
+        }
+
+        void setMark(int m) {
+            if (mark == m) return;
+            mark = m;
+            invalidate();
+        }
+
+        @Override
+        protected void dispatchDraw(Canvas c) {
+            super.dispatchDraw(c);
+            if (mark == 0) return;
+            float d = getResources().getDisplayMetrics().density, r = 11 * d, cx = 8 * d + r, cy = 8 * d + r;
+            if (mark == 2) {
+                // chosen: a frame round the tile, a filled circle with a check
+                markPaint.setStyle(Paint.Style.STROKE);
+                markPaint.setStrokeWidth(3 * d);
+                markPaint.setColor(Ui.ACCENT);
+                RectF f = new RectF(1.5f * d, 1.5f * d, getWidth() - 1.5f * d, getHeight() - 1.5f * d);
+                c.drawRoundRect(f, 10 * d, 10 * d, markPaint);
+                markPaint.setStyle(Paint.Style.FILL);
+                c.drawCircle(cx, cy, r, markPaint);
+                markPaint.setStyle(Paint.Style.STROKE);
+                markPaint.setStrokeWidth(2.2f * d);
+                markPaint.setStrokeCap(Paint.Cap.ROUND);
+                markPaint.setStrokeJoin(Paint.Join.ROUND);
+                markPaint.setColor(Ui.ON_ACCENT);
+                tick.reset();
+                tick.moveTo(cx - 4.8f * d, cy + 0.2f * d);
+                tick.lineTo(cx - 1.4f * d, cy + 3.6f * d);
+                tick.lineTo(cx + 5f * d, cy - 3.4f * d);
+                c.drawPath(tick, markPaint);
+            } else {
+                // not chosen: an empty ring on a light shade, to tap
+                markPaint.setStyle(Paint.Style.FILL);
+                markPaint.setColor(0x55000000);
+                c.drawCircle(cx, cy, r, markPaint);
+                markPaint.setStyle(Paint.Style.STROKE);
+                markPaint.setStrokeWidth(2 * d);
+                markPaint.setColor(0xEEFFFFFF);
+                c.drawCircle(cx, cy, r - d, markPaint);
+            }
         }
     }
 
@@ -123,13 +173,19 @@ final class MasonryView extends ViewGroup {
     private final Host host;
     private List<IndexStore.Item> items = new ArrayList<IndexStore.Item>();
     private int columns = 3;
-    private final int gap, padH, padTop, padBottom;
+    private final int gap, padH, padBottom;
+    private int padTop;
+    private final int padTop0;
     private int[] ix = new int[0], iy = new int[0], iw = new int[0], ih = new int[0];
     private int contentHeight, laidWidth = -1;
     private final SparseArray<Tile> shown = new SparseArray<Tile>();
     private final ArrayList<Tile> pool = new ArrayList<Tile>();
     private final TextPaint notePaint = new TextPaint(TextPaint.ANTI_ALIAS_FLAG);
     private boolean intro;
+
+    /** The pictures chosen (long press, then taps), in the order chosen; choosing goes on until stopped. */
+    private final java.util.LinkedHashSet<Long> chosen = new java.util.LinkedHashSet<Long>();
+    private boolean choosing;
 
     private final OverScroller scroller;
     private VelocityTracker velocity;
@@ -151,7 +207,7 @@ final class MasonryView extends ViewGroup {
         this.host = host;
         gap = Ui.dp(c, 4);
         padH = Ui.dp(c, 10);
-        padTop = Ui.dp(c, 10);
+        padTop = padTop0 = Ui.dp(c, 10);
         padBottom = Ui.dp(c, 110);
         scroller = new OverScroller(c);
         ViewConfiguration vc = ViewConfiguration.get(c);
@@ -167,8 +223,12 @@ final class MasonryView extends ViewGroup {
         return items;
     }
 
-    /** Shows a new list; with animate the view jumps to the top and the first screen fades in. */
+    /** Shows a new list (choosing ends); with animate the view jumps to the top and the first screen fades in. */
     void setItems(List<IndexStore.Item> list, int columns, boolean animate) {
+        boolean was = choosing;
+        choosing = false;
+        chosen.clear();
+        if (was) host.choosingChanged();
         items = list;
         this.columns = columns;
         recycleAll();
@@ -182,6 +242,20 @@ final class MasonryView extends ViewGroup {
         }
         fill();
         intro = false;
+        invalidate();
+    }
+
+    /** Room above the first row (a bar floating over the grid's top while choosing), the place kept. */
+    void setTopInset(int px) {
+        if (padTop == padTop0 + px) return;
+        int was = padTop;
+        padTop = padTop0 + px;
+        if (laidWidth < 0) return;
+        recycleAll();
+        computePositions();
+        // at the top: the first row moves down under the bar's room; further down the grid stays where it was
+        super.scrollTo(0, clamp(getScrollY() <= was ? 0 : getScrollY() + padTop - was));
+        fill();
         invalidate();
     }
 
@@ -202,6 +276,74 @@ final class MasonryView extends ViewGroup {
         super.scrollTo(0, clamp(i >= 0 ? iy[i] - offset : getScrollY()));
         fill();
         invalidate();
+    }
+
+    // ------------------------------------------------------------------ choosing
+
+    boolean choosing() {
+        return choosing;
+    }
+
+    /** Choosing begins, with the item at {@code index} chosen. */
+    void startChoosing(int index) {
+        choosing = true;
+        chosen.clear();
+        if (index >= 0 && index < items.size()) chosen.add(items.get(index).id);
+        markTiles();
+        host.choosingChanged();
+    }
+
+    /** The item at {@code index} chosen, or no longer. */
+    void toggle(int index) {
+        if (index < 0 || index >= items.size()) return;
+        long id = items.get(index).id;
+        if (!chosen.remove(id)) chosen.add(id);
+        markTiles();
+        host.choosingChanged();
+    }
+
+    /** Every item chosen. */
+    void chooseAll() {
+        for (IndexStore.Item it : items) chosen.add(it.id);
+        markTiles();
+        host.choosingChanged();
+    }
+
+    void stopChoosing() {
+        choosing = false;
+        chosen.clear();
+        markTiles();
+        host.choosingChanged();
+    }
+
+    /** The items chosen, in the order they were. */
+    List<IndexStore.Item> chosenItems() {
+        java.util.Map<Long, IndexStore.Item> byId = new java.util.HashMap<Long, IndexStore.Item>();
+        for (IndexStore.Item it : items) byId.put(it.id, it);
+        List<IndexStore.Item> out = new ArrayList<IndexStore.Item>();
+        for (long id : chosen) {
+            IndexStore.Item it = byId.get(id);
+            if (it != null) out.add(it);
+        }
+        return out;
+    }
+
+    private void markTiles() {
+        for (int k = 0; k < shown.size(); k++) mark(shown.valueAt(k), true);
+    }
+
+    /** A tile's mark as choosing stands; a chosen picture drawn a little smaller in its frame. */
+    private void mark(Tile t, boolean animate) {
+        if (t.index < 0 || t.index >= items.size()) return;
+        boolean on = choosing && chosen.contains(items.get(t.index).id);
+        t.setMark(!choosing ? 0 : on ? 2 : 1);
+        float s = on ? 0.93f : 1f;
+        if (animate) {
+            t.animate().scaleX(s).scaleY(s).setDuration(140).setInterpolator(Ui.EASE).start();
+        } else {
+            t.setScaleX(s);
+            t.setScaleY(s);
+        }
     }
 
     // ------------------------------------------------------------------ layout
@@ -320,6 +462,7 @@ final class MasonryView extends ViewGroup {
         }
         addViewInLayout(t, -1, new LayoutParams(iw[i], ih[i]), true);
         place(i, t);
+        mark(t, false);
         if (it.kind != IndexStore.KIND_NOTE) host.bindThumb(t, it, iw[i], ih[i]);
         shown.put(i, t);
         if (intro && iy[i] < getScrollY() + getHeight()) {

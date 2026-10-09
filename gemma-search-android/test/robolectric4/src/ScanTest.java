@@ -31,7 +31,8 @@ import io.github.teoplaydor.semsearch.app.MainActivity;
  * A document photographed on a table: the viewer offers «Скан для печати» for it (its words are a document's) and not
  * for a dog; the scan cuts the sheet out to its proportions in strict black and white, colour on request, and saves it;
  * «Назад» comes back to the photo. A bent sheet: «Текст ровно» straightens its lines (off, they stay bent). A page
- * photographed sideways: turned upright by itself, «↻» turns it on; the result zooms (a {@code PhotoView}).
+ * photographed sideways: turned upright by itself, «↻» turns it on; the result zooms (a {@code PhotoView}). A long
+ * press in the grid chooses pictures; with documents among them, «Скан в PDF» makes them one PDF, a page each.
  */
 @RunWith(RobolectricTestRunner.class)
 @Config(sdk = 34, qualifiers = "ru-w411dp-h891dp-night-xxhdpi")
@@ -202,7 +203,7 @@ public class ScanTest {
         System.out.println("scan: " + status + " — " + bw.getWidth() + "x" + bw.getHeight());
         UiShots.shot(a, "15b-scan");
         double aspect = (double) bw.getHeight() / bw.getWidth();
-        assertTrue(status, status.startsWith("Лист вырезан и выпрямлен"));
+        assertTrue(status, status.startsWith("Документ вырезан и выпрямлен"));
         assertEquals("the sheet's proportions", 792.0 / 560, aspect, 0.06);
         assertTrue("a small sheet enlarged to a print grid: " + bw.getHeight(), Math.max(bw.getWidth(), bw.getHeight()) >= 2480);
         int[] px = new int[bw.getWidth() * bw.getHeight()];
@@ -266,7 +267,7 @@ public class ScanTest {
             double rowsOn = rows(straight); // (the bitmap is let go once replaced)
             System.out.println("bent, «Текст ровно»: " + on + " — rows " + rowsOn);
             UiShots.shot(a, "15d-scan-bent");
-            assertTrue(on, on.startsWith("Лист вырезан и выпрямлен") && on.contains("строки выпрямлены")
+            assertTrue(on, on.startsWith("Документ вырезан и выпрямлен") && on.contains("строки выпрямлены")
                     && on.contains("интервалы между строками выровнены"));
             Robo.textView(panel2, "Текст ровно").performClick();
             Robo.waitFor("as cut", () -> !(Boolean) Robo.field(panel2, "busy") && Robo.field(panel2, "result") != straight);
@@ -311,6 +312,73 @@ public class ScanTest {
         }
         a.onBackPressed();
         Robo.settle(600);
+        assertNull(Robo.byName(root, "Viewer"));
+
+        // a long press chooses (no longer «similar»): the two documents and a dog, the dog un-chosen again; the PDF
+        // offered for the documents, made: a page each, in the order chosen
+        final Object grid = Robo.field(a, "gallery");
+        List<IndexStore.Item> items = grid(a);
+        float[] docVec = Robo.bag("paper document text");
+        int d1 = -1, d2 = -1, dog = at(a, "dog");
+        for (int i = 0; i < items.size(); i++) {
+            if (!Arrays.equals(items.get(i).emb, docVec)) continue;
+            if (d1 < 0) d1 = i;
+            else if (d2 < 0) d2 = i;
+        }
+        assertTrue("two documents in the grid", d1 >= 0 && d2 >= 0 && dog >= 0);
+        String sectionBefore = String.valueOf(((TextView) Robo.field(a, "section")).getText());
+        a.longPress(d1);
+        Robo.settle(400);
+        assertTrue("choosing", (Boolean) Robo.call(grid, "choosing"));
+        assertEquals("not «similar»", sectionBefore, String.valueOf(((TextView) Robo.field(a, "section")).getText()));
+        final View bar = (View) Robo.field(a, "chooseBar");
+        final TextView count = (TextView) Robo.field(a, "chooseCount");
+        assertEquals(View.VISIBLE, bar.getVisibility());
+        assertEquals("Выбрано: 1", count.getText().toString());
+        a.open(d2);
+        a.open(dog);
+        Robo.settle(300);
+        assertEquals("Выбрано: 3", count.getText().toString());
+        a.open(dog);
+        Robo.settle(300);
+        assertEquals("a tap un-chooses", "Выбрано: 2", count.getText().toString());
+        final TextView pdfButton = (TextView) Robo.field(a, "choosePdf");
+        Robo.waitFor("the PDF offered", () -> pdfButton.getVisibility() == View.VISIBLE);
+        assertEquals("Скан в PDF · 2", pdfButton.getText().toString());
+        assertNull("no viewer opened by the taps", Robo.byName(root, "Viewer"));
+        UiShots.shot(a, "15g-chosen");
+        pdfButton.performClick();
+        Robo.settle(300);
+        assertFalse("choosing over", (Boolean) Robo.call(grid, "choosing"));
+        final Object job = Robo.field(a, "pdfJob");
+        Robo.waitFor("the PDF", () -> (Boolean) Robo.field(job, "done"));
+        Robo.settle(300);
+        UiShots.shot(a, "15h-pdf");
+        assertNull("made: " + Robo.field(job, "error"), Robo.field(job, "error"));
+        assertEquals(2, Robo.field(job, "pages"));
+        File pdf = (File) Robo.field(job, "file");
+        assertNotNull("written into the app's Documents (the stand-in gallery takes no new files)", pdf);
+        byte[] bytes = java.nio.file.Files.readAllBytes(pdf.toPath());
+        String text = new String(bytes, "ISO-8859-1");
+        System.out.println("pdf: " + pdf + " (" + bytes.length + " bytes) — " + Robo.allText(root).replace('\n', ' '));
+        assertTrue(text.startsWith("%PDF-1.4") && text.contains("/Count 2 >>") && text.trim().endsWith("%%EOF"));
+        java.util.regex.Matcher box = java.util.regex.Pattern.compile("/MediaBox \\[0 0 ([0-9.]+) ([0-9.]+)\\]").matcher(text);
+        assertTrue(box.find());
+        assertEquals("an A4 page (the sheets are A4): width", 595.28, Double.parseDouble(box.group(1)), 0.5);
+        assertEquals("height", 841.89, Double.parseDouble(box.group(2)), 2);
+        assertNotNull(Robo.textView(root, "Поделиться"));
+        a.onBackPressed();
+        Robo.settle(600);
+        assertEquals(View.GONE, bar.getVisibility());
+
+        // «Назад» while choosing: choosing ends, nothing else
+        a.longPress(dog);
+        Robo.settle(300);
+        assertEquals(View.VISIBLE, bar.getVisibility());
+        a.onBackPressed();
+        Robo.settle(400);
+        assertFalse((Boolean) Robo.call(grid, "choosing"));
+        assertEquals(View.GONE, bar.getVisibility());
         a.finish();
     }
 }
