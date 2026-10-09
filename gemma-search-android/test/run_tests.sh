@@ -59,6 +59,7 @@ java -Djava.awt.headless=true -Dfile.encoding=UTF-8 -Dstdout.encoding=UTF-8 -cp 
 
 echo "== 2e. faces (YuNet + SFace) vs OpenCV's FaceDetectorYN / FaceRecognizerSF on stand-in graphs"
 python3 -m pip install -q "opencv-python-headless==4.12.0.88" pillow
+mkdir -p "$T/faces"
 python3 test/faces/make_face_models.py "$T/faces/models" "$T/faces/img" > "$T/faces/imgs.txt"
 python3 test/faces/reference_faces.py "$T/faces/models" "$T/faces/ref" $(cat "$T/faces/imgs.txt") > "$T/faces/reference.json"
 javac --release 8 -XDstringConcat=inline -nowarn -encoding UTF-8 -cp "$T/cls:$T/ort-desktop.jar" -d "$T/cls" test/faces/FaceModelTest.java
