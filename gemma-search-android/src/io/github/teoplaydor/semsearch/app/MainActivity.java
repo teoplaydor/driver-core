@@ -4,6 +4,7 @@ import android.Manifest;
 import android.app.Activity;
 import android.content.ClipData;
 import android.content.ClipboardManager;
+import android.content.ContentResolver;
 import android.content.Context;
 import android.content.Intent;
 import android.content.pm.PackageManager;
@@ -195,7 +196,7 @@ public final class MainActivity extends Activity implements Engine.Listener, Vie
             }
         }
         if (scan != null && !scan.isClosing()) {
-            scan.close();
+            if (!scan.back()) scan.close();
             return;
         }
         if (viewer != null && !viewer.isClosing()) {
@@ -1803,7 +1804,10 @@ public final class MainActivity extends Activity implements Engine.Listener, Vie
     /** The photo for a scan: about {@code pixels}, upright. */
     Bitmap loadForScan(IndexStore.Item it, long pixels) throws Exception {
         BitmapLoader t = testLoader;
-        return t != null ? t.load(it, 3000) : Media.full(getContentResolver(), it, pixels);
+        if (t != null) return t.load(it, 3000);
+        // at least that many pixels (Media.full gives at most: a 50 MP photo came as a quarter)
+        ContentResolver cr = getContentResolver();
+        return Media.decode(cr, Uri.parse(it.uri), Media.orientation(cr, it.mediaId), pixels);
     }
 
     @Override

@@ -141,6 +141,7 @@ public class ScanTest {
         double aspect = (double) bw.getHeight() / bw.getWidth();
         assertTrue(status, status.startsWith("Лист вырезан и выпрямлен"));
         assertEquals("the sheet's proportions", 792.0 / 560, aspect, 0.06);
+        assertTrue("a small sheet enlarged to a print grid: " + bw.getHeight(), Math.max(bw.getWidth(), bw.getHeight()) >= 2480);
         int[] px = new int[bw.getWidth() * bw.getHeight()];
         bw.getPixels(px, 0, bw.getWidth(), 0, 0, bw.getWidth(), bw.getHeight());
         int black = 0, white = 0;
@@ -151,9 +152,23 @@ public class ScanTest {
         assertEquals("strict black and white", px.length, black + white);
         assertTrue("the words are there: " + black, black > px.length / 50 && black < px.length / 3);
 
+        // the corners by hand: the editor over the photo, a corner dragged, «Готово»
+        Robo.textView(panel, "Края…").performClick();
+        Robo.settle(400);
+        View editor = (View) Robo.field(panel, "editor");
+        assertEquals(View.VISIBLE, editor.getVisibility());
+        UiShots.shot(a, "15c-scan-edges");
+        float[] was = (float[]) Robo.call(editor, "corners");
+        Robo.call(editor, "setCorner", 0, was[0] + 20f, was[1] + 20f);
+        Robo.textView(panel, "Готово").performClick();
+        Robo.waitFor("by hand", () -> !(Boolean) Robo.field(panel, "busy")
+                && String.valueOf(((TextView) Robo.field(panel, "status")).getText()).startsWith("Края заданы вручную"));
+        assertEquals(View.GONE, editor.getVisibility());
+        final Bitmap byHand = (Bitmap) Robo.field(panel, "result");
+
         // colour on request
         ((TextView[]) Robo.field(panel, "modeChips"))[2].performClick();
-        Robo.waitFor("colour", () -> !(Boolean) Robo.field(panel, "busy") && Robo.field(panel, "result") != bw);
+        Robo.waitFor("colour", () -> !(Boolean) Robo.field(panel, "busy") && Robo.field(panel, "result") != byHand);
         Bitmap color = (Bitmap) Robo.field(panel, "result");
         int[] cp = new int[color.getWidth() * color.getHeight()];
         color.getPixels(cp, 0, color.getWidth(), 0, 0, color.getWidth(), color.getHeight());

@@ -49,17 +49,26 @@ import io.github.teoplaydor.semsearch.core.DocScan;
  * PDF page through Android's printing), saved to Pictures/SemSearch, or shared. The original stays as it is.
  */
 final class ScanPanel extends FrameLayout {
-    /** The longer side of the result: A4 at about 220 dpi (memory: a few copies of the page are held while it is made). */
-    static final int MAX_SIDE = 2600;
-    /** About this many pixels of the photo are read. */
-    static final long SOURCE_PIXELS = 8_000_000L;
+    /** The longer side of the result: A4 at 300 dpi. */
+    static final int MAX_SIDE = 3508;
+    /**
+     * At least this many pixels of the photo are read (all of a 12 MP photo; a 50 MP one halved): 0.10.17 read a quarter
+     * of a 50 MP photo, and the sheet came out at ~115 dpi.
+     */
+    static final long SOURCE_PIXELS = 12_000_000L;
 
     private final MainActivity a;
     private final IndexStore.Item item;
     private final ExecutorService work = Executors.newSingleThreadExecutor();
     private final Handler ui = new Handler(Looper.getMainLooper());
     private final ImageView picture;
-    private final TextView status, pageChip, levelChip;
+    private final TextView status, pageChip, levelChip, edgesChip;
+    private final View controls;
+    private final LinearLayout editBar;
+    private final CornerView editor;
+    /** The corners were set by hand. */
+    private boolean manual;
+    private double angle;
     private final TextView[] modeChips = new TextView[3];
     private boolean closing;
 
@@ -111,6 +120,9 @@ final class ScanPanel extends FrameLayout {
         picture = new ImageView(c);
         picture.setScaleType(ImageView.ScaleType.FIT_CENTER);
         frame.addView(picture, new LayoutParams(-1, -1));
+        editor = new CornerView(c);
+        editor.setVisibility(GONE);
+        frame.addView(editor, new LayoutParams(-1, -1));
         column.addView(frame, new LinearLayout.LayoutParams(-1, 0, 1));
 
         status = Ui.text(c, "Ищу лист на фото…", 13, Ui.TEXT2, Ui.REGULAR);
@@ -136,9 +148,19 @@ final class ScanPanel extends FrameLayout {
                 redo();
             }
         });
+        edgesChip = chip("Края…", new Runnable() {
+            @Override
+            public void run() {
+                editEdges();
+            }
+        });
         toggles.addView(pageChip);
+        toggles.addView(edgesChip);
         toggles.addView(levelChip);
-        column.addView(toggles);
+        LinearLayout controlsBox = new LinearLayout(c);
+        controlsBox.setOrientation(LinearLayout.VERTICAL);
+        controlsBox.addView(toggles);
+        controls = controlsBox;
 
         LinearLayout modes = new LinearLayout(c);
         modes.setGravity(Gravity.CENTER);
@@ -155,7 +177,7 @@ final class ScanPanel extends FrameLayout {
             });
             modes.addView(modeChips[i]);
         }
-        column.addView(modes);
+        controlsBox.addView(modes);
 
         LinearLayout buttons = new LinearLayout(c);
         buttons.setPadding(Ui.dp(c, 16), Ui.dp(c, 8), Ui.dp(c, 16), Ui.dp(c, 20));
@@ -181,13 +203,37 @@ final class ScanPanel extends FrameLayout {
         // printing first, on its own line; saving and sharing under it (three in a row do not fit their words)
         LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-1, Ui.dp(c, 50));
         lp.setMargins(Ui.dp(c, 16), Ui.dp(c, 14), Ui.dp(c, 16), 0);
-        column.addView(print, lp);
+        controlsBox.addView(print, lp);
         LinearLayout.LayoutParams l2 = new LinearLayout.LayoutParams(0, Ui.dp(c, 50), 1);
         LinearLayout.LayoutParams l3 = new LinearLayout.LayoutParams(0, Ui.dp(c, 50), 1);
         l3.leftMargin = Ui.dp(c, 8);
         buttons.addView(save, l2);
         buttons.addView(share, l3);
-        column.addView(buttons);
+        controlsBox.addView(buttons);
+        column.addView(controlsBox);
+        // the corners by hand: «Готово» / «Отмена» in place of the rest
+        editBar = new LinearLayout(c);
+        editBar.setPadding(Ui.dp(c, 16), Ui.dp(c, 14), Ui.dp(c, 16), Ui.dp(c, 20));
+        editBar.setVisibility(GONE);
+        TextView cancel = Sheet.button(c, "Отмена", false), done = Sheet.button(c, "Готово", true);
+        cancel.setOnClickListener(new OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                endEdit(false);
+            }
+        });
+        done.setOnClickListener(new OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                endEdit(true);
+            }
+        });
+        LinearLayout.LayoutParams e1 = new LinearLayout.LayoutParams(0, Ui.dp(c, 50), 1);
+        LinearLayout.LayoutParams e2 = new LinearLayout.LayoutParams(0, Ui.dp(c, 50), 1);
+        e2.leftMargin = Ui.dp(c, 8);
+        editBar.addView(cancel, e1);
+        editBar.addView(done, e2);
+        column.addView(editBar);
         updateChips();
     }
 
@@ -216,6 +262,7 @@ final class ScanPanel extends FrameLayout {
         on(levelChip, level, true);
         for (int i = 0; i < 3; i++) on(modeChips[i], mode == i, true);
         pageChip.setText(page == null && src != null ? "Лист не найден" : "Лист");
+        on(edgesChip, manual, src != null);
     }
 
     private void on(TextView t, boolean on, boolean enabled) {
@@ -287,19 +334,20 @@ final class ScanPanel extends FrameLayout {
             cutWithPage = withPage;
             levelled = null;
         }
-        double angle = 0;
         if (levelled == null || levelledOn != level) {
             if (level) {
                 angle = DocScan.skew(cut.px, cut.w, cut.h);
                 levelled = DocScan.rotate(cut, angle);
             } else {
+                angle = 0;
                 levelled = cut;
             }
             levelledOn = level;
         }
         int[] out = DocScan.scan(levelled.px, levelled.w, levelled.h, mode);
         final Bitmap bmp = Bitmap.createBitmap(out, levelled.w, levelled.h, Bitmap.Config.ARGB_8888);
-        final String note = (withPage ? "Лист вырезан и выпрямлен" : page == null ? "Лист не найден — всё фото" : "Всё фото")
+        final String note = (withPage ? (manual ? "Края заданы вручную" : "Лист вырезан и выпрямлен")
+                : page == null ? "Лист не найден — всё фото, «Края…» — задать углы" : "Всё фото")
                 + (level ? (angle != 0 ? String.format(Locale.ROOT, ", текст повёрнут на %.1f°", -angle) : ", текст ровный") : "")
                 + " · " + levelled.w + "×" + levelled.h + " · " + (System.currentTimeMillis() - t0) + " мс";
         ui.post(new Runnable() {
@@ -477,6 +525,185 @@ final class ScanPanel extends FrameLayout {
                 }
             }
         }, attrs);
+    }
+
+    /** «Назад» inside the panel: leaves the corner editing first. True when that is what it did. */
+    boolean back() {
+        if (editor.getVisibility() != VISIBLE) return false;
+        endEdit(false);
+        return true;
+    }
+
+    /** The corners by hand, on the photo: those found (or a frame a little inside the photo) to drag. */
+    private void editEdges() {
+        if (src == null) return;
+        int max = 1600;
+        double k = Math.min(1.0, (double) max / Math.max(sw, sh));
+        int dw = Math.max(1, (int) Math.round(sw * k)), dh = Math.max(1, (int) Math.round(sh * k));
+        int[] small = k < 1 ? io.github.teoplaydor.semsearch.core.FaceModel.resize(src, sw, sh, dw, dh) : src;
+        float[] q = page != null ? page.clone() : new float[]{0.06f * sw, 0.06f * sh, 0.94f * sw, 0.06f * sh, 0.94f * sw, 0.94f * sh,
+                0.06f * sw, 0.94f * sh};
+        editor.set(Bitmap.createBitmap(small, dw, dh, Bitmap.Config.ARGB_8888), (float) (dw / (double) sw), q);
+        picture.setVisibility(GONE);
+        editor.setVisibility(VISIBLE);
+        controls.setVisibility(GONE);
+        editBar.setVisibility(VISIBLE);
+        status.setText("Перетащите углы на углы листа");
+    }
+
+    private void endEdit(boolean apply) {
+        editor.setVisibility(GONE);
+        picture.setVisibility(VISIBLE);
+        controls.setVisibility(VISIBLE);
+        editBar.setVisibility(GONE);
+        if (apply) {
+            page = editor.corners();
+            manual = true;
+            usePage = true;
+            cut = null;
+            redo();
+        } else {
+            updateChips();
+            status.setText("");
+        }
+    }
+
+    /**
+     * The photo with the sheet's four corners to drag (the nearest handle to the finger), a magnifier above the finger
+     * while dragging.
+     */
+    static final class CornerView extends View {
+        private Bitmap shown;
+        /** Shown pixels per photo pixel. */
+        private float scale;
+        private float[] q;
+        private final RectF dest = new RectF();
+        private int active = -1;
+        private float fx, fy;
+        private final Paint line = new Paint(Paint.ANTI_ALIAS_FLAG), handle = new Paint(Paint.ANTI_ALIAS_FLAG),
+                ring = new Paint(Paint.ANTI_ALIAS_FLAG), img = new Paint(Paint.FILTER_BITMAP_FLAG);
+
+        CornerView(Context c) {
+            super(c);
+            line.setStyle(Paint.Style.STROKE);
+            line.setStrokeWidth(Ui.dp(c, 2.5f));
+            line.setColor(Ui.ACCENT);
+            handle.setColor(0x663D8BFF);
+            ring.setStyle(Paint.Style.STROKE);
+            ring.setStrokeWidth(Ui.dp(c, 2));
+            ring.setColor(Color.WHITE);
+        }
+
+        void set(Bitmap b, float scale, float[] corners) {
+            shown = b;
+            this.scale = scale;
+            q = corners;
+            invalidate();
+        }
+
+        float[] corners() {
+            return q.clone();
+        }
+
+        /** Test hook: a corner moved to (x, y) of the photo. */
+        void setCorner(int i, float x, float y) {
+            q[2 * i] = x;
+            q[2 * i + 1] = y;
+            invalidate();
+        }
+
+        private void layoutDest() {
+            float k = Math.min(getWidth() / (float) shown.getWidth(), getHeight() / (float) shown.getHeight());
+            float w = shown.getWidth() * k, h = shown.getHeight() * k;
+            dest.set((getWidth() - w) / 2, (getHeight() - h) / 2, (getWidth() + w) / 2, (getHeight() + h) / 2);
+        }
+
+        /** Photo pixels to the screen: × scale (to the shown bitmap) × the fit. */
+        private float k() {
+            return dest.width() / shown.getWidth() * scale;
+        }
+
+        @Override
+        protected void onDraw(Canvas c) {
+            if (shown == null) return;
+            layoutDest();
+            c.drawBitmap(shown, null, dest, img);
+            float k = k();
+            android.graphics.Path p = new android.graphics.Path();
+            for (int i = 0; i < 4; i++) {
+                float x = dest.left + q[2 * i] * k, y = dest.top + q[2 * i + 1] * k;
+                if (i == 0) p.moveTo(x, y);
+                else p.lineTo(x, y);
+            }
+            p.close();
+            c.drawPath(p, line);
+            float r = Ui.dp(getContext(), 14);
+            for (int i = 0; i < 4; i++) {
+                float x = dest.left + q[2 * i] * k, y = dest.top + q[2 * i + 1] * k;
+                c.drawCircle(x, y, r, handle);
+                c.drawCircle(x, y, r, ring);
+            }
+            if (active >= 0) {
+                // the magnifier: 3× around the corner, away from the finger
+                float mr = Ui.dp(getContext(), 56);
+                float cx = fx < getWidth() / 2f ? getWidth() - mr - Ui.dp(getContext(), 12) : mr + Ui.dp(getContext(), 12);
+                float cy = mr + Ui.dp(getContext(), 12);
+                float hx = dest.left + q[2 * active] * k, hy = dest.top + q[2 * active + 1] * k;
+                c.save();
+                android.graphics.Path clip = new android.graphics.Path();
+                clip.addCircle(cx, cy, mr, android.graphics.Path.Direction.CW);
+                c.clipPath(clip);
+                c.drawColor(Color.BLACK);
+                c.translate(cx, cy);
+                c.scale(3, 3);
+                c.translate(-hx, -hy);
+                c.drawBitmap(shown, null, dest, img);
+                c.drawPath(p, line);
+                c.restore();
+                c.drawCircle(cx, cy, mr, ring);
+                c.drawLine(cx - 10, cy, cx + 10, cy, ring);
+                c.drawLine(cx, cy - 10, cx, cy + 10, ring);
+            }
+        }
+
+        @Override
+        public boolean onTouchEvent(android.view.MotionEvent e) {
+            if (shown == null) return false;
+            layoutDest();
+            float k = k();
+            switch (e.getActionMasked()) {
+                case android.view.MotionEvent.ACTION_DOWN: {
+                    float best = Ui.dp(getContext(), 48);
+                    active = -1;
+                    for (int i = 0; i < 4; i++) {
+                        float d = (float) Math.hypot(e.getX() - (dest.left + q[2 * i] * k), e.getY() - (dest.top + q[2 * i + 1] * k));
+                        if (d < best) {
+                            best = d;
+                            active = i;
+                        }
+                    }
+                    fx = e.getX();
+                    fy = e.getY();
+                    invalidate();
+                    return active >= 0;
+                }
+                case android.view.MotionEvent.ACTION_MOVE:
+                    if (active < 0) return false;
+                    fx = e.getX();
+                    fy = e.getY();
+                    q[2 * active] = Math.max(0, Math.min(shown.getWidth() / scale, (fx - dest.left) / k));
+                    q[2 * active + 1] = Math.max(0, Math.min(shown.getHeight() / scale, (fy - dest.top) / k));
+                    invalidate();
+                    return true;
+                case android.view.MotionEvent.ACTION_UP:
+                case android.view.MotionEvent.ACTION_CANCEL:
+                    active = -1;
+                    invalidate();
+                    return true;
+                default:
+                    return true;
+            }
+        }
     }
 
     boolean isClosing() {

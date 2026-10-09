@@ -4,8 +4,10 @@ import java.util.Arrays;
 
 /**
  * A photo of a document made ready to print, as a scanner would give it: the sheet found on the photo
- * ({@link #findPage}: the largest bright region, which a sheet on a table is, its four corners where it reaches
- * furthest along the diagonals), cut out and straightened ({@link #warp}: the perspective undone), the text levelled
+ * ({@link #findPage}: the largest bright region, which a sheet on a table is; its corners first where it reaches
+ * furthest along the diagonals, then where straight lines fitted to its four edges meet), cut out and straightened
+ * ({@link #warp}: the perspective undone, to the sheet's real proportions — {@link #aspect}, from the camera's focal
+ * length the corners give away — snapped to A4 or Letter when that close), the text levelled
  * ({@link #skew}: the angle at which the dark pixels fall into the sharpest rows), and the shading and the paper's
  * colour taken away ({@link #scan}: each pixel divided by the light around it — the brightest nearby, smoothed —
  * then strict black and white by a local threshold, or grey, or colour on white paper). Pixels are ARGB ints.
@@ -85,7 +87,7 @@ public final class DocScan {
     public static float[] findPage(int[] argb, int w, int h) {
         double[] scale = new double[1];
         int[] size = new int[2];
-        int[] g = smallGray(argb, w, h, 400, scale, size);
+        int[] g = smallGray(argb, w, h, 800, scale, size);
         int sw = size[0], sh = size[1];
         int t = otsu(g);
         // the two sides of the threshold must differ: a sheet on a darker table
@@ -138,7 +140,8 @@ public final class DocScan {
                 bestLabel = next;
             }
         }
-        if (bestSize < g.length / 6) return null;
+        // a sheet may be small on the photo (a fifth of it, less when the letters take up much of it)
+        if (bestSize < g.length / 25) return null;
         // its corners: furthest along the two diagonals
         double minS = 1e9, maxS = -1e9, minD = 1e9, maxD = -1e9;
         int[] c = new int[8];
@@ -175,19 +178,203 @@ public final class DocScan {
         }
         touch = (left ? 1 : 0) + (right ? 1 : 0) + (topB ? 1 : 0) + (bottom ? 1 : 0);
         if (touch >= 3) return null; // the sheet fills the photo: nothing to cut
+        double[] small = new double[8];
+        for (int i = 0; i < 8; i++) small[i] = c[i] + 0.5;
+        boolean[] out = outside(label, bestLabel, sw, sh);
+        small = refine(small, label, bestLabel, out, sw, sh);
         float[] q = new float[8];
         double k = scale[0];
-        for (int i = 0; i < 8; i++) q[i] = (float) ((c[i] + 0.5) * k);
+        for (int i = 0; i < 8; i++) q[i] = (float) (small[i] * k);
+        // a little inside the edges: no sliver of the table along them
+        inset(q, 0.004 * Math.min(w, h));
         // a sheet: a convex four-cornered shape the region fills, not a blob
         double area = Math.abs(quadArea(q));
-        if (!convex(q) || area < 0.15 * w * h) return null;
-        double regionArea = bestSize * k * k;
-        if (regionArea / area < 0.8 || regionArea / area > 1.2) return null;
+        if (!convex(q) || area < 0.06 * w * h) return null;
+        // the region with its holes (the letters) filled — all that the outside does not reach — fills the shape
+        int filled = 0;
+        for (boolean o : out) if (!o) filled++;
+        double regionArea = filled * k * k;
+        if (regionArea / area < 0.85 || regionArea / area > 1.15) return null;
         for (int i = 0; i < 4; i++) {
             double ex = q[(2 * i + 2) % 8] - q[2 * i], ey = q[(2 * i + 3) % 8] - q[2 * i + 1];
-            if (Math.hypot(ex, ey) < 0.12 * Math.min(w, h)) return null;
+            if (Math.hypot(ex, ey) < 0.08 * Math.min(w, h)) return null;
         }
         return q;
+    }
+
+    /**
+     * The corners where straight lines fitted to the region's four edges meet: the edge pixels (the region's, next to the
+     * outside — not to the holes the letters make — and not on the photo's border) go to the side of the first corners
+     * they are nearest; a line through each side's (total least squares, twice dropping those further than 1.5 px). A
+     * side with too few pixels, or a meeting point far from the first corner, keeps the first corner.
+     */
+    static double[] refine(double[] q0, int[] label, int region, boolean[] out, int sw, int sh) {
+        double reach = 0.06 * Math.min(sw, sh);
+        java.util.List<double[]>[] sides = new java.util.List[4];
+        for (int s = 0; s < 4; s++) sides[s] = new java.util.ArrayList<double[]>();
+        for (int y = 1; y < sh - 1; y++) {
+            for (int x = 1; x < sw - 1; x++) {
+                int p = y * sw + x;
+                if (label[p] != region || !(out[p - 1] || out[p + 1] || out[p - sw] || out[p + sw])) continue;
+                double px = x + 0.5, py = y + 0.5;
+                int bestSide = -1;
+                double bestD = reach;
+                for (int s = 0; s < 4; s++) {
+                    int a = s, b = (s + 1) % 4;
+                    double d = segmentDistance(px, py, q0[2 * a], q0[2 * a + 1], q0[2 * b], q0[2 * b + 1]);
+                    if (d < bestD) {
+                        bestD = d;
+                        bestSide = s;
+                    }
+                }
+                if (bestSide >= 0) sides[bestSide].add(new double[]{px, py});
+            }
+        }
+        double[][] lines = new double[4][];
+        for (int s = 0; s < 4; s++) lines[s] = sides[s].size() >= 20 ? fitLine(sides[s]) : null;
+        double[] q = q0.clone();
+        for (int i = 0; i < 4; i++) {
+            double[] a = lines[(i + 3) % 4], b = lines[i]; // corner i joins the side before it and the side after it
+            if (a == null || b == null) continue;
+            double det = a[0] * b[1] - a[1] * b[0];
+            if (Math.abs(det) < 1e-6) continue;
+            double x = (a[2] * b[1] - a[1] * b[2]) / det, y = (a[0] * b[2] - a[2] * b[0]) / det;
+            if (Math.hypot(x - q0[2 * i], y - q0[2 * i + 1]) > 0.05 * Math.max(sw, sh)) continue;
+            q[2 * i] = x;
+            q[2 * i + 1] = y;
+        }
+        return q;
+    }
+
+    /** The outside of the region: the pixels not in it that the photo's border reaches through pixels not in it. */
+    static boolean[] outside(int[] label, int region, int sw, int sh) {
+        int n = sw * sh;
+        boolean[] out = new boolean[n];
+        int[] stack = new int[n];
+        int top = 0;
+        for (int x = 0; x < sw; x++) {
+            for (int y : new int[]{0, sh - 1}) {
+                int i = y * sw + x;
+                if (label[i] != region && !out[i]) {
+                    out[i] = true;
+                    stack[top++] = i;
+                }
+            }
+        }
+        for (int y = 0; y < sh; y++) {
+            for (int x : new int[]{0, sw - 1}) {
+                int i = y * sw + x;
+                if (label[i] != region && !out[i]) {
+                    out[i] = true;
+                    stack[top++] = i;
+                }
+            }
+        }
+        while (top > 0) {
+            int p = stack[--top], x = p % sw, y = p / sw;
+            int[] nb = {x > 0 ? p - 1 : -1, x < sw - 1 ? p + 1 : -1, y > 0 ? p - sw : -1, y < sh - 1 ? p + sw : -1};
+            for (int q : nb) {
+                if (q >= 0 && !out[q] && label[q] != region) {
+                    out[q] = true;
+                    stack[top++] = q;
+                }
+            }
+        }
+        return out;
+    }
+
+    static double segmentDistance(double px, double py, double ax, double ay, double bx, double by) {
+        double dx = bx - ax, dy = by - ay, len2 = dx * dx + dy * dy;
+        double t = len2 == 0 ? 0 : Math.max(0, Math.min(1, ((px - ax) * dx + (py - ay) * dy) / len2));
+        return Math.hypot(px - (ax + t * dx), py - (ay + t * dy));
+    }
+
+    /** A line n·p = c (unit n) through the points: total least squares, twice dropping the points 1.5 px off it. */
+    static double[] fitLine(java.util.List<double[]> pts) {
+        java.util.List<double[]> use = pts;
+        double[] line = null;
+        for (int pass = 0; pass < 3 && use.size() >= 10; pass++) {
+            double mx = 0, my = 0;
+            for (double[] p : use) {
+                mx += p[0];
+                my += p[1];
+            }
+            mx /= use.size();
+            my /= use.size();
+            double sxx = 0, syy = 0, sxy = 0;
+            for (double[] p : use) {
+                double dx = p[0] - mx, dy = p[1] - my;
+                sxx += dx * dx;
+                syy += dy * dy;
+                sxy += dx * dy;
+            }
+            // the direction of the most spread; the normal across it
+            double angle = 0.5 * Math.atan2(2 * sxy, sxx - syy);
+            double nx = -Math.sin(angle), ny = Math.cos(angle);
+            line = new double[]{nx, ny, nx * mx + ny * my};
+            java.util.List<double[]> near = new java.util.ArrayList<double[]>();
+            for (double[] p : use) if (Math.abs(nx * p[0] + ny * p[1] - line[2]) <= 1.5) near.add(p);
+            if (near.size() == use.size()) break;
+            use = near;
+        }
+        return line;
+    }
+
+    /** Each corner moved towards the middle by {@code d} pixels. */
+    static void inset(float[] q, double d) {
+        double cx = (q[0] + q[2] + q[4] + q[6]) / 4, cy = (q[1] + q[3] + q[5] + q[7]) / 4;
+        for (int i = 0; i < 4; i++) {
+            double dx = cx - q[2 * i], dy = cy - q[2 * i + 1], len = Math.hypot(dx, dy);
+            if (len <= d) continue;
+            q[2 * i] += (float) (dx / len * d * Math.sqrt(2));
+            q[2 * i + 1] += (float) (dy / len * d * Math.sqrt(2));
+        }
+    }
+
+    // ------------------------------------------------------------------ the sheet's real proportions
+
+    /** Paper the result snaps to (height / width, portrait): A-series (A4), US Letter, US Legal. */
+    static final double[] PAPER = {Math.sqrt(2), 11 / 8.5, 14 / 8.5};
+
+    /**
+     * The sheet's real height / width from its corners on a photo (w×h, the principal point at the middle): the
+     * camera's focal length from the two vanishing points the corners give, then the rectangle's sides measured with it
+     * (Zhang & He, «Whiteboard scanning and image enhancement», 2007). Seen straight on (no vanishing point to go by),
+     * the sides as they are. Within 3.5% of a paper size (either way up), that size.
+     */
+    public static double aspect(float[] q, int w, int h) {
+        double u0 = w / 2.0, v0 = h / 2.0;
+        // m1 top left, m2 top right, m3 bottom left, m4 bottom right
+        double[] m1 = {q[0] - u0, q[1] - v0, 1}, m2 = {q[2] - u0, q[3] - v0, 1}, m4 = {q[4] - u0, q[5] - v0, 1},
+                m3 = {q[6] - u0, q[7] - v0, 1};
+        double k2 = dot(cross(m1, m4), m3) / dot(cross(m2, m4), m3), k3 = dot(cross(m1, m4), m2) / dot(cross(m3, m4), m2);
+        double[] n2 = {k2 * m2[0] - m1[0], k2 * m2[1] - m1[1], k2 * m2[2] - m1[2]};
+        double[] n3 = {k3 * m3[0] - m1[0], k3 * m3[1] - m1[1], k3 * m3[2] - m1[2]};
+        double wh;
+        double f2 = Math.abs(n2[2] * n3[2]) < 1e-9 ? -1 : -(n2[0] * n3[0] + n2[1] * n3[1]) / (n2[2] * n3[2]);
+        double size = Math.max(w, h);
+        if (f2 > Math.pow(0.3 * size, 2) && f2 < Math.pow(10 * size, 2)) {
+            wh = Math.sqrt((n2[0] * n2[0] + n2[1] * n2[1]) / f2 + n2[2] * n2[2]) / Math.sqrt((n3[0] * n3[0] + n3[1] * n3[1]) / f2 + n3[2] * n3[2]);
+        } else {
+            // as good as straight on: the sides' own lengths
+            double top = Math.hypot(q[2] - q[0], q[3] - q[1]), bottom = Math.hypot(q[4] - q[6], q[5] - q[7]);
+            double left = Math.hypot(q[6] - q[0], q[7] - q[1]), right = Math.hypot(q[4] - q[2], q[5] - q[3]);
+            wh = (top + bottom) / (left + right);
+        }
+        double r = 1 / wh;
+        for (double p : PAPER) {
+            if (Math.abs(r / p - 1) < 0.035) return p;
+            if (Math.abs(r * p - 1) < 0.035) return 1 / p;
+        }
+        return r;
+    }
+
+    private static double[] cross(double[] a, double[] b) {
+        return new double[]{a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]};
+    }
+
+    private static double dot(double[] a, double[] b) {
+        return a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
     }
 
     static double quadArea(float[] q) {
@@ -244,16 +431,28 @@ public final class DocScan {
         return hm;
     }
 
+    /** The least pixels along the sheet's longer side: below, it is enlarged (smooth letter edges in black and white). */
+    public static final int MIN_SIDE = 2480;
+
     /**
-     * The sheet cut out and straightened: its size from its sides (the longer of each opposite pair), scaled so that
-     * the longer side is at most {@code maxSide}; bilinear.
+     * The sheet cut out and straightened to its real proportions ({@link #aspect}), as many pixels along its longer side
+     * as the photo has along that side's longer edge, at least {@link #MIN_SIDE} (enlarged: thresholding at a finer grid
+     * gives letters smooth edges instead of steps) and at most {@code maxSide}; bilinear.
      */
     public static Image warp(int[] argb, int w, int h, float[] q, int maxSide) {
         double top = Math.hypot(q[2] - q[0], q[3] - q[1]), bottom = Math.hypot(q[4] - q[6], q[5] - q[7]);
         double leftS = Math.hypot(q[6] - q[0], q[7] - q[1]), rightS = Math.hypot(q[4] - q[2], q[5] - q[3]);
-        double W = Math.max(top, bottom), H = Math.max(leftS, rightS);
-        double k = Math.min(1.0, maxSide / Math.max(W, H));
-        int ow = Math.max(1, (int) Math.round(W * k)), oh = Math.max(1, (int) Math.round(H * k));
+        double ratio = aspect(q, w, h); // height / width
+        double W, H;
+        if (ratio >= 1) {
+            H = Math.min(maxSide, Math.max(Math.max(leftS, rightS), Math.max(top, bottom) * ratio));
+            W = H / ratio;
+        } else {
+            W = Math.min(maxSide, Math.max(Math.max(top, bottom), Math.max(leftS, rightS) / ratio));
+            H = W * ratio;
+        }
+        double grow = Math.max(W, H) < Math.min(MIN_SIDE, maxSide) ? Math.min(MIN_SIDE, maxSide) / Math.max(W, H) : 1;
+        int ow = Math.max(1, (int) Math.round(W * grow)), oh = Math.max(1, (int) Math.round(H * grow));
         double[] m = homography(q, ow, oh);
         int[] out = new int[ow * oh];
         for (int y = 0; y < oh; y++) {
