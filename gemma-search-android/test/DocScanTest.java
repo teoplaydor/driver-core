@@ -437,13 +437,103 @@ public class DocScanTest {
             }
         }
         double ratio = (double) scan.h / scan.w, skew = DocScan.skew(scan.px, scan.w, scan.h);
-        double[] lines = straightness(scan);
-        System.out.println(String.format(Locale.ROOT, "  %s: %dx%d (%.3f), text at %.2f°, lines bend %.1f px (%d lines), black in the outer 5%%: %.3f%%",
-                name, scan.w, scan.h, ratio, skew, lines[0], (int) lines[1], 100.0 * edge / all));
+        double[] lines = straightness(scan), lean = drift(scan);
+        System.out.println(String.format(Locale.ROOT, "  %s: %dx%d (%.3f), text at %.2f°, lines bend %.1f px (%d lines), "
+                + "paragraph edges lean up to %.2f px per 100 rows (%d runs), black in the outer 5%%: %.3f%%",
+                name, scan.w, scan.h, ratio, skew, lines[0], (int) lines[1], lean[0], (int) lean[1], 100.0 * edge / all));
+        check(lean[0] <= 0.8, name + ": the paragraphs' edges upright");
         check(Math.abs((sideways ? 1 / ratio : ratio) - Math.sqrt(2)) < 0.01 && Math.abs(skew) <= 0.3,
                 name + ": A4" + (sideways ? " lying (turned upright)" : "") + ", not stretched; its text level");
         check(lines[1] < 3 || lines[0] < 0.002 * Math.max(scan.w, scan.h), name + ": its lines straight");
         check(edge < all * edgeLimit, name + ": no black frame along its edges");
+    }
+
+    /**
+     * How the edges of the text lean: the lines as bands of rows with ink, where each one's first word starts (past a
+     * checkbox) and where it ends; runs of five or more one after the other
+     * (no blank line between) whose starts (ends) keep within 12 px of the previous; the largest slope of a straight
+     * line through a run's starts (ends), in pixels per 100 rows, and how many runs.
+     */
+    static double[] drift(DocScan.Image im) {
+        int w = im.w, h = im.h;
+        java.util.List<double[]> bands = new java.util.ArrayList<double[]>();
+        int y = 0;
+        while (y < h) {
+            int c = 0;
+            for (int x = 0; x < w; x++) if ((im.px[y * w + x] & 0xFF) < 128) c++;
+            if (c <= 3) {
+                y++;
+                continue;
+            }
+            int s = y, x0 = w, x1 = -1;
+            while (y < h) {
+                int cc = 0;
+                for (int x = 0; x < w; x++) {
+                    if ((im.px[y * w + x] & 0xFF) < 128) {
+                        cc++;
+                        x0 = Math.min(x0, x);
+                        x1 = Math.max(x1, x);
+                    }
+                }
+                if (cc <= 3) break;
+                y++;
+            }
+            if (y - s >= 8) {
+                // its first word: past a mark before it (a checkbox: narrower than a letter and a bit, a gap after)
+                int bh = y - s, gapMin = Math.max(2, bh / 2), x = x0, word = x0;
+                boolean[] col = new boolean[w];
+                for (int yy = s; yy < y; yy++) for (int xx = x0; xx <= x1; xx++) if ((im.px[yy * w + xx] & 0xFF) < 128) col[xx] = true;
+                while (x <= x1) {
+                    int st = x, last = x, gap = 0;
+                    for (; x <= x1; x++) {
+                        if (col[x]) {
+                            last = x;
+                            gap = 0;
+                        } else if (++gap >= gapMin) {
+                            break;
+                        }
+                    }
+                    if (last - st + 1 >= 1.2 * bh) {
+                        word = st;
+                        break;
+                    }
+                    while (x <= x1 && !col[x]) x++;
+                }
+                bands.add(new double[]{(s + y) / 2.0, word, x1});
+            }
+        }
+        java.util.List<Double> gaps = new java.util.ArrayList<Double>();
+        for (int i = 1; i < bands.size(); i++) gaps.add(bands.get(i)[0] - bands.get(i - 1)[0]);
+        java.util.Collections.sort(gaps);
+        double pitch = gaps.isEmpty() ? 40 : gaps.get(gaps.size() / 2), most = 0;
+        int runs = 0;
+        for (int k = 1; k <= 2; k++) {
+            java.util.List<double[]> run = new java.util.ArrayList<double[]>();
+            for (int i = 0; i <= bands.size(); i++) {
+                double[] b = i < bands.size() ? bands.get(i) : null;
+                double[] last = run.isEmpty() ? null : run.get(run.size() - 1);
+                if (b != null && last != null && b[0] - last[0] <= 1.6 * pitch && Math.abs(b[k] - last[k]) <= 12) {
+                    run.add(b);
+                    continue;
+                }
+                if (run.size() >= 5) {
+                    double my = 0, mx = 0, syy = 0, sxy = 0;
+                    for (double[] q : run) {
+                        my += q[0] / run.size();
+                        mx += q[k] / run.size();
+                    }
+                    for (double[] q : run) {
+                        syy += (q[0] - my) * (q[0] - my);
+                        sxy += (q[0] - my) * (q[k] - mx);
+                    }
+                    most = Math.max(most, Math.abs(sxy / syy) * 100);
+                    runs++;
+                }
+                run = new java.util.ArrayList<double[]>();
+                if (b != null) run.add(b);
+            }
+        }
+        return new double[]{most, runs};
     }
 
     static double[] straightness(DocScan.Image im) {
