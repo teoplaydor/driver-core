@@ -748,16 +748,27 @@ public final class DocScan {
         }
     }
 
-    /** How far apart the lines are down the page: a polynomial of the row, kept to lo…hi; its widest. */
+    /**
+     * How far apart the lines are down the page, relative: its logarithm a polynomial of the row (its constant
+     * arbitrary), kept to lo…hi; the top of it; the widest spacing over the narrowest.
+     */
     private static final class Spacing {
-        double[] p;
-        double lo, hi, widest, narrowest;
+        double[] g;
+        double lo, hi, top, spread;
+
+        /** How much row t is spread out: the widest spacing over the spacing there. */
+        double stretch(double t) {
+            return Math.exp(top - polyAt(g, Math.max(lo, Math.min(hi, t))));
+        }
     }
 
-    /** One line of text found: its middle y as a polynomial of x, where it starts and ends, its row once level. */
+    /**
+     * One line of text found: its middle y as a polynomial of x, where it starts and ends, its row once level, its
+     * letters' height (the median; NaN when too few were seen).
+     */
     private static final class Line {
         double[] mid;
-        double start, end, row;
+        double start, end, row, height = Double.NaN;
     }
 
     /**
@@ -782,6 +793,7 @@ public final class DocScan {
         int[] lab = new int[n];
         int[] stack = new int[n];
         java.util.List<Integer> heights = new java.util.ArrayList<Integer>();
+        java.util.List<double[]> letters = new java.util.ArrayList<double[]>(); // middle x, middle y, height
         int next = 0;
         for (int i = 0; i < n; i++) {
             if (!ink[i] || lab[i] != 0) continue;
@@ -809,7 +821,10 @@ public final class DocScan {
                 }
             }
             int bh = y1 - y0 + 1;
-            if (area >= 3 && bh >= 2 && bh <= ah / 15 && x1 - x0 + 1 <= aw / 10) heights.add(bh);
+            if (area >= 3 && bh >= 2 && bh <= ah / 15 && x1 - x0 + 1 <= aw / 10) {
+                heights.add(bh);
+                letters.add(new double[]{(x0 + x1 + 1) / 2.0, (y0 + y1 + 1) / 2.0, bh});
+            }
         }
         Straight none = new Straight(im, 0, 0, false, 1);
         if (heights.size() < 20) return none;
@@ -894,6 +909,17 @@ public final class DocScan {
                 return Double.compare(x.row, y.row);
             }
         });
+        // each line's letters: the blobs whose middles are on it
+        for (Line l : lines) {
+            java.util.List<Double> hs = new java.util.ArrayList<Double>();
+            for (double[] b : letters) {
+                if (b[0] >= l.start && b[0] <= l.end && Math.abs(b[1] - polyAt(l.mid, b[0])) <= 0.6 * charH) hs.add(b[2]);
+            }
+            if (hs.size() >= 4) {
+                java.util.Collections.sort(hs);
+                l.height = hs.get(hs.size() / 2);
+            }
+        }
         // per column of a grid: how far the lines are from their rows, as a polynomial of the row
         int G = 48;
         double[][] shift = new double[G][];
@@ -920,7 +946,7 @@ public final class DocScan {
         double[] U = null;
         if (spc != null) {
             U = new double[ah + 1];
-            for (int r = 0; r < ah; r++) U[r + 1] = U[r] + spc.widest / polyAt(spc.p, Math.max(spc.lo, Math.min(spc.hi, r + 0.5)));
+            for (int r = 0; r < ah; r++) U[r + 1] = U[r] + spc.stretch(r + 0.5);
             H2 = (int) Math.round(W * snap(U[ah] / k / W));
         }
         // straight, upright and evenly spaced already: the page as it is (not resampled for nothing)
@@ -949,56 +975,115 @@ public final class DocScan {
                 double f = gj - j0;
                 double s0 = sh[Math.max(0, Math.min(G - 1, j0))], s1 = sh[Math.max(0, Math.min(G - 1, j0 + 1))];
                 double ys = Ya + s0 + f * (s1 - s0);
-                out[y * W + x] = sample(im.px, W, H, xs / k - 0.5, ys / k - 0.5, 0xFFFFFFFF);
+                out[y * W + x] = sampleEdge(im.px, W, H, xs / k - 0.5, ys / k - 0.5);
             }
         }
-        return new Straight(new Image(out, W, H2), lines.size(), bend / k, margins, spc == null ? 1 : spc.widest / spc.narrowest);
+        return new Straight(new Image(out, W, H2), lines.size(), bend / k, margins, spc == null ? 1 : spc.spread);
     }
 
     /**
      * How far apart the lines are down the page, when that drifts smoothly — the lines coming closer together where the
-     * sheet curls or leans away: a polynomial through the distances between neighbouring lines (paragraph breaks and
-     * the like left out). Null when they keep one distance already (within 5%), when there are too few, or when the
-     * text is not evenly spaced to begin with (headings, forms: the distances jump about, the curve misses them).
+     * sheet curls or leans away. The distances between neighbouring lines are taken in runs that keep one distance and
+     * one letter size (a list, a paragraph; a heading, a blank line or bigger letters start a new run), and a drift
+     * shared by all of them is fitted — the logarithm of the distance a polynomial of the row, each run with its own
+     * spacing on top — so that a form whose lists are set further apart than its paragraphs, or a heading's wider
+     * spacing, is no drift at all; only the distances changing within the runs are. Null when they hardly change
+     * (under 5%), change implausibly much (over 35%: something else is wrong), when there are too few, or the drift
+     * misses them.
      */
     static Spacing spacing(java.util.List<Line> lines, double charH, int ah) {
-        java.util.List<Double> ds = new java.util.ArrayList<Double>();
+        java.util.List<java.util.List<double[]>> runs = new java.util.ArrayList<java.util.List<double[]>>();
+        java.util.List<double[]> run = null;
+        double last = 0;
         for (int i = 1; i < lines.size(); i++) {
-            double d = lines.get(i).row - lines.get(i - 1).row;
-            if (d > charH) ds.add(d);
+            Line a = lines.get(i - 1), b = lines.get(i);
+            double d = b.row - a.row;
+            boolean sameLetters = Double.isNaN(a.height) || Double.isNaN(b.height)
+                    || Math.abs(a.height - b.height) <= 0.25 * Math.max(a.height, b.height);
+            if (d < 1.2 * charH || d > 4 * charH || !sameLetters) {
+                run = null;
+                continue;
+            }
+            if (run == null || d < last / 1.15 || d > last * 1.15) {
+                run = new java.util.ArrayList<double[]>();
+                runs.add(run);
+            }
+            run.add(new double[]{(a.row + b.row) / 2, Math.log(d)});
+            last = d;
         }
-        if (ds.size() < 8) return null;
-        java.util.Collections.sort(ds);
-        double med = ds.get(ds.size() / 2);
-        java.util.List<double[]> pts = new java.util.ArrayList<double[]>();
-        double lo = 1e18, hi = -1e18;
-        for (int i = 1; i < lines.size(); i++) {
-            double a = lines.get(i - 1).row, b = lines.get(i).row, d = b - a, t = (a + b) / 2;
-            if (d < 0.6 * med || d > 1.5 * med) continue;
-            pts.add(new double[]{t, d});
-            lo = Math.min(lo, t);
-            hi = Math.max(hi, t);
+        int n0 = 0;
+        double lo = 1e18, hi = -1e18, longest = 0;
+        for (java.util.List<double[]> r : runs) {
+            if (r.size() < 3) continue;
+            n0 += r.size();
+            lo = Math.min(lo, r.get(0)[0]);
+            hi = Math.max(hi, r.get(r.size() - 1)[0]);
+            longest = Math.max(longest, r.get(r.size() - 1)[0] - r.get(0)[0]);
         }
-        if (pts.size() < 8 || hi - lo < 0.4 * ah) return null;
-        double[] p = polyFit(pts, false, pts.size() >= 12 ? 2 : 1, 0.08 * med);
-        if (p == null) return null;
-        int close = 0;
-        for (double[] q : pts) if (Math.abs(polyAt(p, q[0]) - q[1]) <= 0.06 * med) close++;
-        if (close < 0.75 * pts.size()) return null;
-        double min = 1e18, max = 0;
+        if (n0 < 8 || hi - lo < 0.4 * ah) return null;
+        double c = (lo + hi) / 2, sc = (hi - lo) / 2;
+        int deg = n0 >= 12 && longest >= 0.3 * ah ? 2 : 1;
+        double[] g = null;
+        int kept = 0;
+        for (int pass = 0; pass < 3; pass++) {
+            // each run's own means taken out, what is left fitted by the polynomial's terms (no constant)
+            double[][] m = new double[deg][deg + 1];
+            for (java.util.List<double[]> r : runs) {
+                if (r.size() < 3) continue;
+                double[] mb = new double[deg + 1];
+                for (double[] q : r) {
+                    double u = (q[0] - c) / sc, pw = 1;
+                    for (int j = 0; j < deg; j++) mb[j] += (pw *= u) / r.size();
+                    mb[deg] += q[1] / r.size();
+                }
+                for (double[] q : r) {
+                    double u = (q[0] - c) / sc, pw = 1;
+                    double[] v = new double[deg];
+                    for (int j = 0; j < deg; j++) v[j] = (pw *= u) - mb[j];
+                    for (int j = 0; j < deg; j++) {
+                        for (int k = 0; k < deg; k++) m[j][k] += v[j] * v[k];
+                        m[j][deg] += v[j] * (q[1] - mb[deg]);
+                    }
+                }
+            }
+            double[] coef = solve(m, deg);
+            if (coef == null) return null;
+            g = new double[deg + 3];
+            g[0] = c;
+            g[1] = sc;
+            System.arraycopy(coef, 0, g, 3, deg);
+            // the distances the drift misses by more than 5% left out, and runs left too short
+            kept = 0;
+            boolean dropped = false;
+            for (int ri = 0; ri < runs.size(); ri++) {
+                java.util.List<double[]> r = runs.get(ri);
+                if (r.size() < 3) continue;
+                double off = 0;
+                for (double[] q : r) off += (q[1] - polyAt(g, q[0])) / r.size();
+                java.util.List<double[]> near = new java.util.ArrayList<double[]>();
+                for (double[] q : r) if (Math.abs(q[1] - polyAt(g, q[0]) - off) <= 0.05) near.add(q);
+                if (near.size() != r.size()) dropped = true;
+                runs.set(ri, near);
+                if (near.size() >= 3) kept += near.size();
+            }
+            if (!dropped) break;
+        }
+        if (kept < 0.75 * n0) return null;
+        double gMin = 1e18, gMax = -1e18;
         for (int i = 0; i <= 32; i++) {
-            double v = polyAt(p, lo + (hi - lo) * i / 32);
-            min = Math.min(min, v);
-            max = Math.max(max, v);
+            double v = polyAt(g, lo + (hi - lo) * i / 32);
+            gMin = Math.min(gMin, v);
+            gMax = Math.max(gMax, v);
         }
-        if (min < 0.6 * max || max < 1.05 * min) return null;
-        Spacing s = new Spacing();
-        s.p = p;
-        s.lo = lo;
-        s.hi = hi;
-        s.widest = max;
-        s.narrowest = min;
-        return s;
+        double spread = Math.exp(gMax - gMin);
+        if (spread < 1.05 || spread > 1.35) return null;
+        Spacing sp = new Spacing();
+        sp.g = g;
+        sp.lo = lo;
+        sp.hi = hi;
+        sp.top = gMax;
+        sp.spread = spread;
+        return sp;
     }
 
     /**
@@ -1023,6 +1108,14 @@ public final class DocScan {
     }
 
     /** Bilinear sample at (x, y) (pixel centres at integers), {@code fill} outside. */
+    /**
+     * Bilinear sample with the image's edge carried on beyond it: what a page moved or turned uncovers is the paper at
+     * its edge, not white (next to pure white the paper reads as dark: a black frame in black and white).
+     */
+    static int sampleEdge(int[] px, int w, int h, double x, double y) {
+        return sample(px, w, h, Math.max(0, Math.min(w - 1, x)), Math.max(0, Math.min(h - 1, y)), 0xFFFFFFFF);
+    }
+
     static int sample(int[] px, int w, int h, double x, double y, int fill) {
         int x0 = (int) Math.floor(x), y0 = (int) Math.floor(y);
         if (x0 < -1 || y0 < -1 || x0 >= w || y0 >= h) return fill;
@@ -1099,7 +1192,7 @@ public final class DocScan {
         return s;
     }
 
-    /** The image turned by {@code deg} (positive: counter-clockwise, which levels text falling to the right), white around. */
+    /** The image turned by {@code deg} (positive: counter-clockwise, which levels text falling to the right), its edges carried on into the corners it uncovers. */
     public static Image rotate(Image im, double deg) {
         if (deg == 0) return im;
         double r = Math.toRadians(deg), sin = Math.sin(r), cos = Math.cos(r);
@@ -1110,7 +1203,7 @@ public final class DocScan {
                 double dx = x + 0.5 - cx, dy = y + 0.5 - cy;
                 // the source of an output pixel: turned back
                 double sx = cos * dx - sin * dy + cx - 0.5, sy = sin * dx + cos * dy + cy - 0.5;
-                out[y * im.w + x] = sample(im.px, im.w, im.h, sx, sy, 0xFFFFFFFF);
+                out[y * im.w + x] = sampleEdge(im.px, im.w, im.h, sx, sy);
             }
         }
         return new Image(out, im.w, im.h);
@@ -1239,7 +1332,7 @@ public final class DocScan {
                 int x0 = Math.max(0, x - r), x1 = Math.min(w, x + r + 1);
                 long s = (long) integral[y1 * (w + 1) + x1] - integral[y0 * (w + 1) + x1] - integral[y1 * (w + 1) + x0] + integral[y0 * (w + 1) + x0];
                 double mean = (double) s / ((x1 - x0) * (y1 - y0));
-                boolean ink = v[y * w + x] < 110 || v[y * w + x] < Math.min(mean - 12, 200);
+                boolean ink = v[y * w + x] < 110 || v[y * w + x] < Math.min(mean - 12, 215);
                 out[y * w + x] = ink ? 0xFF000000 : 0xFFFFFFFF;
             }
         }
@@ -1252,14 +1345,167 @@ public final class DocScan {
 
     /** The whole way: the sheet (when found and wanted), levelled (when wanted), in the scanner's look. */
     public static Image process(int[] argb, int w, int h, float[] page, boolean level, int mode, int maxSide) {
-        Image im = page != null ? warp(argb, w, h, page, maxSide) : fit(argb, w, h, maxSide);
+        Image im = page != null ? clearRim(warp(argb, w, h, page, maxSide)) : fit(argb, w, h, maxSide);
         return finish(im, level, mode);
     }
 
     /** The same with a bent sheet: flattened between its curved edges. */
     public static Image process(int[] argb, int w, int h, Sheet sheet, boolean level, int mode, int maxSide) {
-        Image im = sheet != null ? dewarp(argb, w, h, sheet, maxSide) : fit(argb, w, h, maxSide);
+        Image im = sheet != null ? clearRim(dewarp(argb, w, h, sheet, maxSide)) : fit(argb, w, h, maxSide);
         return finish(im, level, mode);
+    }
+
+    /** How deep from the edge of a cut-out sheet the surroundings are looked for: of its shorter side. */
+    static final double RIM = 0.035;
+
+    /**
+     * A cut-out sheet with what is left of its surroundings painted the paper's colour: the table, a folder or the
+     * shadow just outside its edges, and the edges of the sheets under it in a pile (dark lines along the edge) — they
+     * would print as a black frame. On a smaller copy in black and white: the dark joined to the image's edge within
+     * {@link #RIM} of it, and on from there through solid dark (a wedge of table at a corner, not letters) up to three
+     * times as deep; and thin dark lines along an edge within that strip (a twentieth of the side long or more, six
+     * times as long as thick). Letters near the edge are left (not joined to it, not that long).
+     */
+    public static Image clearRim(Image im) {
+        int W = im.w, H = im.h;
+        double k = Math.min(1.0, 2000.0 / Math.max(W, H));
+        int sw = Math.max(1, (int) Math.round(W * k)), sh = Math.max(1, (int) Math.round(H * k));
+        int[] small = k < 1 ? FaceModel.resize(im.px, W, H, sw, sh) : im.px;
+        int[] bw = scan(small, sw, sh, BW);
+        int n = sw * sh;
+        boolean[] ink = new boolean[n];
+        for (int i = 0; i < n; i++) ink[i] = (bw[i] & 0xFF) == 0;
+        int band = Math.max(2, (int) Math.round(RIM * Math.min(sw, sh))), deep = 3 * band;
+        boolean[] rim = new boolean[n];
+        int[] queue = new int[n];
+        int qh = 0, qt = 0;
+        for (int x = 0; x < sw; x++) {
+            for (int y : new int[]{0, sh - 1}) {
+                int i = y * sw + x;
+                if (ink[i] && !rim[i]) {
+                    rim[i] = true;
+                    queue[qt++] = i;
+                }
+            }
+        }
+        for (int y = 0; y < sh; y++) {
+            for (int x : new int[]{0, sw - 1}) {
+                int i = y * sw + x;
+                if (ink[i] && !rim[i]) {
+                    rim[i] = true;
+                    queue[qt++] = i;
+                }
+            }
+        }
+        while (qh < qt) {
+            int p = queue[qh++], x = p % sw, y = p / sw;
+            for (int dy = -1; dy <= 1; dy++) {
+                for (int dx = -1; dx <= 1; dx++) {
+                    int xx = x + dx, yy = y + dy;
+                    if (xx < 0 || yy < 0 || xx >= sw || yy >= sh) continue;
+                    int q = yy * sw + xx;
+                    if (!ink[q] || rim[q]) continue;
+                    int depth = Math.min(Math.min(xx, sw - 1 - xx), Math.min(yy, sh - 1 - yy));
+                    if (depth > deep || depth > band && !solid(ink, sw, sh, xx, yy)) continue;
+                    rim[q] = true;
+                    queue[qt++] = q;
+                }
+            }
+        }
+        // dark lines along an edge, within the strip: a sheet's edge in a pile, its shadow
+        int[] lab = new int[n];
+        int next = 0;
+        for (int i = 0; i < n; i++) {
+            if (!ink[i] || rim[i] || lab[i] != 0 || depth(i, sw, sh) > band) continue;
+            next++;
+            qh = 0;
+            qt = 0;
+            queue[qt++] = i;
+            lab[i] = next;
+            int x0 = sw, x1 = -1, y0 = sh, y1 = -1;
+            while (qh < qt) {
+                int p = queue[qh++], x = p % sw, y = p / sw;
+                x0 = Math.min(x0, x);
+                x1 = Math.max(x1, x);
+                y0 = Math.min(y0, y);
+                y1 = Math.max(y1, y);
+                // a faint line breaks up in black and white: its pieces joined across small gaps along the edge
+                boolean side = Math.min(x, sw - 1 - x) <= band, end = Math.min(y, sh - 1 - y) <= band;
+                int gy = side ? 4 : 1, gx = end ? 4 : 1;
+                for (int dy = -gy; dy <= gy; dy++) {
+                    for (int dx = -gx; dx <= gx; dx++) {
+                        int xx = x + dx, yy = y + dy;
+                        if (xx < 0 || yy < 0 || xx >= sw || yy >= sh) continue;
+                        int q = yy * sw + xx;
+                        if (ink[q] && !rim[q] && lab[q] == 0 && depth(q, sw, sh) <= band) {
+                            lab[q] = next;
+                            queue[qt++] = q;
+                        }
+                    }
+                }
+            }
+            // long and thin, along the edge it is near: a twentieth of the side or more, six times as long as thick
+            int bw0 = x1 - x0 + 1, bh0 = y1 - y0 + 1;
+            boolean nearTopBottom = Math.min(y0, sh - 1 - y1) <= band, nearSides = Math.min(x0, sw - 1 - x1) <= band;
+            boolean along = nearTopBottom && bh0 <= band / 2 + 1 && bw0 >= Math.max(sw / 20, 6 * bh0)
+                    || nearSides && bw0 <= band / 2 + 1 && bh0 >= Math.max(sh / 20, 6 * bw0);
+            if (along) for (int j = 0; j < qt; j++) rim[queue[j]] = true;
+        }
+        int found = 0;
+        for (boolean b : rim) if (b) found++;
+        if (found == 0) return im;
+        // the paper's colour: the median of the light pixels near the edges, outside the rim
+        java.util.List<Integer> rs = new java.util.ArrayList<Integer>(), gs = new java.util.ArrayList<Integer>(),
+                bs = new java.util.ArrayList<Integer>();
+        for (int i = 0; i < n; i += 3) {
+            if (ink[i] || rim[i] || depth(i, sw, sh) > deep) continue;
+            int p = small[i];
+            rs.add((p >> 16) & 0xFF);
+            gs.add((p >> 8) & 0xFF);
+            bs.add(p & 0xFF);
+        }
+        int paper = 0xFFFFFFFF;
+        if (rs.size() > 20) {
+            java.util.Collections.sort(rs);
+            java.util.Collections.sort(gs);
+            java.util.Collections.sort(bs);
+            int m = rs.size() / 2;
+            paper = 0xFF000000 | rs.get(m) << 16 | gs.get(m) << 8 | bs.get(m);
+        }
+        int[] out = Arrays.copyOf(im.px, im.px.length);
+        for (int y = 0; y < H; y++) {
+            int cy = Math.min(sh - 1, (int) (y * k));
+            for (int x = 0; x < W; x++) {
+                int cx = Math.min(sw - 1, (int) (x * k));
+                // the rim and two cells around it (the copy is coarser; a faint line's fringe goes too)
+                boolean on = false;
+                for (int dy = -2; dy <= 2 && !on; dy++) {
+                    for (int dx = -2; dx <= 2 && !on; dx++) {
+                        int xx = cx + dx, yy = cy + dy;
+                        on = xx >= 0 && yy >= 0 && xx < sw && yy < sh && rim[yy * sw + xx];
+                    }
+                }
+                if (on) out[y * W + x] = paper;
+            }
+        }
+        return new Image(out, W, H);
+    }
+
+    /** How far a pixel is from the image's nearest edge. */
+    private static int depth(int i, int w, int h) {
+        int x = i % w, y = i / w;
+        return Math.min(Math.min(x, w - 1 - x), Math.min(y, h - 1 - y));
+    }
+
+    /** Dark all around: the pixel and its eight neighbours (a filled area, not a letter's stroke). */
+    private static boolean solid(boolean[] ink, int w, int h, int x, int y) {
+        for (int dy = -1; dy <= 1; dy++) {
+            for (int dx = -1; dx <= 1; dx++) {
+                int xx = x + dx, yy = y + dy;
+                if (xx < 0 || yy < 0 || xx >= w || yy >= h || !ink[yy * w + xx]) return false;
+            }
+        }
+        return true;
     }
 
     private static Image finish(Image im, boolean level, int mode) {

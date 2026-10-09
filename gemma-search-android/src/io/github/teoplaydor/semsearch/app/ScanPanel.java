@@ -334,9 +334,10 @@ final class ScanPanel extends FrameLayout {
         long t0 = System.currentTimeMillis();
         boolean withPage = usePage && page != null;
         if (cut == null || cutWithPage != withPage) {
-            // a bent sheet flattened between its curved edges; corners set by hand: by them alone
-            cut = !withPage ? DocScan.fit(src, sw, sh, MAX_SIDE) : sheet != null ? DocScan.dewarp(src, sw, sh, sheet, MAX_SIDE)
-                    : DocScan.warp(src, sw, sh, page, MAX_SIDE);
+            // a bent sheet flattened between its curved edges; corners set by hand: by them alone; what shows of the
+            // table, a folder, the pile under it along the edges painted the paper's colour (no black frame)
+            cut = !withPage ? DocScan.fit(src, sw, sh, MAX_SIDE) : DocScan.clearRim(sheet != null
+                    ? DocScan.dewarp(src, sw, sh, sheet, MAX_SIDE) : DocScan.warp(src, sw, sh, page, MAX_SIDE));
             cutWithPage = withPage;
             levelled = null;
         }
@@ -379,7 +380,7 @@ final class ScanPanel extends FrameLayout {
     private String levelNote() {
         StringBuilder b = new StringBuilder();
         DocScan.Straight st = straight;
-        boolean bent = st != null && st.lines >= 3 && st.bend >= 2;
+        boolean bent = st != null && st.lines >= 3 && st.bend >= 3;
         // the turn is part of straightening bent lines; told on its own when that is all there was
         if (angle != 0 && !bent) b.append(String.format(Locale.ROOT, ", текст повёрнут на %.1f°", -angle));
         if (bent) b.append(String.format(Locale.ROOT, ", строки выпрямлены: %d (изгиб до %d пикс.)", st.lines, Math.round(st.bend)));

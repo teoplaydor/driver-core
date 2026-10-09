@@ -257,6 +257,37 @@ public class DocScanTest {
                     (double) flat6.h / flat6.w));
         }
 
+        // 7. a phone photo (cut from a screenshot of the viewer, the contract number blurred): a form on a pile of sheets
+        // on a dark folder, cloth around, the sheets under it sticking out at the side and the bottom. Its lists are set
+        // further apart than their lines and its headings bigger: no curl, the page stays A4 (0.10.19 stretched it to
+        // 1.83); and no black frame along its edges (the shadows between the sheets of the pile, the paper next to the
+        // white corners that levelling uncovered)
+        if (args.length > 1) {
+            BufferedImage form = ImageIO.read(new File(args[1]));
+            int fw = form.getWidth(), fh = form.getHeight();
+            int[] f7 = px(form);
+            DocScan.Sheet sheet7 = DocScan.findSheet(f7, fw, fh);
+            check(sheet7 != null, "the form on a pile: found");
+            if (sheet7 != null) {
+                DocScan.Image scan7 = DocScan.process(f7, fw, fh, sheet7, true, DocScan.BW, 3508);
+                save(scan7, new File(out, "7-form.png"));
+                int band = (int) (0.05 * Math.min(scan7.w, scan7.h));
+                long edge = 0, all = 0;
+                for (int y = 0; y < scan7.h; y++) {
+                    for (int x = 0; x < scan7.w; x++) {
+                        if (Math.min(Math.min(x, scan7.w - 1 - x), Math.min(y, scan7.h - 1 - y)) >= band) continue;
+                        all++;
+                        if ((scan7.px[y * scan7.w + x] & 0xFF) == 0) edge++;
+                    }
+                }
+                double ratio7 = (double) scan7.h / scan7.w, skew7 = DocScan.skew(scan7.px, scan7.w, scan7.h);
+                System.out.println(String.format(Locale.ROOT, "  the form: %dx%d (%.3f), text at %.2f°, black in the outer 5%%: %.3f%%",
+                        scan7.w, scan7.h, ratio7, skew7, 100.0 * edge / all));
+                check(Math.abs(ratio7 - Math.sqrt(2)) < 0.01 && Math.abs(skew7) <= 0.3, "the form: A4, not stretched; its text level");
+                check(edge < all / 500, "the form: no black frame along its edges");
+            }
+        }
+
         // 4. a sheet on a white table: nothing apart from it to cut by
         BufferedImage white = new BufferedImage(1200, 900, BufferedImage.TYPE_INT_RGB);
         Graphics2D gw = white.createGraphics();
