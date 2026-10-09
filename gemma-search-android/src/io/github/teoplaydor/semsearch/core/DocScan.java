@@ -267,7 +267,23 @@ public final class DocScan {
         int filled = 0;
         for (boolean o : out) if (!o) filled++;
         double regionArea = filled * k * k;
-        if (regionArea / area < 0.85 || regionArea / area > 1.25) return null; // bowed edges hold more than the corners
+        // what its edges hold: between the curves (a bowed sheet holds more than its corners' four sides)
+        double shape = area;
+        if (edges != null) {
+            Sheet curved = new Sheet(q, edges, k);
+            java.util.List<double[]> ring = new java.util.ArrayList<double[]>();
+            double[][] along = {{q[0], q[2]}, {q[3], q[5]}, {q[4], q[6]}, {q[7], q[1]}};
+            for (int sd = 0; sd < 4; sd++) {
+                for (int i = 0; i < 32; i++) ring.add(curved.edge(sd, along[sd][0] + (along[sd][1] - along[sd][0]) * i / 32));
+            }
+            double twice = 0;
+            for (int i = 0; i < ring.size(); i++) {
+                double[] p1 = ring.get(i), p2 = ring.get((i + 1) % ring.size());
+                twice += p1[0] * p2[1] - p2[0] * p1[1];
+            }
+            shape = Math.abs(twice) / 2;
+        }
+        if (regionArea / shape < 0.85 || regionArea / shape > 1.25) return null;
         for (int i = 0; i < 4; i++) {
             double ex = q[(2 * i + 2) % 8] - q[2 * i], ey = q[(2 * i + 3) % 8] - q[2 * i + 1];
             if (Math.hypot(ex, ey) < 0.08 * Math.min(w, h)) return null;
@@ -589,8 +605,11 @@ public final class DocScan {
 
     // ------------------------------------------------------------------ the sheet's real proportions
 
-    /** Paper the result snaps to (height / width, portrait): A-series (A4), US Letter, US Legal. */
-    static final double[] PAPER = {Math.sqrt(2), 11 / 8.5, 14 / 8.5};
+    /**
+     * Paper the result snaps to (height / width, portrait): A-series (A4), US Legal. Not US Letter (1.29): a sheet
+     * here is A4, and an A4 sheet curling away at the bottom gives just that from its corners.
+     */
+    static final double[] PAPER = {Math.sqrt(2), 14 / 8.5};
 
     /**
      * The sheet's real height / width from its corners on a photo (w×h, the principal point at the middle): the
@@ -628,13 +647,13 @@ public final class DocScan {
     }
 
     /**
-     * Height / width {@code r} as a paper size's when close to it (either way up): A4 within 5% — the paper nearly every
-     * sheet here is, and a pile under the sheet or a curl easily puts its corners that far off — the others within
-     * 3.5% (Letter's window and A4's do not meet).
+     * Height / width {@code r} as a paper size's when close to it (either way up): A4 within 10% — the paper nearly
+     * every sheet here is, and a pile under the sheet or a curl easily puts its corners that far off — Legal within
+     * 3.5% (the windows do not meet).
      */
     static double snap(double r) {
         for (int i = 0; i < PAPER.length; i++) {
-            double p = PAPER[i], tol = i == 0 ? 0.05 : 0.035;
+            double p = PAPER[i], tol = i == 0 ? 0.1 : 0.035;
             if (Math.abs(r / p - 1) < tol) return p;
             if (Math.abs(r * p - 1) < tol) return 1 / p;
         }
@@ -844,9 +863,6 @@ public final class DocScan {
         int nx, ny;
         double x0, x1, y0, y1;
         double[] c;
-        /** The trace points it was fitted to (those it missed left out), line by line, and the lines' rows. */
-        java.util.List<java.util.List<double[]>> kept;
-        java.util.List<Double> rows;
 
         /** The 16 controls at (x, y) and their weights. */
         void weights(double x, double y, int[] idx, double[] w) {
@@ -936,11 +952,15 @@ public final class DocScan {
          * a bit, a gap after) — the text's own edge; its start when there is none.
          */
         double word = Double.NaN;
+        /** How far below its middle letters' feet are on the page (see {@link #byFeet}). */
+        double foot;
     }
 
     /**
      * The lines of text made straight and level, the margins vertical: the lines are found (the ink, black and white,
-     * letters joined along a row), a polynomial through each line's middle; each column of the page is then moved up or
+     * followed strip by strip by where its letters stand; see {@link #trackLines}), carried on to their very ends
+     * ({@link #reachEnds}) and taken again along their own slope ({@link #alongSlope}), a polynomial through each
+     * line's middle; each column of the page is then moved up or
      * down so that every line lies on one row (between lines, as the lines around say: a polynomial over the page's
      * height, per column), and each point moved sideways so that the lines' starts (and ends, when the text is
      * justified) stand one above the other, the text's vertical edges upright (see {@link #upright}); where the lines come closer together than elsewhere (the sheet curling
@@ -1001,6 +1021,11 @@ public final class DocScan {
         int step = (int) Math.max(1, Math.round(charH / 2));
         java.util.List<Line> lines = trackLines(ink, aw, ah, charH, step);
         joinPieces(lines, charH, aw, step);
+        for (Line l : lines) {
+            if (l.rule) continue;
+            reachEnds(ink, aw, ah, l, charH);
+            alongSlope(ink, aw, ah, l, charH);
+        }
         // a page's text: enough lines (a few long strokes — a table's rules, a photo's edges — are not to be bent by)
         if (lines.size() < 6) return none;
         java.util.Collections.sort(lines, new java.util.Comparator<Line>() {
@@ -1013,7 +1038,7 @@ public final class DocScan {
         for (Line l : lines) {
             java.util.List<Double> hs = new java.util.ArrayList<Double>();
             for (double[] b : letters) {
-                if (b[0] >= l.start && b[0] <= l.end && Math.abs(b[1] - polyAt(l.mid, b[0])) <= 0.6 * charH) hs.add(b[2]);
+                if (b[0] >= l.start && b[0] <= l.end && Math.abs(b[1] - carried(l, b[0], aw)) <= 0.6 * charH) hs.add(b[2]);
             }
             if (hs.size() >= 4) {
                 java.util.Collections.sort(hs);
@@ -1025,7 +1050,16 @@ public final class DocScan {
         int G = 64;
         Bend surface = bend(lines, aw, charH, lines.get(0).row, lines.get(lines.size() - 1).row);
         if (surface == null) return none;
-        double[][][] rest = finish(surface, aw, G, charH, 3 * charH);
+        double[][][] rest = finish(surface, lines, aw, G, charH, 3 * charH);
+        // from here on each line's row is where it ends up, level: the rows its edges and the spacing between lines
+        // are taken at (a line's mean height on the bent page goes by how much of it the trace covered)
+        for (Line l : lines) l.row = levelRow(surface, l.pts);
+        java.util.Collections.sort(lines, new java.util.Comparator<Line>() {
+            @Override
+            public int compare(Line x, Line y) {
+                return Double.compare(x.row, y.row);
+            }
+        });
         double bend = 0;
         for (int j = 0; j < G; j++) {
             for (int i = 0; i <= 40; i++) {
@@ -1088,9 +1122,9 @@ public final class DocScan {
      * one letter size (a list, a paragraph; a heading, a blank line or bigger letters start a new run), and a drift
      * shared by all of them is fitted — the logarithm of the distance a polynomial of the row, each run with its own
      * spacing on top — so that a form whose lists are set further apart than its paragraphs, or a heading's wider
-     * spacing, is no drift at all; only the distances changing within the runs are. Null when they hardly change
-     * (under 5%), change implausibly much (over 35%: something else is wrong), when there are too few, or the drift
-     * misses them.
+     * spacing, is no drift at all; only the distances changing within the runs are (the lines' rows where they end up
+     * level: on a flat page they come out even to 1%). Null when they hardly change (under 3%), change implausibly
+     * much (over 35%: something else is wrong), when there are too few, or the drift misses them.
      */
     static Spacing spacing(java.util.List<Line> lines, double charH, int ah) {
         java.util.List<java.util.List<double[]>> runs = new java.util.ArrayList<java.util.List<double[]>>();
@@ -1177,7 +1211,7 @@ public final class DocScan {
             gMax = Math.max(gMax, v);
         }
         double spread = Math.exp(gMax - gMin);
-        if (spread < 1.05 || spread > 1.35) return null;
+        if (spread < 1.03 || spread > 1.35) return null;
         Spacing sp = new Spacing();
         sp.g = g;
         sp.lo = lo;
@@ -1192,14 +1226,16 @@ public final class DocScan {
      * ink counted row by row (smoothed over a third of a letter), and a line's middle wherever that count peaks — the most
      * within half a letter either way, enough ink, and dropping to under six tenths of it within a letter and a bit
      * on both sides (a valley: lines set close, their letters touching, still part there), a rule (a form's line, an
-     * underline: the rows with at least half the most ink there no more than 0.45 of a letter's height, and holding a
-     * row's worth of ink across the strip — a slanting rule spreads over a few rows) told from letters; then the peaks of each strip
+     * underline: the rows with at least half the most ink there no more than 0.45 of a letter's height, holding a
+     * row's worth of ink across the strip — a slanting rule spreads over a few rows — and next to no ink two or three
+     * rows beyond them) told from letters; then the peaks of each strip
      * joined to the lines of their kind coming from the left — the nearest within three tenths of a letter (and more the
      * further it is carried, up to half) of where a line, carried on at its slope, gets to (two strips may be skipped:
      * a gap between words, a field left blank; a line of letters does not go on along the rule under it). A line: three
-     * peaks or more over three strips or 6% of the page's width (a list's short items, a label like «ЗАКАЗЧИК» too); its middle a polynomial through them, its
-     * start and end where its ink begins and ends (followed out from its first and last peaks, across gaps no wider
-     * than between words).
+     * peaks or more over three strips or 6% of the page's width (a list's short items, a label like «ЗАКАЗЧИК» too),
+     * each peak where its letters' feet are (see {@link #byFeet}); its middle a polynomial through them, its start and
+     * end where its ink begins and ends (followed out from its first and last peaks, across gaps no wider than between
+     * words).
      */
     static java.util.List<Line> trackLines(boolean[] ink, int aw, int ah, double charH, double step) {
         int sw = (int) Math.max(8, Math.round(3 * charH)), ns = (aw + sw - 1) / sw;
@@ -1256,20 +1292,26 @@ public final class DocScan {
                 while (lo > 0 && prof[lo - 1] * 2 >= most) lo--;
                 while (hi < ah - 1 && prof[hi + 1] * 2 >= most) hi++;
                 for (int yy = lo; yy <= hi; yy++) sum += prof[yy];
-                boolean isRule = hi - lo + 1 <= Math.max(3, 0.45 * charH) && sum >= 0.9 * (x1 - x0);
+                // and clear just beyond those rows on both sides: a serif face's line of letters has a row about as
+                // full (the feet of its letters, their tops), but letters' stems right next to it
+                int near = 0;
+                for (int d = 2; d <= 3; d++) {
+                    if (lo - d >= 0) near = Math.max(near, prof[lo - d]);
+                    if (hi + d < ah) near = Math.max(near, prof[hi + d]);
+                }
+                boolean isRule = hi - lo + 1 <= Math.max(3, 0.45 * charH) && sum >= 0.9 * (x1 - x0) && near <= 0.4 * most;
                 // its place between the rows: a rule's, a parabola through the peak and its neighbours; letters', the
-                // middle of the rows about as full (their count is flat across a line's middle)
-                double pos;
+                // middle of their body and their feet (see body)
+                double pos, foot;
                 if (isRule) {
                     double a = sm[y - 1], c = sm[y + 1], den = a - 2 * v + c;
-                    pos = y + 0.5 + (den < 0 ? 0.5 * (a - c) / den : 0);
+                    pos = foot = y + 0.5 + (den < 0 ? 0.5 * (a - c) / den : 0);
                 } else {
-                    int pl = y, ph = y;
-                    while (pl > 0 && sm[pl - 1] >= 0.8 * v) pl--;
-                    while (ph < ah - 1 && sm[ph + 1] >= 0.8 * v) ph++;
-                    pos = (pl + ph + 1) / 2.0;
+                    double[] bf = body(prof, sm, y, 0, ah - 1, charH);
+                    pos = bf[0];
+                    foot = bf[1];
                 }
-                cand.add(new double[]{pos, v, isRule ? 1 : 0});
+                cand.add(new double[]{pos, v, isRule ? 1 : 0, foot});
             }
             // one peak to a line: the strongest of those of a kind closer than 0.8 of a letter (a rule's, 0.3)
             java.util.Collections.sort(cand, new java.util.Comparator<double[]>() {
@@ -1292,9 +1334,24 @@ public final class DocScan {
                     return Double.compare(p[0], q[0]);
                 }
             });
+            // each peak where its ink is across the strip (a line's last letters may fill only part of it) and how
+            // much there is
+            java.util.List<double[]> where = new java.util.ArrayList<double[]>();
             for (double[] k : kept) {
                 peaks.add(k[0]);
                 rule.add(k[2] == 1);
+                int ya = (int) Math.max(0, Math.round(k[0] - 0.5 * charH)), yb = (int) Math.min(ah - 1, Math.round(k[0] + 0.5 * charH));
+                double sx = 0;
+                int count = 0;
+                for (int y = ya; y <= yb; y++) {
+                    for (int x = x0; x < x1; x++) {
+                        if (ink[y * aw + x]) {
+                            sx += x + 0.5;
+                            count++;
+                        }
+                    }
+                }
+                where.add(new double[]{count == 0 ? (x0 + x1) / 2.0 : sx / count, k[3], k[1]});
             }
             double cx = (x0 + x1) / 2.0;
             // the peaks joined to the lines coming from the left: nearest first, each once
@@ -1328,29 +1385,57 @@ public final class DocScan {
                 int ci = (int) p[1], pi = (int) p[2];
                 if (chainUsed[ci] || peakUsed[pi]) continue;
                 chainUsed[ci] = peakUsed[pi] = true;
-                chains.get(ci).add(new double[]{cx, peaks.get(pi)});
+                double[] wh = where.get(pi);
+                chains.get(ci).add(new double[]{wh[0], peaks.get(pi), wh[1], wh[2]});
                 lastStrip.set(ci, s);
             }
             for (int pi = 0; pi < peaks.size(); pi++) {
                 if (peakUsed[pi]) continue;
                 java.util.List<double[]> ch = new java.util.ArrayList<double[]>();
-                ch.add(new double[]{cx, peaks.get(pi)});
+                double[] wh = where.get(pi);
+                ch.add(new double[]{wh[0], peaks.get(pi), wh[1], wh[2]});
                 chains.add(ch);
                 lastStrip.add(s);
                 chainRule.add(rule.get(pi));
             }
         }
+        // the letters' feet below their body's middle, as a rule on this page (half the height of small letters)
+        java.util.List<Double> below = new java.util.ArrayList<Double>();
+        for (int ci = 0; ci < chains.size(); ci++) {
+            if (chains.get(ci).size() < 3 || chainRule.get(ci)) continue;
+            for (double[] q : chains.get(ci)) below.add(q[2] - q[1]);
+        }
+        java.util.Collections.sort(below);
+        double foot = below.isEmpty() ? 0 : below.get(below.size() / 2);
         java.util.List<Line> lines = new java.util.ArrayList<Line>();
         for (int ci = 0; ci < chains.size(); ci++) {
             java.util.List<double[]> ch = chains.get(ci);
             if (ch.size() < 3 || ch.get(ch.size() - 1)[0] - ch.get(0)[0] < Math.min(0.06 * aw, 1.9 * sw)) continue;
-            // a short one (three or four peaks: too few for the fit's second look), a straight line through them
-            double[] mid = ch.size() >= 5 ? polyFit(ch, false, ch.size() >= 8 ? 3 : 2, 0.4 * charH) : straightThrough(ch);
-            if (mid == null) continue;
+            // a line of letters followed by where they stand: their feet (that much above them), which a word in
+            // capitals or figures shares with one in small letters — not by their body's middle, which stands
+            // higher for those (by up to a third of a letter); where the two disagree (thin feet: a «7», a full
+            // stop, a letter or two of a word cut by the strip), not at all
+            if (!chainRule.get(ci)) {
+                java.util.List<double[]> by = new java.util.ArrayList<double[]>();
+                for (double[] q : ch) {
+                    double y = byFeet(q[1], q[2], foot, charH);
+                    if (Double.isNaN(y)) continue;
+                    q[1] = y;
+                    by.add(q);
+                }
+                if (by.size() < 3 || by.get(by.size() - 1)[0] - by.get(0)[0] < Math.min(0.06 * aw, 1.9 * sw)) continue;
+                ch = by;
+            }
+            // a short one (under six peaks: too few for a parabola and the fit's second look), a straight line
+            // through them; so too when the curve runs off steeply at its ends (carried on beyond them, it would
+            // follow the ink of other lines)
+            double[] mid = ch.size() >= 6 ? polyFit(ch, false, ch.size() >= 8 ? 3 : 2, 0.4 * charH) : null;
+            if (mid == null || steep(mid, ch.get(0)[0], ch.get(ch.size() - 1)[0])) mid = straightThrough(ch);
             Line l = new Line();
             l.mid = mid;
             l.pts = ch;
             l.rule = chainRule.get(ci);
+            l.foot = foot;
             // where its ink begins and ends: from its first (last) peak outwards along it, as far as there is ink near
             // its middle with gaps no wider than between words
             l.start = ch.get(0)[0];
@@ -1385,6 +1470,150 @@ public final class DocScan {
             while (x < end && !inkNear(ink, aw, ah, x, carried(l, x, aw), 0.5 * charH)) x++;
         }
         return l.start;
+    }
+
+    /**
+     * The letters' body about the peak at row {@code y} of a strip's ink count ({@code prof}, and smoothed {@code sm};
+     * rows lo…hi): {its middle, its feet}. The middle halfway between where the smoothed count rises through half its
+     * most and falls back (to a fraction of a row) — steadier from strip to strip than the fullest rows, which go by
+     * the words' letters; the feet where the count itself falls under four tenths of the body's fullest row, going
+     * down (a fraction of a row too).
+     */
+    static double[] body(int[] prof, double[] sm, int y, int lo, int hi, double charH) {
+        double v = sm[y];
+        int pl = y, ph = y, reach = (int) Math.round(charH);
+        while (pl > lo && y - pl < reach && sm[pl - 1] >= 0.5 * v) pl--;
+        while (ph < hi && ph - y < reach && sm[ph + 1] >= 0.5 * v) ph++;
+        double up = pl > lo && sm[pl - 1] < 0.5 * v ? pl - (sm[pl] - 0.5 * v) / (sm[pl] - sm[pl - 1]) : pl;
+        double down = ph < hi && sm[ph + 1] < 0.5 * v ? ph + (sm[ph] - 0.5 * v) / (sm[ph] - sm[ph + 1]) : ph;
+        int most = 0;
+        for (int yy = pl; yy <= ph; yy++) most = Math.max(most, prof[yy]);
+        int b = Math.min(hi - 1, ph + 2);
+        while (b > y && prof[b] < 0.4 * most) b--;
+        double f = b + 0.5 + (prof[b + 1] < 0.4 * most ? Math.min(1, (prof[b] - 0.4 * most) / Math.max(1e-9, prof[b] - prof[b + 1])) : 0);
+        return new double[]{(up + down + 1) / 2.0, f};
+    }
+
+    /**
+     * A point of a line of letters by its feet (see {@link #body}): {@code feet} less how far below the middle feet
+     * are on the page — NaN when they seem too high by three tenths of a letter (thin feet: a «7», a full stop, a
+     * letter cut by the strip) or too low by as much and a bit (letters reaching down in most of the strip).
+     */
+    static double byFeet(double mid, double feet, double foot, double charH) {
+        double p = feet - foot;
+        return p < mid - 0.3 * charH || p > mid + 0.4 * charH ? Double.NaN : p;
+    }
+
+    /**
+     * The line's trace carried on to its very ends: the strips fall where they fall, so its first (last) word is often
+     * under no strip of its own, or its trace lost it there (a corner curling more sharply than the trace was carried
+     * on). From its outermost point outwards, half a strip at a time, a strip as wide as the others (no further out
+     * than the line's ink): its middle there (as {@link #trackLines} takes it) within half a letter of where the trace,
+     * carried on at the slope of its last two points, gets to.
+     */
+    static void reachEnds(boolean[] ink, int aw, int ah, Line l, double charH) {
+        int sw = (int) Math.max(8, Math.round(3 * charH)), r = (int) Math.max(1, Math.round(0.15 * charH));
+        for (int dir = -1; dir <= 1; dir += 2) {
+            java.util.List<double[]> pts = l.pts;
+            int was = Integer.MIN_VALUE;
+            while (pts.size() >= 2) {
+                double[] p1 = dir < 0 ? pts.get(0) : pts.get(pts.size() - 1), p0 = dir < 0 ? pts.get(1) : pts.get(pts.size() - 2);
+                // the next window: half a strip on, kept within the ink
+                int x0 = (int) Math.round(p1[0] + dir * sw / 2.0 - sw / 2.0);
+                if (dir < 0) x0 = Math.max(x0, (int) Math.floor(l.start));
+                else x0 = Math.min(x0, (int) Math.ceil(l.end) - sw);
+                x0 = Math.max(0, Math.min(aw - sw, x0));
+                double cx = x0 + sw / 2.0;
+                // on outwards, a quarter of a strip at least (a point is where its ink is, not the window's middle:
+                // the window held at the ink's end would find it again and again)
+                if (dir * (cx - p1[0]) < 0.25 * sw || was != Integer.MIN_VALUE && dir * (x0 - was) < 0.25 * sw) break;
+                was = x0;
+                double slope = Math.max(-0.3, Math.min(0.3, (p1[1] - p0[1]) / (dir * Math.max(1, dir * (p1[0] - p0[0])))));
+                double pred = p1[1] + slope * (cx - p1[0]);
+                int lo = (int) Math.floor(pred - 1.5 * charH), hi = (int) Math.ceil(pred + 1.5 * charH);
+                if (lo - r < 0 || hi + r >= ah) break;
+                int[] prof = new int[ah];
+                double[] sm = new double[ah];
+                for (int y = lo - r; y <= hi + r; y++) {
+                    for (int x = x0; x < x0 + sw; x++) if (ink[y * aw + x]) prof[y]++;
+                }
+                for (int y = lo; y <= hi; y++) {
+                    double c = 0;
+                    for (int yy = y - r; yy <= y + r; yy++) c += prof[yy];
+                    sm[y] = c / (2 * r + 1);
+                }
+                // the fullest row within half a letter of where it gets to
+                int best = -1;
+                for (int y = (int) Math.ceil(pred - 0.5 * charH); y <= (int) Math.floor(pred + 0.5 * charH); y++) {
+                    if (best < 0 || sm[y] > sm[best]) best = y;
+                }
+                double v = best < 0 ? 0 : sm[best];
+                if (v < 0.06 * sw) break;
+                double[] bf = body(prof, sm, best, lo, hi, charH);
+                double pos = byFeet(bf[0], bf[1], l.foot, charH);
+                if (Double.isNaN(pos) || Math.abs(pos - pred) > 0.5 * charH) break;
+                // where its ink is across the window
+                double sx = 0;
+                int count = 0;
+                for (int y = (int) Math.round(pos - 0.5 * charH); y <= (int) Math.round(pos + 0.5 * charH); y++) {
+                    for (int x = x0; x < x0 + sw; x++) {
+                        if (ink[y * aw + x]) {
+                            sx += x + 0.5;
+                            count++;
+                        }
+                    }
+                }
+                double[] q = {count == 0 ? cx : sx / count, pos, bf[1], v};
+                if (dir < 0) pts.add(0, q);
+                else pts.add(q);
+            }
+        }
+    }
+
+    /**
+     * The line's trace taken again along the line itself: a strip's ink counted row by row is spread where the line
+     * slopes across it (by a fifth of a letter and more where a corner curls: a strip three letters wide, a line falling
+     * one in six), and its feet then read low; counted along the slope there instead (each column's rows moved by the
+     * slope through its neighbours), the line's body and its feet are as sharp as on a level line. Each point
+     * replaced by what that finds within a quarter of a letter of it (else left as it is).
+     */
+    static void alongSlope(boolean[] ink, int aw, int ah, Line l, double charH) {
+        int sw = (int) Math.max(8, Math.round(3 * charH)), r = (int) Math.max(1, Math.round(0.15 * charH));
+        java.util.List<double[]> pts = l.pts;
+        int n = pts.size();
+        if (n < 3) return;
+        double[] ys = new double[n];
+        for (int i = 0; i < n; i++) {
+            double[] q = pts.get(i), a = pts.get(Math.max(0, i - 1)), b = pts.get(Math.min(n - 1, i + 1));
+            double slope = b[0] > a[0] ? (b[1] - a[1]) / (b[0] - a[0]) : 0;
+            ys[i] = q[1];
+            if (Math.abs(slope) < 0.02) continue;
+            int x0 = (int) Math.round(q[0] - sw / 2.0);
+            x0 = Math.max(0, Math.min(aw - sw, x0));
+            int lo = (int) Math.floor(q[1] - 1.5 * charH), hi = (int) Math.ceil(q[1] + 1.5 * charH);
+            int lift = (int) Math.ceil(Math.abs(slope) * sw / 2) + r + 1;
+            if (lo - lift < 0 || hi + lift >= ah) continue;
+            int[] prof = new int[ah];
+            double[] sm = new double[ah];
+            for (int x = x0; x < x0 + sw; x++) {
+                int dy = (int) Math.round(slope * (x + 0.5 - q[0]));
+                for (int y = lo - r; y <= hi + r; y++) if (ink[(y + dy) * aw + x]) prof[y]++;
+            }
+            for (int y = lo; y <= hi; y++) {
+                double c = 0;
+                for (int yy = y - r; yy <= y + r; yy++) c += prof[yy];
+                sm[y] = c / (2 * r + 1);
+            }
+            int best = -1;
+            for (int y = (int) Math.ceil(q[1] - 0.5 * charH); y <= (int) Math.floor(q[1] + 0.5 * charH); y++) {
+                if (best < 0 || sm[y] > sm[best]) best = y;
+            }
+            if (best < 0 || sm[best] < 0.06 * sw) continue;
+            double[] bf = body(prof, sm, best, lo, hi, charH);
+            double y = byFeet(bf[0], bf[1], l.foot, charH);
+            if (!Double.isNaN(y) && Math.abs(y - q[1]) <= 0.25 * charH) ys[i] = y;
+        }
+        for (int i = 0; i < n; i++) pts.get(i)[1] = ys[i];
     }
 
     /** From column {@code from} along the line in direction {@code dir}: the last column with ink near its middle. */
@@ -1494,38 +1723,40 @@ public final class DocScan {
             }
             if (!dropped) break;
         }
-        b.kept = use;
-        b.rows = rows;
         return b;
     }
 
     /**
      * What the smooth surface leaves of each line's waviness, put right exactly: each line's level row once moved by
      * the surface (where its trace points end up, on average), and at each of its trace points how much more it must
-     * move to lie on that row (no more than half a letter: the points it missed by more were dropped); per column of
-     * the grid, those of the lines over it, in proportion between the lines, fading to none a line and a half beyond
-     * the first and last. {rows, shifts} per column, null where no line is.
+     * move to lie on that row — every line's, also where the surface missed them (a corner curling more sharply than
+     * it bends: there they are needed most), unless the trace slipped (a jump of four tenths of a letter from one
+     * point to the next, more than a letter's height in all: onto the next line). Along a line, that taken smoothly
+     * (a straight line through the points about each place, weighed by a Gaussian a strip wide and by their ink: the
+     * trace's own jitter is not to be copied into the line, a curl at its end is); per column of the grid, those of the lines over it (to half a strip beyond a line's outermost points),
+     * in proportion between the lines, fading to none a line and a half beyond the first and last. {rows, shifts} per
+     * column, null where no line is.
      */
-    static double[][][] finish(Bend b, int aw, int G, double charH, double sw) {
+    static double[][][] finish(Bend b, java.util.List<Line> lines, int aw, int G, double charH, double sw) {
         java.util.List<double[]> lineRows = new java.util.ArrayList<double[]>();
         java.util.List<double[][]> lineRes = new java.util.ArrayList<double[][]>();
-        for (int li = 0; li < b.kept.size(); li++) {
-            java.util.List<double[]> pts = b.kept.get(li);
+        for (Line l : lines) {
+            java.util.List<double[]> pts = l.pts;
             if (pts.size() < 3) continue;
-            // where each point ends up under the surface alone: t with t + D(x, t) = y
-            double T = 0;
-            double[] ts = new double[pts.size()];
-            for (int i = 0; i < pts.size(); i++) {
-                double x = pts.get(i)[0], y = pts.get(i)[1], t = y - b.at(x, y);
-                for (int it = 0; it < 4; it++) t = y - b.at(x, t);
-                ts[i] = t;
-                T += t / pts.size();
-            }
-            double[][] res = new double[pts.size()][2];
+            double T = levelRow(b, pts);
+            // each point counting by its ink (a strip holding a letter or two of the line's last word, a full stop,
+            // tells less), half the line's usual and more fully
+            double[] inks = new double[pts.size()];
+            for (int i = 0; i < pts.size(); i++) inks[i] = pts.get(i).length > 3 ? pts.get(i)[3] : 1;
+            double[] sorted = inks.clone();
+            java.util.Arrays.sort(sorted);
+            double usual = Math.max(1e-9, sorted[sorted.length / 2]);
+            double[][] res = new double[pts.size()][3];
             for (int i = 0; i < pts.size(); i++) {
                 double x = pts.get(i)[0], y = pts.get(i)[1];
                 res[i][0] = x;
-                res[i][1] = Math.max(-0.5 * charH, Math.min(0.5 * charH, y - T - b.at(x, T)));
+                res[i][1] = y - T - b.at(x, T);
+                res[i][2] = Math.min(1, inks[i] / (0.5 * usual));
             }
             java.util.Arrays.sort(res, new java.util.Comparator<double[]>() {
                 @Override
@@ -1533,6 +1764,14 @@ public final class DocScan {
                     return Double.compare(p[0], q[0]);
                 }
             });
+            double lo = 1e9, hi = -1e9;
+            boolean slipped = false;
+            for (int i = 0; i < res.length; i++) {
+                lo = Math.min(lo, res[i][1]);
+                hi = Math.max(hi, res[i][1]);
+                if (i > 0 && Math.abs(res[i][1] - res[i - 1][1]) > 0.4 * charH) slipped = true;
+            }
+            if (slipped || hi - lo > charH) continue;
             lineRows.add(new double[]{T});
             lineRes.add(res);
         }
@@ -1544,16 +1783,7 @@ public final class DocScan {
             for (int li = 0; li < lineRes.size(); li++) {
                 double[][] res = lineRes.get(li);
                 if (X < res[0][0] - sw / 2 || X > res[res.length - 1][0] + sw / 2) continue;
-                double v;
-                if (X <= res[0][0]) v = res[0][1];
-                else if (X >= res[res.length - 1][0]) v = res[res.length - 1][1];
-                else {
-                    int k = 0;
-                    while (res[k + 1][0] < X) k++;
-                    double f = (X - res[k][0]) / Math.max(1e-9, res[k + 1][0] - res[k][0]);
-                    v = res[k][1] + f * (res[k + 1][1] - res[k][1]);
-                }
-                pairs.add(new double[]{lineRows.get(li)[0], v});
+                pairs.add(new double[]{lineRows.get(li)[0], locally(res, X, sw)});
             }
             if (pairs.isEmpty()) continue;
             java.util.Collections.sort(pairs, new java.util.Comparator<double[]>() {
@@ -1573,17 +1803,59 @@ public final class DocScan {
                     merged.add(new double[]{p[0], p[1]});
                 }
             }
+            // each line's shift held over its letters' height (half a letter either way, less where the next line
+            // is nearer): its letters move as one, not sheared towards the next line's shift (or towards none, where
+            // the next line is shorter and this column has none of it)
             int m = merged.size();
-            double[] rows = new double[m + 2], vals = new double[m + 2];
+            double[] rows = new double[2 * m + 2], vals = new double[2 * m + 2];
             rows[0] = merged.get(0)[0] - fade;
-            rows[m + 1] = merged.get(m - 1)[0] + fade;
+            rows[2 * m + 1] = merged.get(m - 1)[0] + fade;
             for (int i = 0; i < m; i++) {
-                rows[i + 1] = merged.get(i)[0];
-                vals[i + 1] = merged.get(i)[1];
+                double t = merged.get(i)[0];
+                double above = i == 0 ? 0.5 * charH : Math.min(0.5 * charH, 0.45 * (t - merged.get(i - 1)[0]));
+                double below = i == m - 1 ? 0.5 * charH : Math.min(0.5 * charH, 0.45 * (merged.get(i + 1)[0] - t));
+                rows[2 * i + 1] = t - above;
+                rows[2 * i + 2] = t + below;
+                vals[2 * i + 1] = vals[2 * i + 2] = merged.get(i)[1];
             }
             out[j] = new double[][]{rows, vals};
         }
         return out;
+    }
+
+    /**
+     * The row a line's trace ends up on under the surface alone: where each point goes (t with t + D(x, t) = y, a few
+     * steps), on average.
+     */
+    static double levelRow(Bend b, java.util.List<double[]> pts) {
+        double T = 0;
+        for (double[] q : pts) {
+            double x = q[0], y = q[1], t = y - b.at(x, y);
+            for (int it = 0; it < 4; it++) t = y - b.at(x, t);
+            T += t / pts.size();
+        }
+        return T;
+    }
+
+    /**
+     * The points {x, y, weight} (in order of x) at {@code x} smoothly: a straight line through them weighed by a
+     * Gaussian of their distance (σ {@code width}) and their own weight, there; beyond the outermost, carried on at that
+     * line's slope.
+     */
+    static double locally(double[][] pts, double x, double width) {
+        double s = 0, sx = 0, sy = 0, sxx = 0, sxy = 0;
+        for (double[] q : pts) {
+            double d = (q[0] - x) / width, w = Math.exp(-0.5 * d * d) * (q.length > 2 ? q[2] : 1);
+            s += w;
+            sx += w * q[0];
+            sy += w * q[1];
+            sxx += w * q[0] * q[0];
+            sxy += w * q[0] * q[1];
+        }
+        if (s < 1e-12) return 0;
+        double mx = sx / s, my = sy / s, vx = sxx / s - mx * mx, cxy = sxy / s - mx * my;
+        // one point about all there is: no slope to it
+        return my + (vx > 0.05 * width * width ? cxy / vx : 0) * (x - mx);
     }
 
     /** At row t of a column's {rows, shifts}: in proportion between them, none beyond. */
@@ -1608,15 +1880,15 @@ public final class DocScan {
         for (int i = 0; i < 3; i++) for (int j = 0; j < 3; j++) a[k[i]][k[j]] += lam * c[i] * c[j];
     }
 
-    /** A line's row once level: the mean of its middle along it. */
+    /** A line's row once level: the mean of its middle along it (as far as it was followed). */
     private static double rowOf(Line l, double step) {
-        double sum = 0;
+        double s = l.pts.get(0)[0], e = l.pts.get(l.pts.size() - 1)[0], sum = 0;
         int m = 0;
-        for (double x = l.start; x < l.end; x += step) {
+        for (double x = s; x <= e; x += step) {
             sum += polyAt(l.mid, x);
             m++;
         }
-        return m == 0 ? polyAt(l.mid, (l.start + l.end) / 2) : sum / m;
+        return m == 0 ? polyAt(l.mid, (s + e) / 2) : sum / m;
     }
 
     /**
@@ -1627,6 +1899,7 @@ public final class DocScan {
      * when no other line lies over the gap — are one line.
      */
     static void joinPieces(java.util.List<Line> lines, double charH, int aw, double step) {
+        double sw = Math.max(8, Math.round(3 * charH));
         boolean joined = true;
         while (joined) {
             joined = false;
@@ -1641,14 +1914,19 @@ public final class DocScan {
                 Line a = lines.get(i);
                 for (int j = i + 1; j < lines.size(); j++) {
                     Line b = lines.get(j);
-                    double gap = b.start - a.end;
-                    if (gap < -0.02 * aw || gap > 0.3 * aw) continue;
-                    double at = (a.end + b.start) / 2, apart = Math.abs(carried(a, at, aw) - carried(b, at, aw));
+                    // the gap between their traces (their ink may overlap: a piece followed out along a slope a bit
+                    // off runs on into the next one's letters)
+                    double[] aLast = a.pts.get(a.pts.size() - 1), bFirst = b.pts.get(0);
+                    double gap = bFirst[0] - aLast[0];
+                    if (gap <= 0 || gap > 0.3 * aw) continue;
+                    double at = (aLast[0] + bFirst[0]) / 2, apart = Math.abs(carried(a, at, aw) - carried(b, at, aw));
                     // within half a letter; within eight tenths when nothing lies in the gap between them (a row of
                     // labels far apart — «ОБУЧАЮЩИЙСЯ … ЗАКАЗЧИК» — that the bend has set at different heights), and
-                    // then their near ends compared as they are (a short word's slope carried far says little)
-                    boolean empty = emptyBetween(lines, a, b, charH);
-                    if (empty) apart = Math.min(apart, Math.abs(polyAt(a.mid, a.end) - polyAt(b.mid, b.start)));
+                    // then their near ends compared as they are (a short word's slope carried far says little); so
+                    // too when they follow each other strip to strip (a line that turns more sharply than its trace
+                    // was carried on: a corner curling)
+                    boolean empty = emptyBetween(lines, a, b, charH), next = gap <= 2.5 * sw;
+                    if (empty || next) apart = Math.min(apart, Math.abs(aLast[1] - bFirst[1]));
                     if (apart > 0.8 * charH || apart > 0.5 * charH && !empty) continue;
                     java.util.List<double[]> pts = new java.util.ArrayList<double[]>(a.pts);
                     pts.addAll(b.pts);
@@ -1658,16 +1936,18 @@ public final class DocScan {
                             return Double.compare(x[0], y[0]);
                         }
                     });
-                    double[] mid = polyFit(pts, false, pts.size() >= 30 ? 3 : 2, 0.4 * charH);
-                    if (mid == null) continue;
+                    double[] mid = pts.size() >= 6 ? polyFit(pts, false, pts.size() >= 30 ? 3 : 2, 0.4 * charH) : null;
+                    if (mid == null || steep(mid, pts.get(0)[0], pts.get(pts.size() - 1)[0])) mid = straightThrough(pts);
                     double resid = 0;
                     for (double[] pt : pts) resid += Math.abs(polyAt(mid, pt[0]) - pt[1]);
                     if (resid / pts.size() > 0.35 * charH) continue;
                     Line l = new Line();
                     l.mid = mid;
                     l.pts = pts;
+                    l.rule = a.rule;
                     l.start = Math.min(a.start, b.start);
                     l.end = Math.max(a.end, b.end);
+                    l.word = a.start <= b.start ? a.word : b.word;
                     l.row = rowOf(l, step);
                     lines.remove(j);
                     lines.set(i, l);
@@ -1682,6 +1962,13 @@ public final class DocScan {
                 return Double.compare(x.row, y.row);
             }
         });
+    }
+
+    /** Whether the curve rises or falls by more than one in four anywhere from x0 to x1 (a line of text does not). */
+    static boolean steep(double[] p, double x0, double x1) {
+        double step = Math.max(1, (x1 - x0) / 16);
+        for (double x = x0; x < x1; x += step) if (Math.abs(polyAt(p, Math.min(x1, x + step)) - polyAt(p, x)) > 0.25 * step) return true;
+        return false;
     }
 
     /** y of x through the points, least squares, as a polynomial of degree 1 ({@link #polyFit}'s form). */
@@ -1712,15 +1999,18 @@ public final class DocScan {
         return true;
     }
 
-    /** A line's middle carried on straight beyond its ends (the slope over its last tenth of the page's width). */
+    /**
+     * A line's middle carried on straight beyond the ends of its trace (the slope over its last tenth of the page's
+     * width): its polynomial, fitted to the trace, says nothing beyond it (a cubic runs off).
+     */
     private static double carried(Line l, double x, int aw) {
-        double d = 0.1 * aw;
-        if (x > l.end) {
-            double e = l.end, s = Math.max(l.start, e - d), y1 = polyAt(l.mid, e), y0 = polyAt(l.mid, s);
+        double d = 0.1 * aw, first = l.pts.get(0)[0], last = l.pts.get(l.pts.size() - 1)[0];
+        if (x > last) {
+            double e = last, s = Math.max(first, e - d), y1 = polyAt(l.mid, e), y0 = polyAt(l.mid, s);
             return y1 + (e > s ? (y1 - y0) / (e - s) : 0) * (x - e);
         }
-        if (x < l.start) {
-            double s = l.start, e = Math.min(l.end, s + d), y0 = polyAt(l.mid, s), y1 = polyAt(l.mid, e);
+        if (x < first) {
+            double s = first, e = Math.min(last, s + d), y0 = polyAt(l.mid, s), y1 = polyAt(l.mid, e);
             return y0 - (e > s ? (y1 - y0) / (e - s) : 0) * (s - x);
         }
         return polyAt(l.mid, x);
@@ -1762,8 +2052,9 @@ public final class DocScan {
                 double bd = 1e9;
                 for (java.util.List<double[]> r : open) {
                     double[] last = r.get(r.size() - 1);
-                    // within a paragraph: no blank line between (a paragraph set further in starts afresh)
-                    if (l.row - last[1] > 4 * charH) continue;
+                    // within a paragraph: no blank line between (a paragraph set further in starts afresh); a form's
+                    // rows a rule apart are no blank line
+                    if (l.row - last[1] > 4 * charH && !(l.row - last[1] <= 6 * charH && closeBetween(lines, last[1], l.row, 2.5 * charH))) continue;
                     // where the run gets to, carried on at its lean so far
                     double pred = last[0], lim = tol;
                     if (r.size() >= 2) {
@@ -1850,6 +2141,17 @@ public final class DocScan {
         double before = spread(kept), after = spread(left);
         if (most < 1 || most > 0.08 * aw || after > 0.95 * before) return null;
         return up;
+    }
+
+    /** Whether the lines (of any kind) from row {@code from} to row {@code to} follow each other no further apart than {@code gap}. */
+    private static boolean closeBetween(java.util.List<Line> lines, double from, double to, double gap) {
+        double last = from;
+        for (Line l : lines) {
+            if (l.row <= from || l.row > to) continue;
+            if (l.row - last > gap) return false;
+            last = l.row;
+        }
+        return to - last <= gap;
     }
 
     /** x = a + b·y through the points (least squares): {a, b}. */

@@ -273,6 +273,35 @@ public class DocScanTest {
         //    took the table's rules for lines and bent the page into a mess)
         for (int i = 1; i < args.length; i++) realPhoto(new File(args[i]), out);
 
+        // 8. a contract page as a phone photographs it (3000×4000): real letters (a serif face), a justified paragraph
+        // with its number in the margin, a heading, a block of particulars, a form with rules under its fields, a
+        // centred paragraph, a row of two labels far apart at the bottom; the sheet bowed, waving across, its bottom
+        // curling, leaning back. Its lines straight and level (each rule, and the text region by region, rising by no
+        // more than a pixel or two), the paragraphs' edges upright, the two labels on one row
+        BufferedImage page8 = contractPage();
+        long t8 = System.currentTimeMillis();
+        BufferedImage photo8 = bent(page8, 3000, 4000, 4500, 0.008);
+        ImageIO.write(photo8, "jpg", new File(out, "8-photo.jpg"));
+        int[] s8 = px(photo8);
+        DocScan.Sheet sheet8 = DocScan.findSheet(s8, 3000, 4000);
+        check(sheet8 != null, "a contract page at a phone's resolution: found");
+        if (sheet8 != null) {
+            long p8 = System.currentTimeMillis();
+            DocScan.Image scan8 = DocScan.process(s8, 3000, 4000, sheet8, true, DocScan.BW, 3508);
+            long took = System.currentTimeMillis() - p8;
+            save(scan8, new File(out, "8-scan.png"));
+            double[] rules = rulesTilt(scan8), text8 = textTilt(scan8), lean8 = drift(scan8);
+            double l1 = lastBand(scan8, scan8.w / 12, scan8.w * 3 / 8), l2 = lastBand(scan8, scan8.w / 2, scan8.w * 3 / 4);
+            System.out.println(String.format(Locale.ROOT, "  contract page: %dx%d in %d ms (rendered in %d); rules: worst %.1f px from end to end "
+                    + "(%d rules); text: worst rise %.1f px over a third of the width (%d regions); paragraph edges lean up to %.2f px "
+                    + "per 100 rows (%d runs, drifting %.1f px at most); labels at %.1f and %.1f", scan8.w, scan8.h, took, p8 - t8, rules[0],
+                    (int) rules[1], text8[0], (int) text8[1], lean8[0], (int) lean8[1], lean8[2], l1, l2));
+            check(rules[1] >= 6 && rules[0] <= 3, "the contract page: its rules straight and level");
+            check(text8[1] >= 10 && text8[0] <= 2, "the contract page: its text level region by region");
+            check(lean8[0] <= 0.8, "the contract page: its paragraphs' edges upright");
+            check(l1 > 0 && l2 > 0 && Math.abs(l1 - l2) <= 3, "the contract page: the bottom row's labels on one row");
+        }
+
         // 4. a sheet on a white table: nothing apart from it to cut by
         BufferedImage white = new BufferedImage(1200, 900, BufferedImage.TYPE_INT_RGB);
         Graphics2D gw = white.createGraphics();
@@ -381,9 +410,202 @@ public class DocScanTest {
         return b;
     }
 
+    /** A sentence to set the paragraphs from (a contract's wording; the names in the form made up). */
+    static final String WORDING = "Стороны пришли к соглашению об использовании в настоящем Договоре факсимильного воспроизведения "
+            + "подписи от ИНСТИТУТА с помощью средств механического или иного копирования. Для подписания Договора и обмена "
+            + "документами в электронном виде через личный кабинет ОБУЧАЮЩЕГОСЯ и посредством обмена документами через "
+            + "электронную почту ОБУЧАЮЩЕГОСЯ/ЗАКАЗЧИКА, указанную в настоящем договоре стороны, также пришли к соглашению о "
+            + "возможности использования простой электронной подписи через личный кабинет ОБУЧАЮЩЕГОСЯ, а также обмена "
+            + "сканированными копиями документов с подписью ОБУЧАЮЩЕГОСЯ/ЗАКАЗЧИКА, направленных с электронной почты, "
+            + "указанной в настоящем Договоре. Такие документы и Договор признаются надлежащим образом подписанными "
+            + "сторонами и имеют юридическую силу до момента получения Сторонами подписанных собственноручно оригиналов "
+            + "таких документов. Обмен оригиналами осуществляется в течение срока, не превышающего 1 календарный месяц.";
+
     /**
-     * The last band of ink in a span of columns, near the bottom of the page: its middle row (-1 when none) — where a
-     * label of the bottom row ended up.
+     * An A4 page at 300 dpi set like a contract's last page: a justified paragraph numbered in the margin, a heading,
+     * a block of particulars set in, a form (a label and what was filled in, a rule under each), a centred
+     * paragraph, and a row of two labels far apart near the bottom.
+     */
+    static BufferedImage contractPage() {
+        int w = 2480, h = 3508, left = 260, right = 2240;
+        BufferedImage b = new BufferedImage(w, h, BufferedImage.TYPE_INT_RGB);
+        Graphics2D g = b.createGraphics();
+        g.setRenderingHint(RenderingHints.KEY_TEXT_ANTIALIASING, RenderingHints.VALUE_TEXT_ANTIALIAS_ON);
+        g.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
+        g.setColor(new Color(238, 236, 230));
+        g.fillRect(0, 0, w, h);
+        g.setColor(new Color(30, 30, 35));
+        java.awt.Font body = new java.awt.Font("Serif", java.awt.Font.PLAIN, 34), bold = body.deriveFont(java.awt.Font.BOLD);
+        // 9.7. a justified paragraph
+        g.setFont(bold);
+        g.drawString("9.7.", 110, 300);
+        g.setFont(body);
+        String[] words = WORDING.split(" ");
+        int y = 300, i = 0;
+        while (i < words.length) {
+            java.util.List<String> line = new java.util.ArrayList<String>();
+            int width = 0, space = g.getFontMetrics().stringWidth(" ");
+            while (i < words.length) {
+                int ww = g.getFontMetrics().stringWidth(words[i]);
+                if (!line.isEmpty() && width + space + ww > right - left) break;
+                width += (line.isEmpty() ? 0 : space) + ww;
+                line.add(words[i++]);
+            }
+            double gap = i < words.length && line.size() > 1 ? (double) (right - left - width + space * (line.size() - 1)) / (line.size() - 1) : space;
+            double x = left;
+            for (String word : line) {
+                g.drawString(word, (float) x, y);
+                x += g.getFontMetrics().stringWidth(word) + gap;
+            }
+            y += 52;
+        }
+        // 10. a heading, a block of particulars set in
+        y += 70;
+        g.setFont(bold);
+        g.drawString("10.", 110, y);
+        g.drawString("РЕКВИЗИТЫ СТОРОН", left, y);
+        String[] block = {"ИНСТИТУТ: Образовательная некоммерческая организация высшего образования",
+                "(ОНО ВО «Институт») 100000,", "", "г. Москва, ул. Примерная, д. 2.", "ИНН 1234567890 КПП 123456789",
+                "Р/сч 12345678901234567890 в ПАО Банк г. Москва", "К/сч 98765432109876543210", "БИК 012345678"};
+        y += 80;
+        for (String s : block) {
+            g.setFont(s.startsWith("ИНСТИТУТ") ? bold : body);
+            if (!s.isEmpty()) g.drawString(s, left + 60, y);
+            y += 50;
+        }
+        // a form: a label and what was filled in, a rule under each
+        String[][] form = {{"ОБУЧАЮЩИЙСЯ:", "Иванов Иван Иванович"}, {"(фамилия, имя, отчество)", ""},
+                {"паспорт: серия", "0000 № 000000 выдан 01.01.2020 г."}, {"кем:", "ГУ МВД РОССИИ ПО Г. МОСКВЕ"},
+                {"адрес:", "г. Москва, ул. Примерная, д. 1, кв. 1"}, {"тел.", "+7 900 000 00 00 эл. почта ivanov@example.ru"},
+                {"ЗАКАЗЧИК:", "Иванов Иван Иванович"}, {"(фамилия, имя, отчество)", ""}};
+        y += 50;
+        for (String[] f : form) {
+            g.setFont(f[0].endsWith(":") && f[0].equals(f[0].toUpperCase()) ? bold : body);
+            g.drawString(f[0], left - 40, y);
+            int lw = g.getFontMetrics().stringWidth(f[0]);
+            g.setFont(body);
+            g.drawString(f[1], left - 40 + lw + 20, y);
+            g.fillRect(left - 60, y + 14, right - left + 60, 4);
+            y += 66;
+        }
+        // a centred paragraph
+        y += 60;
+        String[] centred = {"ОБУЧАЮЩЕМУСЯ и ЗАКАЗЧИКУ разъяснено содержание всех положений настоящего Договора.",
+                "ОБУЧАЮЩИЙСЯ и ЗАКАЗЧИК ознакомлены с Уставом ИНСТИТУТА, с лицензией на осуществление деятельности,",
+                "с образовательной программой, в том числе с учебным планом, календарным учебным графиком.",
+                "ОБУЧАЮЩИЙСЯ и ЗАКАЗЧИК не имеют невыясненных вопросов по содержанию настоящего Договора.",
+                "До ОБУЧАЮЩЕГОСЯ и/или ЗАКАЗЧИКА доведена в полном объеме информация об оказываемых услугах."};
+        g.setFont(body);
+        for (String s : centred) {
+            g.drawString(s, (left + right) / 2f - g.getFontMetrics().stringWidth(s) / 2f, y);
+            y += 52;
+        }
+        // a row of two labels far apart
+        g.setFont(bold);
+        g.drawString("ОБУЧАЮЩИЙСЯ", 300, 3050);
+        g.drawString("ЗАКАЗЧИК", 1300, 3050);
+        g.dispose();
+        return b;
+    }
+
+    /**
+     * The rules of a scan (long thin lines: a row of a strip 120 px wide at least 85% ink, followed across the page):
+     * the worst of how far each rises or falls from end to end (its highest row less its lowest), and how many there are.
+     */
+    static double[] rulesTilt(DocScan.Image im) {
+        int sw = 120, ns = im.w / sw;
+        java.util.List<java.util.List<double[]>> rules = new java.util.ArrayList<java.util.List<double[]>>();
+        for (int s = 0; s < ns; s++) {
+            int x0 = s * sw;
+            java.util.List<Double> ys = new java.util.ArrayList<Double>();
+            int y = 0;
+            while (y < im.h) {
+                int c = 0;
+                for (int x = x0; x < x0 + sw; x++) if ((im.px[y * im.w + x] & 0xFF) < 128) c++;
+                if (c < 0.85 * sw) {
+                    y++;
+                    continue;
+                }
+                int y0 = y;
+                while (y < im.h) {
+                    int cc = 0;
+                    for (int x = x0; x < x0 + sw; x++) if ((im.px[y * im.w + x] & 0xFF) < 128) cc++;
+                    if (cc < 0.85 * sw) break;
+                    y++;
+                }
+                ys.add((y0 + y - 1) / 2.0);
+            }
+            double cx = x0 + sw / 2.0;
+            for (double yy : ys) {
+                java.util.List<double[]> best = null;
+                for (java.util.List<double[]> r : rules) {
+                    double[] last = r.get(r.size() - 1);
+                    if (cx - last[0] <= 2 * sw && Math.abs(last[1] - yy) <= 8) best = r;
+                }
+                if (best == null) {
+                    best = new java.util.ArrayList<double[]>();
+                    rules.add(best);
+                }
+                best.add(new double[]{cx, yy});
+            }
+        }
+        double worst = 0;
+        int n = 0;
+        for (java.util.List<double[]> r : rules) {
+            if (r.size() < 8) continue;
+            double lo = 1e9, hi = -1e9;
+            for (double[] q : r) {
+                lo = Math.min(lo, q[1]);
+                hi = Math.max(hi, q[1]);
+            }
+            worst = Math.max(worst, hi - lo);
+            n++;
+        }
+        return new double[]{worst, n};
+    }
+
+    /**
+     * The text's angle region by region (a third of the page across, 240 rows down, those with enough ink): the angle at
+     * which its ink, projected across, falls into the sharpest rows; the worst of how far that makes a line rise over
+     * the region's width, and over how many regions.
+     */
+    static double[] textTilt(DocScan.Image im) {
+        int rw = im.w / 3, rh = 240;
+        double worst = 0;
+        int n = 0;
+        for (int y0 = 0; y0 + rh <= im.h; y0 += rh) {
+            for (int x0 = 0; x0 + rw <= im.w; x0 += rw) {
+                java.util.List<int[]> ink = new java.util.ArrayList<int[]>();
+                for (int y = y0; y < y0 + rh; y++) {
+                    for (int x = x0; x < x0 + rw; x++) if ((im.px[y * im.w + x] & 0xFF) < 128) ink.add(new int[]{x - x0 - rw / 2, y - y0});
+                }
+                if (ink.size() < 4000) continue;
+                double bestScore = -1, bestRise = 0;
+                for (double rise = -8; rise <= 8.001; rise += 0.25) {
+                    double t = rise / rw;
+                    int[] hist = new int[rh + 40];
+                    for (int[] p : ink) {
+                        int r = (int) Math.round(p[1] - p[0] * t) + 20;
+                        if (r >= 0 && r < hist.length) hist[r]++;
+                    }
+                    double sc = 0;
+                    for (int c : hist) sc += (double) c * c;
+                    if (sc > bestScore) {
+                        bestScore = sc;
+                        bestRise = rise;
+                    }
+                }
+                worst = Math.max(worst, Math.abs(bestRise));
+                n++;
+            }
+        }
+        return new double[]{worst, n};
+    }
+
+    /**
+     * The last band of ink in a span of columns, near the bottom of the page: where its letters stand — the lowest row
+     * with ink in four tenths as many columns as its fullest row (a «Щ»'s tail, a «Й»'s mark do not count) — -1 when
+     * none: where a label of the bottom row ended up.
      */
     static double lastBand(DocScan.Image im, int x0, int x1) {
         int bottom = -1, top = -1;
@@ -396,7 +618,16 @@ public class DocScanTest {
                 break;
             }
         }
-        return bottom < 0 ? -1 : (top + bottom) / 2.0;
+        if (bottom < 0) return -1;
+        int[] count = new int[bottom - top + 1];
+        int most = 0;
+        for (int y = top; y <= bottom; y++) {
+            for (int x = x0; x < x1; x++) if ((im.px[y * im.w + x] & 0xFF) < 128) count[y - top]++;
+            most = Math.max(most, count[y - top]);
+        }
+        int feet = bottom;
+        while (feet > top && count[feet - top] < 0.4 * most) feet--;
+        return feet;
     }
 
     /**
@@ -404,6 +635,11 @@ public class DocScanTest {
      * before a pinhole camera (f = 1300 px), on a dark cloth; drawn texel by texel (half-texel steps: no holes).
      */
     static BufferedImage bent(BufferedImage tex, int w, int h) {
+        return bent(tex, w, h, 1300, 0);
+    }
+
+    /** The same at focal length {@code f}, with a wave across the sheet as well ({@code wave} metres). */
+    static BufferedImage bent(BufferedImage tex, int w, int h, double f, double wave) {
         BufferedImage b = new BufferedImage(w, h, BufferedImage.TYPE_INT_RGB);
         Random r = new Random(6);
         for (int y = 0; y < h; y++) {
@@ -412,12 +648,13 @@ public class DocScanTest {
                 b.setRGB(x, y, (g << 16) | ((g - 8) << 8) | (g - 14));
             }
         }
-        double W = 0.21, Hm = 0.297, tilt = Math.toRadians(25), dist = 0.5, f = 1300;
+        double W = 0.21, Hm = 0.297, tilt = Math.toRadians(25), dist = 0.5;
         int tw = tex.getWidth(), th = tex.getHeight();
         for (double ty = 0; ty < th; ty += 0.5) {
             for (double tx = 0; tx < tw; tx += 0.5) {
                 double X = (tx / tw - 0.5) * W, Y = (ty / th - 0.5) * Hm;
-                double depth = -0.03 * Math.cos(Math.PI * X / W) + 0.025 * Math.pow(Math.max(0, Y / Hm + 0.1), 2) * 4;
+                double depth = -0.03 * Math.cos(Math.PI * X / W) + 0.025 * Math.pow(Math.max(0, Y / Hm + 0.1), 2) * 4
+                        + wave * Math.sin(2 * Math.PI * Y / Hm + 1) * Math.sin(Math.PI * (X / W + 0.5));
                 double Yc = Y * Math.cos(tilt) - depth * Math.sin(tilt), Zc = dist + Y * Math.sin(tilt) + depth * Math.cos(tilt);
                 int u = (int) (f * X / Zc + w / 2.0), v = (int) (f * Yc / Zc + h / 2.0);
                 if (u < 0 || v < 0 || u >= w || v >= h) continue;
@@ -429,11 +666,6 @@ public class DocScanTest {
         return b;
     }
 
-    /**
-     * How straight a scan's lines are: the lines of text (ink joined along rows) at least a quarter of the page wide —
-     * the mean over them of how far their middle strays from its average (std, pixels); how many; and how far apart the
-     * left ends of those starting at the margin are (std).
-     */
     /**
      * A phone photo of a sheet: found, cut out A4 (not stretched), the right way up, its text level, its lines straight,
      * no black frame along its edges (a page photographed sideways comes out lying: its table reaches the photo's
@@ -463,8 +695,8 @@ public class DocScanTest {
         double ratio = (double) scan.h / scan.w, skew = DocScan.skew(scan.px, scan.w, scan.h);
         double[] lines = straightness(scan), lean = drift(scan);
         System.out.println(String.format(Locale.ROOT, "  %s: %dx%d (%.3f), text at %.2f°, lines bend %.1f px (%d lines), "
-                + "paragraph edges lean up to %.2f px per 100 rows (%d runs), black in the outer 5%%: %.3f%%",
-                name, scan.w, scan.h, ratio, skew, lines[0], (int) lines[1], lean[0], (int) lean[1], 100.0 * edge / all));
+                + "paragraph edges lean up to %.2f px per 100 rows (%d runs, drifting %.1f px at most), black in the outer 5%%: %.3f%%",
+                name, scan.w, scan.h, ratio, skew, lines[0], (int) lines[1], lean[0], (int) lean[1], lean[2], 100.0 * edge / all));
         check(lean[0] <= 0.8, name + ": the paragraphs' edges upright");
         check(Math.abs((sideways ? 1 / ratio : ratio) - Math.sqrt(2)) < 0.01 && Math.abs(skew) <= 0.3,
                 name + ": A4" + (sideways ? " lying (turned upright)" : "") + ", not stretched; its text level");
@@ -476,7 +708,9 @@ public class DocScanTest {
      * How the edges of the text lean: the lines as bands of rows with ink, where each one's first word starts (past a
      * checkbox) and where it ends; runs of five or more one after the other
      * (no blank line between) whose starts (ends) keep within 12 px of the previous; the largest slope of a straight
-     * line through a run's starts (ends), in pixels per 100 rows, and how many runs.
+     * line through a run's starts (ends), in pixels per 100 rows, of those that drift by more than 2 px from their
+     * first line to their last (a run of five lines whose first word stands a pixel or two off the rest: no lean the
+     * eye sees, though its slope is large), how many runs, and the most any of them drifts (px).
      */
     static double[] drift(DocScan.Image im) {
         int w = im.w, h = im.h;
@@ -529,7 +763,7 @@ public class DocScanTest {
         java.util.List<Double> gaps = new java.util.ArrayList<Double>();
         for (int i = 1; i < bands.size(); i++) gaps.add(bands.get(i)[0] - bands.get(i - 1)[0]);
         java.util.Collections.sort(gaps);
-        double pitch = gaps.isEmpty() ? 40 : gaps.get(gaps.size() / 2), most = 0;
+        double pitch = gaps.isEmpty() ? 40 : gaps.get(gaps.size() / 2), most = 0, widest = 0;
         int runs = 0;
         for (int k = 1; k <= 2; k++) {
             java.util.List<double[]> run = new java.util.ArrayList<double[]>();
@@ -550,16 +784,23 @@ public class DocScanTest {
                         syy += (q[0] - my) * (q[0] - my);
                         sxy += (q[0] - my) * (q[k] - mx);
                     }
-                    most = Math.max(most, Math.abs(sxy / syy) * 100);
+                    double slope = Math.abs(sxy / syy), drift = slope * (run.get(run.size() - 1)[0] - run.get(0)[0]);
+                    if (drift > 2) most = Math.max(most, slope * 100);
+                    widest = Math.max(widest, drift);
                     runs++;
                 }
                 run = new java.util.ArrayList<double[]>();
                 if (b != null) run.add(b);
             }
         }
-        return new double[]{most, runs};
+        return new double[]{most, runs, widest};
     }
 
+    /**
+     * How straight a scan's lines are: the lines of text (ink joined along rows) at least a quarter of the page wide —
+     * the mean over them of how far their middle strays from its average (std, pixels); how many; and how far apart the
+     * left ends of those starting at the margin are (std).
+     */
     static double[] straightness(DocScan.Image im) {
         int w = im.w, h = im.h;
         boolean[] ink = new boolean[w * h], row = new boolean[w * h];
