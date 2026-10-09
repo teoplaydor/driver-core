@@ -863,6 +863,16 @@ public final class DocScan {
             }
         }
 
+        /**
+         * Beyond the first and last lines: their shift, fading to none at the page's top (bottom) — its edges are
+         * straight already (the cut is made along them).
+         */
+        double faded(double x, double y, double pageBottom) {
+            if (y < y0) return at(x, y0) * Math.max(0, y / Math.max(1, y0));
+            if (y > y1) return at(x, y1) * Math.max(0, (pageBottom - y) / Math.max(1, pageBottom - y1));
+            return at(x, y);
+        }
+
         double at(double x, double y) {
             int[] idx = new int[16];
             double[] w = new double[16];
@@ -1057,7 +1067,7 @@ public final class DocScan {
                 Ya = r + (Ua - U[r]) / (U[r + 1] - U[r]);
             }
             double t = Math.max(tFirst, Math.min(tLast, Ya));
-            for (int j = 0; j < G; j++) sh[j] = surface.at((j + 0.5) * aw / G, Ya) + between(rest[j], Ya);
+            for (int j = 0; j < G; j++) sh[j] = surface.faded((j + 0.5) * aw / G, Ya, ah) + between(rest[j], Ya);
             for (int x = 0; x < W; x++) {
                 double Xa = (x + 0.5) * k;
                 double xs = up == null ? Xa : Xa + up.at(Xa, t);
@@ -1187,7 +1197,7 @@ public final class DocScan {
      * joined to the lines of their kind coming from the left — the nearest within three tenths of a letter (and more the
      * further it is carried, up to half) of where a line, carried on at its slope, gets to (two strips may be skipped:
      * a gap between words, a field left blank; a line of letters does not go on along the rule under it). A line: three
-     * peaks or more over 6% of the page's width (a list's short items too); its middle a polynomial through them, its
+     * peaks or more over three strips or 6% of the page's width (a list's short items, a label like «ЗАКАЗЧИК» too); its middle a polynomial through them, its
      * start and end where its ink begins and ends (followed out from its first and last peaks, across gaps no wider
      * than between words).
      */
@@ -1333,8 +1343,9 @@ public final class DocScan {
         java.util.List<Line> lines = new java.util.ArrayList<Line>();
         for (int ci = 0; ci < chains.size(); ci++) {
             java.util.List<double[]> ch = chains.get(ci);
-            if (ch.size() < 3 || ch.get(ch.size() - 1)[0] - ch.get(0)[0] < 0.06 * aw) continue;
-            double[] mid = polyFit(ch, false, ch.size() >= 8 ? 3 : ch.size() >= 5 ? 2 : 1, 0.4 * charH);
+            if (ch.size() < 3 || ch.get(ch.size() - 1)[0] - ch.get(0)[0] < Math.min(0.06 * aw, 1.9 * sw)) continue;
+            // a short one (three or four peaks: too few for the fit's second look), a straight line through them
+            double[] mid = ch.size() >= 5 ? polyFit(ch, false, ch.size() >= 8 ? 3 : 2, 0.4 * charH) : straightThrough(ch);
             if (mid == null) continue;
             Line l = new Line();
             l.mid = mid;
@@ -1612,7 +1623,8 @@ public final class DocScan {
      * Pieces of one line of text joined into it: a line with wide gaps (a form's label and what is filled in, a tab)
      * falls apart into pieces, and each piece levelled to its own row would put a step into the line where the sheet
      * leans. Two pieces one after the other along the page (the gap under a third of its width) whose middles, each
-     * carried on straight across the gap (its slope over its last stretch), meet within half a letter are one line.
+     * carried on straight across the gap (its slope over its last stretch), meet within half a letter — eight tenths
+     * when no other line lies over the gap — are one line.
      */
     static void joinPieces(java.util.List<Line> lines, double charH, int aw, double step) {
         boolean joined = true;
@@ -1631,8 +1643,13 @@ public final class DocScan {
                     Line b = lines.get(j);
                     double gap = b.start - a.end;
                     if (gap < -0.02 * aw || gap > 0.3 * aw) continue;
-                    double at = (a.end + b.start) / 2;
-                    if (Math.abs(carried(a, at, aw) - carried(b, at, aw)) > 0.5 * charH) continue;
+                    double at = (a.end + b.start) / 2, apart = Math.abs(carried(a, at, aw) - carried(b, at, aw));
+                    // within half a letter; within eight tenths when nothing lies in the gap between them (a row of
+                    // labels far apart — «ОБУЧАЮЩИЙСЯ … ЗАКАЗЧИК» — that the bend has set at different heights), and
+                    // then their near ends compared as they are (a short word's slope carried far says little)
+                    boolean empty = emptyBetween(lines, a, b, charH);
+                    if (empty) apart = Math.min(apart, Math.abs(polyAt(a.mid, a.end) - polyAt(b.mid, b.start)));
+                    if (apart > 0.8 * charH || apart > 0.5 * charH && !empty) continue;
                     java.util.List<double[]> pts = new java.util.ArrayList<double[]>(a.pts);
                     pts.addAll(b.pts);
                     java.util.Collections.sort(pts, new java.util.Comparator<double[]>() {
@@ -1667,6 +1684,34 @@ public final class DocScan {
         });
     }
 
+    /** y of x through the points, least squares, as a polynomial of degree 1 ({@link #polyFit}'s form). */
+    private static double[] straightThrough(java.util.List<double[]> pts) {
+        double lo = 1e18, hi = -1e18, mx = 0, my = 0;
+        for (double[] q : pts) {
+            lo = Math.min(lo, q[0]);
+            hi = Math.max(hi, q[0]);
+            mx += q[0] / pts.size();
+            my += q[1] / pts.size();
+        }
+        double c = (lo + hi) / 2, sc = Math.max(1e-6, (hi - lo) / 2), sxx = 0, sxy = 0;
+        for (double[] q : pts) {
+            sxx += (q[0] - mx) * (q[0] - mx);
+            sxy += (q[0] - mx) * (q[1] - my);
+        }
+        double slope = sxx == 0 ? 0 : sxy / sxx;
+        return new double[]{c, sc, my + slope * (c - mx), slope * sc};
+    }
+
+    /** Whether no other line lies over the gap between {@code a} and {@code b} at about their rows. */
+    private static boolean emptyBetween(java.util.List<Line> lines, Line a, Line b, double charH) {
+        double lo = Math.min(a.row, b.row) - 1.5 * charH, hi = Math.max(a.row, b.row) + 1.5 * charH;
+        for (Line l : lines) {
+            if (l == a || l == b || l.row < lo || l.row > hi) continue;
+            if (l.end > a.end && l.start < b.start) return false;
+        }
+        return true;
+    }
+
     /** A line's middle carried on straight beyond its ends (the slope over its last tenth of the page's width). */
     private static double carried(Line l, double x, int aw) {
         double d = 0.1 * aw;
@@ -1692,8 +1737,9 @@ public final class DocScan {
      * there. The lean at each point of the page is the runs' leans weighed by how near they are (a Gaussian of the
      * distance: across, a sixth of the page's width; down, three lines beyond the run's ends; a run counts by its
      * lines) against no lean at all (as half a line right there): near a run, its lean; far from all, none. The shift is the lean summed down each column, naught at the
-     * text's middle row. Null when it hardly moves anything (under a pixel), straightens the runs too little, there
-     * are no runs, or it would move things implausibly far.
+     * text's middle row. Runs leaning more than one in ten are left out (a stamp's strokes, a signature's). Null when it
+     * hardly moves anything (under a pixel), does not straighten the runs (by 5% at least), there are no runs, or it
+     * would move things implausibly far.
      */
     static Upright upright(java.util.List<Line> lines, int aw, int ah, double charH, double midRow) {
         java.util.List<Double> ds = new java.util.ArrayList<Double>();
@@ -1755,7 +1801,9 @@ public final class DocScan {
             }
             if (fit == null || use.size() < 3) continue;
             double y0 = use.get(0)[1], y1 = use.get(use.size() - 1)[1];
-            if (y1 - y0 < 1.5 * pitch) continue;
+            // too short to tell a lean, or leaning more than a sheet's bend leaves after the cut (a stamp's, a
+            // signature's strokes taken for a column): not one to go by
+            if (y1 - y0 < 1.5 * pitch || Math.abs(fit[1]) > 0.1) continue;
             leans.add(new double[]{fit[0] + fit[1] * (y0 + y1) / 2, y0, y1, fit[1], use.size()});
             kept.add(use);
         }
@@ -1800,7 +1848,7 @@ public final class DocScan {
         double most = 0;
         for (float v : up.d) most = Math.max(most, Math.abs(v));
         double before = spread(kept), after = spread(left);
-        if (most < 1 || most > 0.06 * aw || after > 0.8 * before) return null;
+        if (most < 1 || most > 0.08 * aw || after > 0.95 * before) return null;
         return up;
     }
 

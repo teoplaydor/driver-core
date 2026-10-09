@@ -255,6 +255,9 @@ public class DocScanTest {
                     "a bent sheet: its lines straight and level, its left margin vertical");
             check(Math.abs((double) flat6.h / flat6.w - Math.sqrt(2)) < 0.07, String.format(Locale.ROOT, "and about A4 (%.3f)",
                     (double) flat6.h / flat6.w));
+            double labelL = lastBand(flat6, flat6.w / 20, flat6.w / 4), labelR = lastBand(flat6, flat6.w / 2, flat6.w * 3 / 4);
+            System.out.println(String.format(Locale.ROOT, "  the bottom row's two labels: at %.1f and %.1f", labelL, labelR));
+            check(labelL > 0 && labelR > 0 && Math.abs(labelL - labelR) <= 3, "the bottom row's labels far apart: on one row");
         }
 
         // 7. phone photos (cut from screenshots of the viewer; contract numbers, personal data and a signature blurred):
@@ -371,8 +374,29 @@ public class DocScanTest {
                 x += ww + 9 + r.nextInt(5);
             }
         }
+        // under it, a row of two labels far apart (a contract's «ОБУЧАЮЩИЙСЯ … ЗАКАЗЧИК»)
+        g.fillRect(left, h - 60, 100, 11);
+        g.fillRect(w / 2 + 50, h - 60, 80, 11);
         g.dispose();
         return b;
+    }
+
+    /**
+     * The last band of ink in a span of columns, near the bottom of the page: its middle row (-1 when none) — where a
+     * label of the bottom row ended up.
+     */
+    static double lastBand(DocScan.Image im, int x0, int x1) {
+        int bottom = -1, top = -1;
+        for (int y = im.h - 1; y >= im.h * 3 / 4; y--) {
+            boolean ink = false;
+            for (int x = x0; x < x1 && !ink; x++) ink = (im.px[y * im.w + x] & 0xFF) < 128;
+            if (ink && bottom < 0) bottom = y;
+            if (!ink && bottom >= 0) {
+                top = y + 1;
+                break;
+            }
+        }
+        return bottom < 0 ? -1 : (top + bottom) / 2.0;
     }
 
     /**
