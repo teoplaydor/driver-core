@@ -42,7 +42,8 @@ final class FaceStore {
     }
 
     private final SQLiteDatabase db;
-    private final Set<Long> scanned = new HashSet<Long>();
+    /** Photos looked at, and how (the scan's version: a later one finds more, so photos are looked at again). */
+    private final Map<Long, Integer> scanned = new HashMap<Long, Integer>();
     private final List<People.Face> faces = new ArrayList<People.Face>();
     private final Map<Long, List<People.Face>> byPhoto = new HashMap<Long, List<People.Face>>();
     private final List<Group> groups = new ArrayList<Group>();
@@ -51,10 +52,10 @@ final class FaceStore {
     private int version;
 
     FaceStore(Context ctx) {
-        SQLiteOpenHelper helper = new SQLiteOpenHelper(ctx, "faces.db", null, 2) {
+        SQLiteOpenHelper helper = new SQLiteOpenHelper(ctx, "faces.db", null, 3) {
             @Override
             public void onCreate(SQLiteDatabase d) {
-                d.execSQL("CREATE TABLE scanned (photo INTEGER PRIMARY KEY, faces INTEGER)");
+                d.execSQL("CREATE TABLE scanned (photo INTEGER PRIMARY KEY, faces INTEGER, v INTEGER DEFAULT 1)");
                 d.execSQL("CREATE TABLE faces (id INTEGER PRIMARY KEY AUTOINCREMENT, photo INTEGER, x REAL, y REAL, w REAL, h REAL,"
                         + " size INTEGER, score REAL, emb BLOB)");
                 d.execSQL("CREATE INDEX faces_photo ON faces (photo)");
@@ -66,12 +67,13 @@ final class FaceStore {
             @Override
             public void onUpgrade(SQLiteDatabase d, int o, int n) {
                 if (o < 2) d.execSQL("CREATE TABLE IF NOT EXISTS ignored (face INTEGER PRIMARY KEY)"); // 0.10.16
+                if (o < 3) d.execSQL("ALTER TABLE scanned ADD COLUMN v INTEGER DEFAULT 1"); // 0.10.17
             }
         };
         db = helper.getWritableDatabase();
-        Cursor c = db.rawQuery("SELECT photo FROM scanned", null);
+        Cursor c = db.rawQuery("SELECT photo, v FROM scanned", null);
         try {
-            while (c.moveToNext()) scanned.add(c.getLong(0));
+            while (c.moveToNext()) scanned.put(c.getLong(0), c.isNull(1) ? 1 : c.getInt(1));
         } finally {
             c.close();
         }
@@ -107,7 +109,8 @@ final class FaceStore {
                 Group g = byId.get(c.getLong(0));
                 if (g == null) continue;
                 boolean yes = c.getInt(1) != 0;
-                if (g.kind == PERSON) (yes ? g.yesFaces : g.noFaces).put(c.getLong(3), VectorMath.fromBytes(c.getBlob(4)));
+                // a face marked (a person), or a whole photo (a pet or thing, or a person whose face was not found)
+                if (c.getLong(3) >= 0 && !c.isNull(4)) (yes ? g.yesFaces : g.noFaces).put(c.getLong(3), VectorMath.fromBytes(c.getBlob(4)));
                 else (yes ? g.yesPhotos : g.noPhotos).add(c.getLong(2));
             }
         } finally {
@@ -128,44 +131,67 @@ final class FaceStore {
     }
 
     synchronized boolean scanned(long photo) {
-        return scanned.contains(photo);
+        return scanned.containsKey(photo);
+    }
+
+    /** The version of the scan the photo was looked at with (0: not yet). */
+    synchronized int scannedWith(long photo) {
+        Integer v = scanned.get(photo);
+        return v == null ? 0 : v;
     }
 
     synchronized int scannedCount() {
         return scanned.size();
     }
 
-    /** The faces found in a photo of {@code w}×{@code h} pixels (or none, or -1 faces: it could not be read). */
-    synchronized void addScan(long photo, List<FaceModel.Face> found, int w, int h) {
+    /**
+     * The faces found in a photo of {@code w}×{@code h} pixels (or none, or null: it could not be read), by scan
+     * version {@code v}. Looked at again: the faces it has keep their ids, names and marks; only new ones join.
+     */
+    synchronized void addScan(long photo, List<FaceModel.Face> found, int w, int h, int v) {
         db.beginTransaction();
         try {
-            ContentValues s = new ContentValues();
-            s.put("photo", photo);
-            s.put("faces", found == null ? -1 : found.size());
-            db.insertWithOnConflict("scanned", null, s, SQLiteDatabase.CONFLICT_REPLACE);
+            List<People.Face> had = byPhoto.get(photo);
+            int n = had == null ? 0 : had.size();
             if (found != null) {
                 for (FaceModel.Face f : found) {
                     float x = clamp(f.x / w), y = clamp(f.y / h), fw = Math.min(1 - x, f.w / w), fh = Math.min(1 - y, f.h / h);
+                    boolean known = false;
+                    if (had != null) for (People.Face o : had) known |= iou(x, y, fw, fh, o.x, o.y, o.w, o.h) > 0.4;
+                    if (known) continue;
                     int size = Math.round(Math.min(f.w, f.h));
-                    ContentValues v = new ContentValues();
-                    v.put("photo", photo);
-                    v.put("x", x);
-                    v.put("y", y);
-                    v.put("w", fw);
-                    v.put("h", fh);
-                    v.put("size", size);
-                    v.put("score", f.score);
-                    v.put("emb", VectorMath.toBytes(f.emb));
-                    long id = db.insert("faces", null, v);
+                    ContentValues row = new ContentValues();
+                    row.put("photo", photo);
+                    row.put("x", x);
+                    row.put("y", y);
+                    row.put("w", fw);
+                    row.put("h", fh);
+                    row.put("size", size);
+                    row.put("score", f.score);
+                    row.put("emb", VectorMath.toBytes(f.emb));
+                    long id = db.insert("faces", null, row);
                     track(new People.Face(id, photo, x, y, fw, fh, size, f.score, f.emb));
+                    n++;
                 }
             }
+            ContentValues s = new ContentValues();
+            s.put("photo", photo);
+            s.put("faces", found == null && had == null ? -1 : n);
+            s.put("v", v);
+            db.insertWithOnConflict("scanned", null, s, SQLiteDatabase.CONFLICT_REPLACE);
             db.setTransactionSuccessful();
         } finally {
             db.endTransaction();
         }
-        scanned.add(photo);
+        scanned.put(photo, v);
         version++;
+    }
+
+    private static double iou(float ax, float ay, float aw, float ah, float bx, float by, float bw, float bh) {
+        double x1 = Math.max(ax, bx), y1 = Math.max(ay, by), x2 = Math.min(ax + aw, bx + bw), y2 = Math.min(ay + ah, by + bh);
+        double inter = x2 > x1 && y2 > y1 ? (x2 - x1) * (y2 - y1) : 0;
+        double union = (double) aw * ah + (double) bw * bh - inter;
+        return union <= 0 ? 0 : inter / union;
     }
 
     private static float clamp(float v) {
@@ -204,6 +230,23 @@ final class FaceStore {
         v.put("face", face);
         db.insertWithOnConflict("ignored", null, v, SQLiteDatabase.CONFLICT_IGNORE);
         ignored.add(face);
+        version++;
+    }
+
+    /** Several faces hidden at once (someone unnamed nobody needs to name). */
+    synchronized void ignoreAll(long[] faces) {
+        db.beginTransaction();
+        try {
+            for (long f : faces) {
+                ContentValues v = new ContentValues();
+                v.put("face", f);
+                db.insertWithOnConflict("ignored", null, v, SQLiteDatabase.CONFLICT_IGNORE);
+                ignored.add(f);
+            }
+            db.setTransactionSuccessful();
+        } finally {
+            db.endTransaction();
+        }
         version++;
     }
 

@@ -13,7 +13,7 @@ import android.graphics.drawable.Drawable;
 final class Icon extends Drawable {
     static final int SEARCH = 0, CLOSE = 1, BACK = 2, TUNE = 3, IMAGE = 4, SHARE = 5, OPEN = 6, SIMILAR = 7, PLAY = 8,
             PLUS = 9, NOTE = 10, TRASH = 11, CHECK = 12, CHEVRON = 13, STOP = 14, DOWNLOAD = 15, VIDEO = 16, INFO = 17,
-            GRID = 18, TAG = 19, ALBUMS = 20, HIDE = 21, SHOW = 22, LOCK = 23, PERSON = 24;
+            GRID = 18, TAG = 19, ALBUMS = 20, HIDE = 21, SHOW = 22, LOCK = 23, PERSON = 24, SCAN = 25;
 
     private final int kind;
     private final Paint p = new Paint(Paint.ANTI_ALIAS_FLAG);
@@ -66,6 +66,26 @@ final class Icon extends Drawable {
                 c.drawPath(path, p);
                 c.drawCircle(12, 12, 3, p);
                 if (kind == HIDE) line(c, 4.5f, 4.5f, 19.5f, 19.5f);
+                break;
+            case SCAN: // a page in a scanner's corners: a document made ready to print
+                r.set(7.5f, 6.5f, 16.5f, 17.5f);
+                c.drawRoundRect(r, 1.2f, 1.2f, p);
+                line(c, 9.8f, 10, 14.2f, 10);
+                line(c, 9.8f, 12.5f, 14.2f, 12.5f);
+                line(c, 9.8f, 15, 12.5f, 15);
+                path.moveTo(3.5f, 7);
+                path.lineTo(3.5f, 3.5f);
+                path.lineTo(7, 3.5f);
+                path.moveTo(17, 3.5f);
+                path.lineTo(20.5f, 3.5f);
+                path.lineTo(20.5f, 7);
+                path.moveTo(20.5f, 17);
+                path.lineTo(20.5f, 20.5f);
+                path.lineTo(17, 20.5f);
+                path.moveTo(7, 20.5f);
+                path.lineTo(3.5f, 20.5f);
+                path.lineTo(3.5f, 17);
+                c.drawPath(path, p);
                 break;
             case PERSON: // a head and shoulders: who is on the photo
                 c.drawCircle(12, 8.5f, 3.8f, p);

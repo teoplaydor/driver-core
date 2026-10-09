@@ -311,6 +311,32 @@ public class PeopleAppTest {
             Robo.settle(400);
             UiShots.shot(a, "07g-albums-people");
             System.out.println("albums sheet: " + Robo.allText(topSheet(root)).replace('\n', ' '));
+            // D, nobody to name: hidden with the button on its row, right from the list
+            Engine.Album d = null;
+            for (Engine.Album al : people(e)) if (al.kind == Engine.Album.UNNAMED && names(al.items).equals(photosOf("D"))) d = al;
+            assertNotNull("D among the unnamed", d);
+            int rowsBefore = 0;
+            List<View> hides = new ArrayList<View>();
+            for (View x : Robo.views(topSheet(root), new ArrayList<View>())) {
+                if ("Скрыть — узнавать не нужно".contentEquals(String.valueOf(x.getContentDescription()))) hides.add(x);
+            }
+            rowsBefore = hides.size();
+            // the row of D: the one whose album has D's faces (rows go in the order of people(): find it by position)
+            List<Engine.Album> listed = new ArrayList<Engine.Album>();
+            for (Engine.Album al : people(e)) if (al.kind == Engine.Album.UNNAMED) listed.add(al);
+            int at = -1;
+            for (int i = 0; i < listed.size(); i++) if (names(listed.get(i).items).equals(photosOf("D"))) at = i;
+            hides.get(at).performClick();
+            Robo.settle(500);
+            int rowsAfter = 0;
+            for (View x : Robo.views(topSheet(root), new ArrayList<View>())) {
+                if ("Скрыть — узнавать не нужно".contentEquals(String.valueOf(x.getContentDescription()))) rowsAfter++;
+            }
+            boolean dGone = true;
+            for (Engine.Album al : people(e)) dGone &= !(al.kind == Engine.Album.UNNAMED && names(al.items).equals(photosOf("D")));
+            System.out.println("unnamed rows in the sheet: " + rowsBefore + " → " + rowsAfter + " after hiding D");
+            assertTrue(rowsAfter == rowsBefore - 1 && dGone);
+            assertEquals(1 + 3, e.facesHidden());
             a.onBackPressed();
             Robo.settle(500);
             Engine.Album b = null;
@@ -319,8 +345,11 @@ public class PeopleAppTest {
             Robo.call(a, "showAlbum", b);
             Robo.settle(700);
             System.out.println("someone unnamed: " + section(a));
-            assertEquals("Кто это? · 7 · назвать ›", section(a));
+            assertEquals("Кто это? · 7 · назвать или скрыть ›", section(a));
             ((View) Robo.field(a, "section")).performClick();
+            Robo.settle(500);
+            rowOf(topSheet(root), "Назвать…").performClick();
+            Robo.settle(400);
             typeName(root, "Петя");
             Robo.waitFor("Петя shown", () -> section(a).startsWith("Петя"));
             assertEquals("Петя · 7", section(a));
@@ -356,6 +385,34 @@ public class PeopleAppTest {
             a.onBackPressed();
             Robo.settle(600);
             assertNull("then the gallery", Robo.field(a, "resultsLabel"));
+
+            // a person whose face was not found (turned away): the whole photo marked as Маша's, and taken out again
+            String nobody = "IMG_" + (WHO.length - 1) + ".png";
+            v = viewer(a, root, nobody);
+            assertTrue(faceNames(v).isEmpty());
+            ((View) Robo.textView(faces(v), "Отметить").getParent()).performClick();
+            Robo.settle(500);
+            rowOf(topSheet(root), "Отметить человека").performClick();
+            Robo.settle(500);
+            rowOf(topSheet(root), "Маша").performClick();
+            Robo.settle(600);
+            assertTrue("marked by hand: in Маша's album", names(album(people(e), "Маша").items).contains(nobody));
+            ((View) Robo.textView(faces(v), "Отметить").getParent()).performClick();
+            Robo.waitFor("its albums", () -> Robo.textView(topSheet(root), "Убрать из «Маша»") != null);
+            rowOf(topSheet(root), "Убрать из «Маша»").performClick();
+            Robo.settle(600);
+            assertFalse("taken out again", names(album(people(e), "Маша").items).contains(nobody));
+            a.onBackPressed();
+            Robo.settle(600);
+
+            // a photo looked at again (a later scan): the faces it has stay as they are, none twice
+            Object store = Robo.field(e, "faceStore");
+            int before = e.facesFound();
+            IndexStore.Item first = null;
+            for (IndexStore.Item it : grid(a)) if ("IMG_10.png".equals(it.title)) first = it;
+            List<FaceModel.Face> rescan = faces.faces(new int[]{0xFF000000 | (10 * 8) << 16}, 400, 300, 0);
+            Robo.call(store, "addScan", IndexStore.key(first), rescan, 400, 300, 3);
+            assertEquals("looked at again: no face twice", before, e.facesFound());
 
             // a pet: one photo of a cat on a sofa marked «Барсик» — its cats come; a cat in the garden taken out goes with
             // the other garden cats
@@ -402,7 +459,7 @@ public class PeopleAppTest {
             String note = String.valueOf(((TextView) Robo.field(settings, "facesNote")).getText());
             System.out.println("settings: " + ((TextView) Robo.field(settings, "facesValue")).getText() + " · " + note);
             assertEquals("Найдено лиц: " + expectFaces + " на " + WHO.length + " фото", note);
-            assertEquals("1 · вернуть", String.valueOf(((TextView) Robo.field(settings, "hiddenFacesValue")).getText()));
+            assertEquals("4 · вернуть", String.valueOf(((TextView) Robo.field(settings, "hiddenFacesValue")).getText()));
             a.finish();
         } finally {
             Engine.facesForTest = null;

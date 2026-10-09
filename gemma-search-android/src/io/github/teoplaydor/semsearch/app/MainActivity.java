@@ -70,6 +70,7 @@ public final class MainActivity extends Activity implements Engine.Listener, Vie
     private FrameLayout empty;
     private Viewer viewer;
     private SettingsPanel settings;
+    private ScanPanel scan;
     private Sheet sheet;
     /** The accelerator check's progress sheet while it is open, and since when the person waits for a check. */
     private Sheet benchSheet;
@@ -193,6 +194,10 @@ public final class MainActivity extends Activity implements Engine.Listener, Vie
                 return;
             }
         }
+        if (scan != null && !scan.isClosing()) {
+            scan.close();
+            return;
+        }
         if (viewer != null && !viewer.isClosing()) {
             viewer.close();
             return;
@@ -286,7 +291,7 @@ public final class MainActivity extends Activity implements Engine.Listener, Vie
         section.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {
-                if (shownAlbum != null && shownAlbum.kind == Engine.Album.UNNAMED) nameUnnamed(shownAlbum);
+                if (shownAlbum != null && shownAlbum.kind == Engine.Album.UNNAMED) unnamedChoice(shownAlbum);
                 else showMoreResults();
             }
         });
@@ -889,6 +894,22 @@ public final class MainActivity extends Activity implements Engine.Listener, Vie
         text.addView(Ui.text(this, a.items.size() + " фото" + (unnamed ? " · нажмите, чтобы назвать" : ""), 12.5f, Ui.TEXT2,
                 Ui.REGULAR));
         row.addView(text, new LinearLayout.LayoutParams(0, -2, 1));
+        if (unnamed) {
+            // nobody to name (strangers, a crowd): the whole group hidden, right from the list
+            final LinearLayout self = row;
+            ImageView hide = Ui.icon(this, Icon.HIDE, Ui.TEXT2, 44);
+            hide.setPadding(dp(10), dp(10), dp(10), dp(10));
+            hide.setContentDescription("Скрыть — узнавать не нужно");
+            hide.setOnClickListener(new View.OnClickListener() {
+                @Override
+                public void onClick(View v) {
+                    engine.hideUnnamed(a, null);
+                    ((ViewGroup) self.getParent()).removeView(self);
+                    toast("Скрыто: " + a.faces.length + " лиц — вернуть можно в настройках");
+                }
+            });
+            row.addView(hide, new LinearLayout.LayoutParams(dp(44), dp(44)));
+        }
         row.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {
@@ -1004,7 +1025,7 @@ public final class MainActivity extends Activity implements Engine.Listener, Vie
         moreResults = a.more.isEmpty() ? null : a.more;
         setItems(a.items, animate);
         String text = resultsLabel + " · " + a.items.size();
-        if (a.kind == Engine.Album.UNNAMED) text += " · назвать ›";
+        if (a.kind == Engine.Album.UNNAMED) text += " · назвать или скрыть ›";
         else if (moreResults != null) text += " · ещё " + a.more.size() + " похожих ›";
         sectionText(text);
         updateEmpty();
@@ -1763,6 +1784,29 @@ public final class MainActivity extends Activity implements Engine.Listener, Vie
     }
 
     @Override
+    public void isDocument(IndexStore.Item it, Engine.Callback<Boolean> cb) {
+        engine.isDocument(it, cb);
+    }
+
+    /** The document made ready to print, over the viewer (it stays under it for «Назад»). */
+    @Override
+    public void openScan(IndexStore.Item it) {
+        if (scan != null) return;
+        scan = new ScanPanel(this, it);
+        scan.open(root);
+    }
+
+    void scanClosed() {
+        scan = null;
+    }
+
+    /** The photo for a scan: about {@code pixels}, upright. */
+    Bitmap loadForScan(IndexStore.Item it, long pixels) throws Exception {
+        BitmapLoader t = testLoader;
+        return t != null ? t.load(it, 3000) : Media.full(getContentResolver(), it, pixels);
+    }
+
+    @Override
     public boolean facesReady() {
         return engine.facesInstalled();
     }
@@ -1795,16 +1839,17 @@ public final class MainActivity extends Activity implements Engine.Listener, Vie
     }
 
     /**
-     * Marking the photo: a pet or anything else it shows (or is taken out of); with no face models yet, the offer to
-     * download them first. The faces themselves are on the photo, in the viewer.
+     * Marking the photo: a person on it whose face was not found (turned away, far, in the dark), a pet or anything
+     * else; taking it out of a person's or pet's album; with no face models yet, the offer to download them first. The
+     * faces found are on the photo itself, in the viewer.
      */
     @Override
     public void whoIsThis(final IndexStore.Item it) {
         boolean faces = engine.facesInstalled();
-        final Sheet s = new Sheet(this, faces ? "Питомец или что-то ещё" : "Кто на фото");
+        final Sheet s = new Sheet(this, "Отметить на фото");
         if (!faces) {
             TextView note = hint(engine.faceDownloading ? "Модели лиц скачиваются — когда закончат, лица появятся прямо на фото"
-                    : "Чтобы узнавать людей, нужны модели лиц OpenCV (≈40 МБ, один раз; всё считается на телефоне)");
+                    : "Чтобы узнавать людей по лицам, нужны модели лиц OpenCV (≈40 МБ, один раз; всё считается на телефоне)");
             note.setPadding(0, 0, 0, dp(8));
             s.body().addView(note);
             if (!engine.faceDownloading) {
@@ -1816,16 +1861,31 @@ public final class MainActivity extends Activity implements Engine.Listener, Vie
                     }
                 }));
             }
-            s.body().addView(header("Питомец или что-то ещё"));
         }
-        final LinearLayout thingsBox = new LinearLayout(this);
-        thingsBox.setOrientation(LinearLayout.VERTICAL);
-        s.body().addView(thingsBox);
-        thingsBox.addView(actionRow(Icon.PLUS, "Отметить питомца или что-то ещё", "кошку, собаку, машину, дом — похожие фото соберутся "
+        final LinearLayout outBox = new LinearLayout(this);
+        outBox.setOrientation(LinearLayout.VERTICAL);
+        s.body().addView(outBox);
+        s.body().addView(header("Человек"));
+        s.body().addView(actionRow(Icon.PERSON, "Отметить человека", "когда лицо не нашлось: спиной, далеко, в темноте", new Runnable() {
+            @Override
+            public void run() {
+                personPicker(s, it);
+            }
+        }));
+        s.body().addView(header("Питомец или что-то ещё"));
+        s.body().addView(actionRow(Icon.PLUS, "Отметить питомца или что-то ещё", "кошку, собаку, машину, дом — похожие фото соберутся "
                 + "в альбом", new Runnable() {
             @Override
             public void run() {
                 thingChooser(s, it);
+            }
+        }));
+        s.body().addView(header("Документ"));
+        s.body().addView(actionRow(Icon.SCAN, "Скан для печати", "выровнять лист и текст, ч/б как на сканере", new Runnable() {
+            @Override
+            public void run() {
+                s.dismiss();
+                openScan(it);
             }
         }));
         engine.albumsOf(it, new Engine.Callback<List<Engine.Album>>() {
@@ -1833,23 +1893,60 @@ public final class MainActivity extends Activity implements Engine.Listener, Vie
             public void done(List<Engine.Album> albums, Exception e) {
                 if (albums == null || s.isClosing()) return;
                 for (final Engine.Album a : albums) {
-                    if (a.kind != Engine.Album.THING) continue;
-                    thingsBox.addView(actionRow(Icon.CLOSE, "Убрать из «" + a.name + "»", "это фото не про «" + a.name + "»", new Runnable() {
+                    if (a.kind != Engine.Album.THING && a.kind != Engine.Album.PERSON) continue;
+                    outBox.addView(actionRow(Icon.CLOSE, "Убрать из «" + a.name + "»", "это фото не про «" + a.name + "»", new Runnable() {
                         @Override
                         public void run() {
                             s.dismiss();
-                            engine.markThing(it, a.name, false, new Runnable() {
+                            Runnable done = new Runnable() {
                                 @Override
                                 public void run() {
                                     toast("Убрано из «" + a.name + "»");
-                                    refreshShownAlbum(null);
+                                    facesChanged().run();
                                 }
-                            });
+                            };
+                            if (a.kind == Engine.Album.PERSON) engine.markPerson(it, a.name, false, done);
+                            else engine.markThing(it, a.name, false, done);
                         }
-                    }), 0);
+                    }));
                 }
             }
         });
+        s.show(root);
+    }
+
+    /** Which person is on the photo, the whole photo marked: one of the people there are or someone new. */
+    private void personPicker(final Sheet who, final IndexStore.Item it) {
+        final Sheet s = new Sheet(this, "Кто на фото?");
+        final Engine.Callback<String> mark = new Engine.Callback<String>() {
+            @Override
+            public void done(final String name, Exception e) {
+                if (!who.isClosing()) who.dismiss();
+                engine.markPerson(it, name, true, new Runnable() {
+                    @Override
+                    public void run() {
+                        toast("Отмечено: «" + name.trim() + "»");
+                        facesChanged().run();
+                    }
+                });
+            }
+        };
+        for (final String name : engine.groupNames(true)) {
+            s.body().addView(actionRow(Icon.PERSON, name, null, new Runnable() {
+                @Override
+                public void run() {
+                    s.dismiss();
+                    mark.done(name, null);
+                }
+            }));
+        }
+        s.body().addView(actionRow(Icon.PLUS, "Новый человек…", null, new Runnable() {
+            @Override
+            public void run() {
+                s.dismiss();
+                askName("Как зовут?", "Например: Маша", "", mark);
+            }
+        }));
         s.show(root);
     }
 
@@ -1930,6 +2027,34 @@ public final class MainActivity extends Activity implements Engine.Listener, Vie
                 askName("Как назвать?", "Например: Барсик", "", mark);
             }
         }));
+        s.show(root);
+    }
+
+    /** Someone unnamed, from the line above their photos: a name, or hidden — nobody to name. */
+    private void unnamedChoice(final Engine.Album a) {
+        final Sheet s = new Sheet(this, "Кто это?");
+        s.body().addView(actionRow(Icon.PERSON, "Назвать…", "все эти фото соберутся в альбом с именем", new Runnable() {
+            @Override
+            public void run() {
+                s.dismiss();
+                nameUnnamed(a);
+            }
+        }));
+        s.body().addView(actionRow(Icon.HIDE, "Скрыть — узнавать не нужно", "эти лица больше не появятся; вернуть — в настройках",
+                new Runnable() {
+                    @Override
+                    public void run() {
+                        s.dismiss();
+                        engine.hideUnnamed(a, new Runnable() {
+                            @Override
+                            public void run() {
+                                toast("Скрыто: " + a.faces.length + " лиц");
+                                if (!places.isEmpty()) back(places.remove(places.size() - 1));
+                                else showRecent(true);
+                            }
+                        });
+                    }
+                }));
         s.show(root);
     }
 

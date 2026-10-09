@@ -1259,6 +1259,43 @@ public final class Engine {
         });
     }
 
+    /** Words of «Что на фото» that make a photo a document (paper to print), and those that make it a screen. */
+    static final java.util.Set<String> DOC_WORDS = new java.util.HashSet<String>(java.util.Arrays.asList("документ", "бумажный документ",
+            "текст", "чек", "анкета", "страница книги", "газета", "заметки", "паспорт", "билет", "тетрадь")),
+            SCREEN_WORDS = new java.util.HashSet<String>(java.util.Arrays.asList("скриншот", "веб-страница"));
+
+    /**
+     * Whether a photo shows a document — paper to make a scan of for printing: one of its words (PhotoTags, as «Что на
+     * фото») is a document's, none a screen's, and it is no screenshot.
+     */
+    public void isDocument(final IndexStore.Item item, final Callback<Boolean> cb) {
+        ml.submit(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    if (state != State.READY || photo == null || item.emb == null || item.kind != IndexStore.KIND_PHOTO
+                            || (item.title != null && item.title.toLowerCase(java.util.Locale.ROOT).startsWith("screenshot"))) {
+                        post(cb, false, null);
+                        return;
+                    }
+                    PhotoTags t = photoTags();
+                    if (t.vecs.length == 0 || t.vecs[0].length != item.emb.length) {
+                        post(cb, false, null);
+                        return;
+                    }
+                    boolean doc = false, screen = false;
+                    for (String w : t.rank(item.emb)) {
+                        doc |= DOC_WORDS.contains(w);
+                        screen |= SCREEN_WORDS.contains(w);
+                    }
+                    post(cb, doc && !screen, null);
+                } catch (Exception e) {
+                    post(cb, false, null);
+                }
+            }
+        });
+    }
+
     /** An album — by meaning (core.Albums), a person, someone unnamed or a pet/thing — and its pictures, best first. */
     public static final class Album {
         public static final int MEANING = 0, PERSON = 1, UNNAMED = 2, THING = 3;
@@ -1405,9 +1442,16 @@ public final class Engine {
             {SFACE, "https://github.com/opencv/opencv_zoo/raw/main/models/face_recognition_sface/" + SFACE,
                     "https://huggingface.co/opencv/face_recognition_sface/resolve/main/" + SFACE}};
     /** Faces kept from this many pixels (the shorter side, in the photo as scanned); unnamed groups start from bigger ones. */
-    static final int MIN_FACE = 24, GROUP_FACE = 40;
+    static final int MIN_FACE = 20, GROUP_FACE = 40;
+    /**
+     * The scan: 1 (0.10.15) — 0.7 MP, score 0.9, faces from 24 px; 2 (0.10.17) — 1.6 MP, score 0.75, from 20 px, and a
+     * dim or flat photo looked at once more with its levels stretched. Photos looked at by an earlier one are looked at
+     * again (the faces they have stay).
+     */
+    static final int FACE_SCAN = 2;
+    static final float FACE_SCORE = 0.75f;
     /** About this many pixels of a photo are looked at for faces. */
-    static final long FACE_PIXELS = 700_000L;
+    static final long FACE_PIXELS = 1_600_000L;
     /** Unnamed people offered, at most. */
     static final int UNNAMED_MAX = 30;
 
@@ -1534,7 +1578,10 @@ public final class Engine {
     private synchronized io.github.teoplaydor.semsearch.core.FaceFinder finder() throws Exception {
         if (facesForTest != null) return facesForTest;
         if (finder == null) {
-            finder = new io.github.teoplaydor.semsearch.core.FaceModel(new File(facesDir(), YUNET), new File(facesDir(), SFACE), 2);
+            io.github.teoplaydor.semsearch.core.FaceModel m = new io.github.teoplaydor.semsearch.core.FaceModel(
+                    new File(facesDir(), YUNET), new File(facesDir(), SFACE), 2);
+            m.setMinScore(FACE_SCORE);
+            finder = m;
         }
         return finder;
     }
@@ -1577,7 +1624,7 @@ public final class Engine {
                 try {
                     List<IndexStore.Item> todo = new ArrayList<IndexStore.Item>();
                     for (IndexStore.Item it : store.media()) {
-                        if (it.kind == IndexStore.KIND_PHOTO && !faceStore.scanned(IndexStore.key(it))) todo.add(it);
+                        if (it.kind == IndexStore.KIND_PHOTO && faceStore.scannedWith(IndexStore.key(it)) < FACE_SCAN) todo.add(it);
                     }
                     java.util.Collections.sort(todo, new java.util.Comparator<IndexStore.Item>() {
                         @Override
@@ -1591,7 +1638,7 @@ public final class Engine {
                     notifyChanged();
                     for (IndexStore.Item it : todo) {
                         if (stopFaces || indexing) break; // indexing first: the scan goes on after it
-                        if (faceStore.scanned(IndexStore.key(it))) continue;
+                        if (faceStore.scannedWith(IndexStore.key(it)) >= FACE_SCAN) continue;
                         int[] size = new int[2];
                         List<io.github.teoplaydor.semsearch.core.FaceModel.Face> fs = null;
                         try {
@@ -1601,7 +1648,7 @@ public final class Engine {
                         } catch (Throwable e) {
                             if (failed++ == 0) Journal.add(ctx, "app", "лица: " + it.title + " не прочитан — " + e);
                         }
-                        faceStore.addScan(IndexStore.key(it), fs, size[0], size[1]);
+                        faceStore.addScan(IndexStore.key(it), fs, size[0], size[1], FACE_SCAN);
                         faceDone++;
                         long now = System.currentTimeMillis();
                         if (now - last > 1000) {
@@ -1684,14 +1731,14 @@ public final class Engine {
             for (int p = 0; p < pv.persons.size(); p++) {
                 List<Integer> idx = new ArrayList<Integer>();
                 for (int i = 0; i < pv.who.length; i++) if (pv.who[i] == p) idx.add(i);
-                Album a = personAlbum(pv.persons.get(p).name, idx, pv.faces, byKey);
+                Album a = personAlbum(pv.persons.get(p), pv.persons.get(p).name, idx, pv.faces, byKey);
                 a.kind = Album.PERSON;
                 a.id = pv.persons.get(p).id;
                 pv.albums.add(a);
             }
             List<People.Cluster> clusters = People.clusters(pv.faces, pv.who, GROUP_FACE, level);
             for (int c = 0; c < Math.min(UNNAMED_MAX, clusters.size()); c++) {
-                Album a = personAlbum("Кто это?", clusters.get(c).faces, pv.faces, byKey);
+                Album a = personAlbum(null, "Кто это?", clusters.get(c).faces, pv.faces, byKey);
                 a.kind = Album.UNNAMED;
                 a.faces = new long[clusters.get(c).faces.size()];
                 for (int k = 0; k < a.faces.length; k++) a.faces[k] = pv.faces.get(clusters.get(c).faces.get(k)).id;
@@ -1729,15 +1776,21 @@ public final class Engine {
         }
     }
 
-    /** A person's photos (newest first) from their faces, and the clearest face shown. */
-    private static Album personAlbum(String name, List<Integer> idx, List<People.Face> faces, java.util.Map<Long, IndexStore.Item> byKey) {
+    /**
+     * A person's photos (newest first) from their faces and the photos marked as theirs whole (a face not found: turned
+     * away, too dim), less those taken out; and the clearest face shown.
+     */
+    private static Album personAlbum(FaceStore.Group g, String name, List<Integer> idx, List<People.Face> faces,
+                                     java.util.Map<Long, IndexStore.Item> byKey) {
         java.util.LinkedHashSet<IndexStore.Item> items = new java.util.LinkedHashSet<IndexStore.Item>();
         People.Face best = null;
         for (int i : idx) {
             People.Face f = faces.get(i);
+            if (g != null && g.noPhotos.contains(f.photo)) continue;
             items.add(byKey.get(f.photo));
             if (best == null || f.size * (double) f.score > best.size * (double) best.score) best = f;
         }
+        if (g != null) for (long k : g.yesPhotos) if (byKey.containsKey(k)) items.add(byKey.get(k));
         List<IndexStore.Item> list = new ArrayList<IndexStore.Item>(items);
         java.util.Collections.sort(list, new java.util.Comparator<IndexStore.Item>() {
             @Override
@@ -1775,10 +1828,10 @@ public final class Engine {
             public void run() {
                 try {
                     long key = IndexStore.key(it);
-                    if (!faceStore.scanned(key)) {
+                    if (faceStore.scannedWith(key) < FACE_SCAN) {
                         if (!facesInstalled()) throw new IllegalStateException("модели лиц не скачаны");
                         int[] size = new int[2];
-                        faceStore.addScan(key, findFaces(it, size), size[0], size[1]);
+                        faceStore.addScan(key, findFaces(it, size), size[0], size[1], FACE_SCAN);
                     }
                     PeopleView pv = people();
                     List<FaceTag> out = new ArrayList<FaceTag>();
@@ -1917,6 +1970,29 @@ public final class Engine {
                     if (f != null) faceStore.markFace(g, f, true);
                 }
                 changed(done, "люди: «" + name.trim() + "» — " + a.items.size() + " фото");
+            }
+        });
+    }
+
+    /** This person is on this photo (or, {@code yes} false, is not), the whole photo — when their face was not found. */
+    public void markPerson(final IndexStore.Item it, final String name, final boolean yes, final Runnable done) {
+        ml.submit(new Runnable() {
+            @Override
+            public void run() {
+                if (name.trim().isEmpty()) return;
+                faceStore.markPhoto(faceStore.named(name, FaceStore.PERSON), IndexStore.key(it), yes);
+                changed(done, "люди: фото " + (yes ? "отмечено как" : "убрано из") + " «" + name.trim() + "»");
+            }
+        });
+    }
+
+    /** Someone unnamed nobody needs to name: all their faces hidden. */
+    public void hideUnnamed(final Album a, final Runnable done) {
+        ml.submit(new Runnable() {
+            @Override
+            public void run() {
+                faceStore.ignoreAll(a.faces);
+                changed(done, "люди: скрыта группа из " + a.faces.length + " лиц");
             }
         });
     }

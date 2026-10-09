@@ -81,6 +81,12 @@ final class Viewer extends FrameLayout {
         /** A face nobody needs to name, hidden. */
         void hideFace(IndexStore.Item it, Engine.FaceTag f);
 
+        /** Whether the photo shows a document (Engine.isDocument). */
+        void isDocument(IndexStore.Item it, Engine.Callback<Boolean> cb);
+
+        /** The document made ready to print (ScanPanel). */
+        void openScan(IndexStore.Item it);
+
         /** Every album the picture is in (Engine.albumsOf). */
         void albumsOf(IndexStore.Item it, Engine.Callback<List<Engine.Album>> cb);
 
@@ -95,6 +101,8 @@ final class Viewer extends FrameLayout {
     private final Pager pager;
     private final LinearLayout top, bottom, actions, tagsBox, tagsRow, albumsRow, facesRow;
     private final View facesScroll;
+    /** The photo the scan offer is shown for. */
+    private IndexStore.Item docShown;
     private final TextView tagsNote, albumsTitle;
     private final View albumsScroll;
     /** "Что на фото" is open: it follows the photo when swiping to the next one. */
@@ -422,6 +430,24 @@ final class Viewer extends FrameLayout {
             return;
         }
         facesScroll.setVisibility(VISIBLE);
+        // a document: offered as a scan for printing, first in the row
+        host.isDocument(it, new Engine.Callback<Boolean>() {
+            @Override
+            public void done(Boolean doc, Exception e) {
+                if (items.get(index) != it || doc == null || !doc) return;
+                View scan = pill(Icon.SCAN, "Скан для печати", it);
+                scan.setOnClickListener(new OnClickListener() {
+                    @Override
+                    public void onClick(View v) {
+                        host.openScan(it);
+                    }
+                });
+                ((LinearLayout.LayoutParams) scan.getLayoutParams()).rightMargin = Ui.dp(getContext(), 8);
+                facesRow.addView(scan, 0);
+                docShown = it;
+            }
+        });
+        docShown = null;
         if (!host.facesReady()) {
             facesRow.addView(pill(Icon.PERSON, "Кто это", it));
             return;
@@ -430,7 +456,10 @@ final class Viewer extends FrameLayout {
             @Override
             public void done(List<Engine.FaceTag> faces, Exception e) {
                 if (items.get(index) != it) return;
+                // the scan offer, when it came first, stays
+                View scan = docShown == it && facesRow.getChildCount() > 0 ? facesRow.getChildAt(0) : null;
                 facesRow.removeAllViews();
+                if (scan != null) facesRow.addView(scan);
                 if (faces != null) for (Engine.FaceTag f : faces) facesRow.addView(facePill(it, f));
                 facesRow.addView(pill(Icon.PLUS, "Отметить", it));
             }

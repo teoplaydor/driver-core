@@ -5,6 +5,7 @@
 #   HiddenTest      — hiding 18+: gallery, search, albums, the hidden folder, hiding and showing by hand
 #   PeopleAppTest   — faces looked for after indexing, people named and corrected, the unnamed, pets by examples
 #   NavTest         — «Назад» in the order things were opened: viewer, search, albums, settings
+#   ScanTest        — a document photo offered as a scan for printing: the sheet cut out, black and white, saved
 #   AppIndexingTest — MediaStore → decode → embed → SQLite with a stand-in model, Russian bridge
 #   IndexStopTest   — a broken model (the same error file after file, the NPU process gone) stops the run, files unmarked
 #   AutoIndexTest   — background jobs: content triggers on MediaStore, the periodic safety net
@@ -83,7 +84,7 @@ fi
 
 rm -rf build/shots
 TESTS=("$@")
-[ ${#TESTS[@]} -gt 0 ] || TESTS=(UiShots AppFlowTest AppIndexingTest IndexStopTest PipelineTest ViewerTest HiddenTest PeopleAppTest NavTest OpenTimeoutTest AutoIndexTest IdleIndexTest SpeedupsTest)
+[ ${#TESTS[@]} -gt 0 ] || TESTS=(UiShots AppFlowTest AppIndexingTest IndexStopTest PipelineTest ViewerTest HiddenTest PeopleAppTest NavTest ScanTest OpenTimeoutTest AutoIndexTest IdleIndexTest SpeedupsTest)
 # One JVM per class: Engine is an app-wide singleton.
 for t in "${TESTS[@]}"; do
   echo "-- $t"

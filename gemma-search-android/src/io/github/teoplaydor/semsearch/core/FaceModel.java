@@ -58,6 +58,8 @@ public final class FaceModel implements FaceFinder {
     /** The detector's input size when its graph fixes one (the image is then fitted into it), else -1. */
     private final int fixedW, fixedH;
     private final String[] detOut = new String[12];
+    /** The least score a face is kept with ({@link #SCORE}, OpenCV's default, unless set). */
+    private float minScore = SCORE;
 
     public FaceModel(File detector, File recognizer, int threads) throws OrtException {
         env = OrtEnvironment.getEnvironment();
@@ -81,6 +83,11 @@ public final class FaceModel implements FaceFinder {
         }
         recIn = rec.getInputNames().iterator().next();
         recOut = rec.getOutputNames().iterator().next();
+    }
+
+    /** A lower score finds faces seen worse (dim, small, turned) — and a few that are not faces. */
+    public void setMinScore(float s) {
+        minScore = s;
     }
 
     /** For the log: what the graphs take and give. */
@@ -139,7 +146,7 @@ public final class FaceModel implements FaceFinder {
                             if (idx >= cls.length) break;
                             float c = Math.max(0f, Math.min(1f, cls[idx])), o = Math.max(0f, Math.min(1f, obj[idx]));
                             float score = (float) Math.sqrt(c * o);
-                            if (score < SCORE) continue;
+                            if (score < minScore) continue;
                             Face f = new Face();
                             float cx = (col + bbox[idx * 4]) * stride, cy = (row + bbox[idx * 4 + 1]) * stride;
                             f.w = (float) Math.exp(bbox[idx * 4 + 2]) * stride;
@@ -161,7 +168,7 @@ public final class FaceModel implements FaceFinder {
         } finally {
             in.close();
         }
-        List<Face> kept = nms(faces);
+        List<Face> kept = nms(faces, minScore);
         if (scale != 1f) {
             for (Face f : kept) {
                 f.x /= scale;
@@ -182,7 +189,7 @@ public final class FaceModel implements FaceFinder {
     }
 
     /** OpenCV's NMSBoxes on the boxes as whole pixels (Rect2i): by score, dropping a box over {@link #NMS} IoU with a kept one. */
-    static List<Face> nms(List<Face> faces) {
+    static List<Face> nms(List<Face> faces, float minScore) {
         List<Face> order = new ArrayList<Face>(faces);
         Collections.sort(order, new Comparator<Face>() { // stable: equal scores keep their order, as std::stable_sort
             @Override
@@ -192,7 +199,7 @@ public final class FaceModel implements FaceFinder {
         });
         List<Face> kept = new ArrayList<Face>();
         for (Face f : order) {
-            if (!(f.score > SCORE)) continue;
+            if (!(f.score > minScore)) continue;
             if (kept.size() >= TOP_K) break;
             boolean keep = true;
             for (Face k : kept) {
@@ -309,6 +316,11 @@ public final class FaceModel implements FaceFinder {
     }
 
     /** The faces of an image with their vectors; faces smaller than {@code minSize} pixels (the shorter side) are left out. */
+    /**
+     * The faces of an image with their vectors; faces smaller than {@code minSize} pixels (the shorter side) are left
+     * out. A dim or flat image is looked at once more with its levels stretched ({@link #enhance}): the faces found
+     * only there join, their vectors from the stretched pixels.
+     */
     @Override
     public List<Face> faces(int[] argb, int w, int h, int minSize) throws OrtException {
         List<Face> out = new ArrayList<Face>();
@@ -316,6 +328,63 @@ public final class FaceModel implements FaceFinder {
             if (Math.min(f.w, f.h) < minSize) continue;
             f.emb = embed(align(argb, w, h, f.landmarks));
             out.add(f);
+        }
+        int[] bright = enhance(argb);
+        if (bright != null) {
+            List<Face> more = new ArrayList<Face>();
+            for (Face f : detect(bright, w, h)) {
+                if (Math.min(f.w, f.h) < minSize) continue;
+                boolean seen = false;
+                for (Face o : out) seen |= iou(f, o) > NMS;
+                if (seen) continue;
+                f.emb = embed(align(bright, w, h, f.landmarks));
+                more.add(f);
+            }
+            out.addAll(more);
+            Collections.sort(out, new Comparator<Face>() {
+                @Override
+                public int compare(Face a, Face b) {
+                    return Float.compare(b.score, a.score);
+                }
+            });
+        }
+        return out;
+    }
+
+    /**
+     * The image with its levels stretched (the 1st to the 99th percentile of brightness to the full range, and
+     * lightened when dark), or null when it is bright and contrasty enough as it is.
+     */
+    public static int[] enhance(int[] argb) {
+        int[] hist = new int[256];
+        long sum = 0;
+        for (int p : argb) {
+            int y = (((p >> 16) & 0xFF) * 77 + ((p >> 8) & 0xFF) * 150 + (p & 0xFF) * 29) >> 8;
+            hist[y]++;
+            sum += y;
+        }
+        int n = argb.length;
+        if (n == 0) return null;
+        double mean = (double) sum / n;
+        int lo = 0, hi = 255;
+        for (int c = 0; lo < 255 && (c += hist[lo]) < n / 100; lo++) {
+        }
+        for (int c = 0; hi > 0 && (c += hist[hi]) < n / 100; hi--) {
+        }
+        if (hi - lo >= 160 && mean >= 90) return null;
+        double range = Math.max(16, hi - lo);
+        double m = Math.max(0.02, Math.min(0.98, (mean - lo) / range));
+        // a dark picture: its middle grey to about 0.45
+        double gamma = mean < 90 ? Math.max(0.35, Math.min(1.0, Math.log(0.45) / Math.log(m))) : 1.0;
+        int[] lut = new int[256];
+        for (int v = 0; v < 256; v++) {
+            double x = Math.max(0, Math.min(1, (v - lo) / range));
+            lut[v] = (int) Math.round(255 * Math.pow(x, gamma));
+        }
+        int[] out = new int[n];
+        for (int i = 0; i < n; i++) {
+            int p = argb[i];
+            out[i] = 0xFF000000 | (lut[(p >> 16) & 0xFF] << 16) | (lut[(p >> 8) & 0xFF] << 8) | lut[p & 0xFF];
         }
         return out;
     }

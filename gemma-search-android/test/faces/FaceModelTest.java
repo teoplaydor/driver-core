@@ -137,6 +137,21 @@ public class FaceModelTest {
         check(worstResize < 0.6 && worstResizeMax <= 2, String.format(java.util.Locale.ROOT,
                 "the fitting resize as cv2.resize INTER_LINEAR (mean %.3f, largest %.0f levels)", worstResize, worstResizeMax));
 
+        // a dim photo: the faces OpenCV finds in the bright one are found again, with the levels stretched
+        Map<String, Object> e1 = MiniJson.obj(ref.get(1));
+        BufferedImage im1 = ImageIO.read(new File(MiniJson.str(e1, "image", "")));
+        int[] px1 = argb(im1), dim = new int[px1.length];
+        for (int i = 0; i < px1.length; i++) {
+            int p = px1[i];
+            dim[i] = 0xFF000000 | ((((p >> 16) & 0xFF) * 3 / 10) << 16) | ((((p >> 8) & 0xFF) * 3 / 10) << 8) | ((p & 0xFF) * 3 / 10);
+        }
+        int brightN = fm.faces(px1, im1.getWidth(), im1.getHeight(), 0).size();
+        int dimPlain = fm.detect(dim, im1.getWidth(), im1.getHeight()).size();
+        int dimFound = fm.faces(dim, im1.getWidth(), im1.getHeight(), 0).size();
+        System.out.println("  a dim photo: " + dimPlain + " faces as it is, " + dimFound + " with the levels stretched (bright: " + brightN + ")");
+        check(dimPlain < brightN / 2 && dimFound >= brightN * 8 / 10 && FaceModel.enhance(px1) == null,
+                "a dim photo: the faces found with its levels stretched; a bright one is left as it is");
+
         // faces(): the vectors are unit length and a face under the size limit is left out
         Map<String, Object> e0 = MiniJson.obj(ref.get(0));
         BufferedImage img = ImageIO.read(new File(MiniJson.str(e0, "image", "")));
