@@ -55,7 +55,7 @@ java -Dfile.encoding=UTF-8 -Dstdout.encoding=UTF-8 -cp "$T/cls" PhotoTagsTest as
 java -Dfile.encoding=UTF-8 -Dstdout.encoding=UTF-8 -cp "$T/cls" AlbumsTest assets/photo_tags.txt assets/albums.txt
 java -Dfile.encoding=UTF-8 -Dstdout.encoding=UTF-8 -cp "$T/cls" AdultFilterTest assets/photo_tags.txt assets/adult.txt
 java -Dfile.encoding=UTF-8 -Dstdout.encoding=UTF-8 -cp "$T/cls:$T/ort-desktop.jar" PeopleTest
-java -Djava.awt.headless=true -Dfile.encoding=UTF-8 -Dstdout.encoding=UTF-8 -cp "$T/cls:$T/ort-desktop.jar" DocScanTest "$T/docscan" test/docscan/form-on-pile.jpg
+java -Djava.awt.headless=true -Dfile.encoding=UTF-8 -Dstdout.encoding=UTF-8 -cp "$T/cls:$T/ort-desktop.jar" DocScanTest "$T/docscan" test/docscan/form-on-pile.jpg test/docscan/contract-curled.jpg
 
 echo "== 2e. faces (YuNet + SFace) vs OpenCV's FaceDetectorYN / FaceRecognizerSF on stand-in graphs"
 python3 -m pip install -q "opencv-python-headless==4.12.0.88" pillow

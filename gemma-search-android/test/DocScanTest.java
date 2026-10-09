@@ -257,36 +257,14 @@ public class DocScanTest {
                     (double) flat6.h / flat6.w));
         }
 
-        // 7. a phone photo (cut from a screenshot of the viewer, the contract number blurred): a form on a pile of sheets
-        // on a dark folder, cloth around, the sheets under it sticking out at the side and the bottom. Its lists are set
-        // further apart than their lines and its headings bigger: no curl, the page stays A4 (0.10.19 stretched it to
-        // 1.83); and no black frame along its edges (the shadows between the sheets of the pile, the paper next to the
-        // white corners that levelling uncovered)
-        if (args.length > 1) {
-            BufferedImage form = ImageIO.read(new File(args[1]));
-            int fw = form.getWidth(), fh = form.getHeight();
-            int[] f7 = px(form);
-            DocScan.Sheet sheet7 = DocScan.findSheet(f7, fw, fh);
-            check(sheet7 != null, "the form on a pile: found");
-            if (sheet7 != null) {
-                DocScan.Image scan7 = DocScan.process(f7, fw, fh, sheet7, true, DocScan.BW, 3508);
-                save(scan7, new File(out, "7-form.png"));
-                int band = (int) (0.05 * Math.min(scan7.w, scan7.h));
-                long edge = 0, all = 0;
-                for (int y = 0; y < scan7.h; y++) {
-                    for (int x = 0; x < scan7.w; x++) {
-                        if (Math.min(Math.min(x, scan7.w - 1 - x), Math.min(y, scan7.h - 1 - y)) >= band) continue;
-                        all++;
-                        if ((scan7.px[y * scan7.w + x] & 0xFF) == 0) edge++;
-                    }
-                }
-                double ratio7 = (double) scan7.h / scan7.w, skew7 = DocScan.skew(scan7.px, scan7.w, scan7.h);
-                System.out.println(String.format(Locale.ROOT, "  the form: %dx%d (%.3f), text at %.2f°, black in the outer 5%%: %.3f%%",
-                        scan7.w, scan7.h, ratio7, skew7, 100.0 * edge / all));
-                check(Math.abs(ratio7 - Math.sqrt(2)) < 0.01 && Math.abs(skew7) <= 0.3, "the form: A4, not stretched; its text level");
-                check(edge < all / 500, "the form: no black frame along its edges");
-            }
-        }
+        // 7. phone photos (cut from screenshots of the viewer; contract numbers, personal data and a signature blurred):
+        //  - a form on a pile of sheets on a dark folder, cloth around, the sheets under it sticking out at the side and
+        //    the bottom. Its lists are set further apart than their lines and its headings bigger: no curl, the page
+        //    stays A4 (0.10.19 stretched it to 1.83); and no black frame along its edges (the shadows between the sheets
+        //    of the pile, the paper next to the white corners that levelling uncovered);
+        //  - a contract page curling, in the shade, a light patterned cloth along its left edge (as light as the paper
+        //    there): the edge along the paper, not the cloth's pattern (0.10.20 left black blots down the left side)
+        for (int i = 1; i < args.length; i++) realPhoto(new File(args[i]), out);
 
         // 4. a sheet on a white table: nothing apart from it to cut by
         BufferedImage white = new BufferedImage(1200, 900, BufferedImage.TYPE_INT_RGB);
@@ -428,6 +406,33 @@ public class DocScanTest {
      * the mean over them of how far their middle strays from its average (std, pixels); how many; and how far apart the
      * left ends of those starting at the margin are (std).
      */
+    /** A phone photo of a sheet: found, cut out A4 (not stretched), its text level, no black frame along its edges. */
+    static void realPhoto(File f, File out) throws Exception {
+        BufferedImage photo = ImageIO.read(f);
+        String name = f.getName().replaceAll("\\.[a-z]+$", "");
+        int fw = photo.getWidth(), fh = photo.getHeight();
+        int[] px = px(photo);
+        DocScan.Sheet sheet = DocScan.findSheet(px, fw, fh);
+        check(sheet != null, name + ": found");
+        if (sheet == null) return;
+        DocScan.Image scan = DocScan.process(px, fw, fh, sheet, true, DocScan.BW, 3508);
+        save(scan, new File(out, "7-" + name + ".png"));
+        int band = (int) (0.05 * Math.min(scan.w, scan.h));
+        long edge = 0, all = 0;
+        for (int y = 0; y < scan.h; y++) {
+            for (int x = 0; x < scan.w; x++) {
+                if (Math.min(Math.min(x, scan.w - 1 - x), Math.min(y, scan.h - 1 - y)) >= band) continue;
+                all++;
+                if ((scan.px[y * scan.w + x] & 0xFF) == 0) edge++;
+            }
+        }
+        double ratio = (double) scan.h / scan.w, skew = DocScan.skew(scan.px, scan.w, scan.h);
+        System.out.println(String.format(Locale.ROOT, "  %s: %dx%d (%.3f), text at %.2f°, black in the outer 5%%: %.3f%%", name,
+                scan.w, scan.h, ratio, skew, 100.0 * edge / all));
+        check(Math.abs(ratio - Math.sqrt(2)) < 0.01 && Math.abs(skew) <= 0.3, name + ": A4, not stretched; its text level");
+        check(edge < all / 500, name + ": no black frame along its edges");
+    }
+
     static double[] straightness(DocScan.Image im) {
         int w = im.w, h = im.h;
         boolean[] ink = new boolean[w * h], row = new boolean[w * h];

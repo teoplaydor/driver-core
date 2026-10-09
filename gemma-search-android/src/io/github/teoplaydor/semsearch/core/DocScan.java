@@ -133,10 +133,11 @@ public final class DocScan {
             }
         }
         if (nlo == 0 || nhi == 0 || (double) hi / nhi - (double) lo / nlo < 40) return null;
-        boolean[] bright = new boolean[g.length];
-        for (int i = 0; i < g.length; i++) bright[i] = g[i] > t;
-        // thin bridges cut (a light pattern on the cloth touching the sheet): opened by a pixel
-        bright = open(bright, sw, sh);
+        boolean[] light = new boolean[g.length];
+        for (int i = 0; i < g.length; i++) light[i] = g[i] > t;
+        // paper is smooth: a light patterned cloth next to the sheet, as light as paper in the shade, is not — without
+        // this the sheet's edge would run along the cloth's pattern; then thin bridges cut (opened by two pixels)
+        boolean[] bright = open(smooth(g, light, sw, sh), sw, sh, 2);
         // the largest bright region (4-connected)
         int[] label = new int[g.length];
         int[] stack = new int[g.length];
@@ -175,6 +176,17 @@ public final class DocScan {
         }
         // a sheet may be small on the photo (a fifth of it, less when the letters take up much of it)
         if (bestSize < g.length / 25) return null;
+        // back out to its edge: the smoothness test (a window) and the opening took a few pixels off it
+        for (int it = 0; it < 3; it++) {
+            java.util.List<Integer> grow = new java.util.ArrayList<Integer>();
+            for (int i = 0; i < g.length; i++) {
+                if (label[i] == bestLabel || !light[i]) continue;
+                int x = i % sw, y = i / sw;
+                if (x > 0 && label[i - 1] == bestLabel || x < sw - 1 && label[i + 1] == bestLabel
+                        || y > 0 && label[i - sw] == bestLabel || y < sh - 1 && label[i + sw] == bestLabel) grow.add(i);
+            }
+            for (int i : grow) label[i] = bestLabel;
+        }
         // its corners: furthest along the two diagonals
         double minS = 1e9, maxS = -1e9, minD = 1e9, maxD = -1e9;
         int[] c = new int[8];
@@ -252,9 +264,59 @@ public final class DocScan {
         return new Sheet(q, edges, k);
     }
 
-    /** The mask eroded and dilated by one pixel (3×3): bridges and specks one pixel wide go. */
-    static boolean[] open(boolean[] m, int w, int h) {
-        boolean[] e = new boolean[m.length], d = new boolean[m.length];
+    /**
+     * The light pixels that are smooth: their 5×5 neighbourhood varies (standard deviation) no more than paper does —
+     * the light pixels' typical variation (most of them paper) two and a half times over, and a few levels.
+     */
+    static boolean[] smooth(int[] g, boolean[] light, int w, int h) {
+        int n = w * h;
+        long[] s1 = new long[(w + 1) * (h + 1)], s2 = new long[(w + 1) * (h + 1)];
+        for (int y = 0; y < h; y++) {
+            long r1 = 0, r2 = 0;
+            for (int x = 0; x < w; x++) {
+                int v = g[y * w + x];
+                r1 += v;
+                r2 += (long) v * v;
+                s1[(y + 1) * (w + 1) + x + 1] = s1[y * (w + 1) + x + 1] + r1;
+                s2[(y + 1) * (w + 1) + x + 1] = s2[y * (w + 1) + x + 1] + r2;
+            }
+        }
+        float[] sd = new float[n];
+        int[] hist = new int[256];
+        int count = 0;
+        for (int y = 0; y < h; y++) {
+            int y0 = Math.max(0, y - 2), y1 = Math.min(h, y + 3);
+            for (int x = 0; x < w; x++) {
+                int x0 = Math.max(0, x - 2), x1 = Math.min(w, x + 3);
+                int a = y1 * (w + 1) + x1, b = y0 * (w + 1) + x1, c = y1 * (w + 1) + x0, d = y0 * (w + 1) + x0;
+                double m = (x1 - x0) * (y1 - y0);
+                double mean = (s1[a] - s1[b] - s1[c] + s1[d]) / m, sq = (s2[a] - s2[b] - s2[c] + s2[d]) / m;
+                sd[y * w + x] = (float) Math.sqrt(Math.max(0, sq - mean * mean));
+                if (light[y * w + x]) {
+                    hist[Math.min(255, (int) sd[y * w + x])]++;
+                    count++;
+                }
+            }
+        }
+        int median = 0;
+        for (int acc = 0; median < 255 && (acc += hist[median]) < count / 2; median++) {
+        }
+        double limit = 2.5 * (median + 0.5) + 3;
+        boolean[] out = new boolean[n];
+        for (int i = 0; i < n; i++) out[i] = light[i] && sd[i] <= limit;
+        return out;
+    }
+
+    /** The mask eroded and dilated {@code r} times (3×3 each): bridges and specks up to 2r pixels wide go. */
+    static boolean[] open(boolean[] m, int w, int h, int r) {
+        boolean[] e = m;
+        for (int i = 0; i < r; i++) e = erode(e, w, h);
+        for (int i = 0; i < r; i++) e = dilate(e, w, h);
+        return e;
+    }
+
+    private static boolean[] erode(boolean[] m, int w, int h) {
+        boolean[] e = new boolean[m.length];
         for (int y = 1; y < h - 1; y++) {
             for (int x = 1; x < w - 1; x++) {
                 boolean all = true;
@@ -262,6 +324,11 @@ public final class DocScan {
                 e[y * w + x] = all;
             }
         }
+        return e;
+    }
+
+    private static boolean[] dilate(boolean[] e, int w, int h) {
+        boolean[] d = new boolean[e.length];
         for (int y = 0; y < h; y++) {
             for (int x = 0; x < w; x++) {
                 boolean any = false;
@@ -518,7 +585,7 @@ public final class DocScan {
      * The sheet's real height / width from its corners on a photo (w×h, the principal point at the middle): the
      * camera's focal length from the two vanishing points the corners give, then the rectangle's sides measured with it
      * (Zhang & He, «Whiteboard scanning and image enhancement», 2007). Seen straight on (no vanishing point to go by),
-     * the sides as they are. Within 3.5% of a paper size (either way up), that size.
+     * the sides as they are. Close to a paper size (either way up; see {@link #snap}), that size.
      */
     public static double aspect(float[] q, int w, int h) {
         double u0 = w / 2.0, v0 = h / 2.0;
@@ -542,11 +609,16 @@ public final class DocScan {
         return snap(1 / wh);
     }
 
-    /** Height / width {@code r} as a paper size's when within 3.5% of it (either way up). */
+    /**
+     * Height / width {@code r} as a paper size's when close to it (either way up): A4 within 5% — the paper nearly every
+     * sheet here is, and a pile under the sheet or a curl easily puts its corners that far off — the others within
+     * 3.5% (Letter's window and A4's do not meet).
+     */
     static double snap(double r) {
-        for (double p : PAPER) {
-            if (Math.abs(r / p - 1) < 0.035) return p;
-            if (Math.abs(r * p - 1) < 0.035) return 1 / p;
+        for (int i = 0; i < PAPER.length; i++) {
+            double p = PAPER[i], tol = i == 0 ? 0.05 : 0.035;
+            if (Math.abs(r / p - 1) < tol) return p;
+            if (Math.abs(r * p - 1) < tol) return 1 / p;
         }
         return r;
     }
