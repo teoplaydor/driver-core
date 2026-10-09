@@ -61,8 +61,9 @@ final class ScanPanel extends FrameLayout {
     private final IndexStore.Item item;
     private final ExecutorService work = Executors.newSingleThreadExecutor();
     private final Handler ui = new Handler(Looper.getMainLooper());
-    private final ImageView picture;
-    private final TextView status, pageChip, levelChip, edgesChip;
+    /** The result, to zoom into with two fingers (or a double tap) and move about. */
+    private final PhotoView picture;
+    private final TextView status, pageChip, levelChip, edgesChip, turnChip;
     private final View controls;
     private final LinearLayout editBar;
     private final CornerView editor;
@@ -81,8 +82,10 @@ final class ScanPanel extends FrameLayout {
     private DocScan.Straight straight;
     private boolean usePage = true, level = true;
     private int mode = DocScan.BW;
-    private DocScan.Image cut, levelled;
+    private DocScan.Image cut, turned, levelled;
     private boolean cutWithPage, levelledOn;
+    /** Quarter turns clockwise: as the text says (on each new cut), and as asked («↻»). */
+    private int autoTurns, userTurns, turnedBy = -1;
     /** The result shown, and the settings it was made with. */
     volatile Bitmap result;
     private volatile boolean busy;
@@ -120,8 +123,7 @@ final class ScanPanel extends FrameLayout {
 
         FrameLayout frame = new FrameLayout(c);
         frame.setPadding(Ui.dp(c, 16), Ui.dp(c, 4), Ui.dp(c, 16), Ui.dp(c, 4));
-        picture = new ImageView(c);
-        picture.setScaleType(ImageView.ScaleType.FIT_CENTER);
+        picture = new PhotoView(c);
         frame.addView(picture, new LayoutParams(-1, -1));
         editor = new CornerView(c);
         editor.setVisibility(GONE);
@@ -157,9 +159,18 @@ final class ScanPanel extends FrameLayout {
                 editEdges();
             }
         });
+        turnChip = chip("↻", new Runnable() {
+            @Override
+            public void run() {
+                userTurns = (userTurns + 1) % 4;
+                redo();
+            }
+        });
+        turnChip.setContentDescription("Повернуть");
         toggles.addView(pageChip);
         toggles.addView(edgesChip);
         toggles.addView(levelChip);
+        toggles.addView(turnChip);
         LinearLayout controlsBox = new LinearLayout(c);
         controlsBox.setOrientation(LinearLayout.VERTICAL);
         controlsBox.addView(toggles);
@@ -266,6 +277,7 @@ final class ScanPanel extends FrameLayout {
         for (int i = 0; i < 3; i++) on(modeChips[i], mode == i, true);
         pageChip.setText(page == null && src != null ? "Лист не найден" : "Лист");
         on(edgesChip, manual, src != null);
+        on(turnChip, false, src != null);
     }
 
     private void on(TextView t, boolean on, boolean enabled) {
@@ -339,6 +351,15 @@ final class ScanPanel extends FrameLayout {
             cut = !withPage ? DocScan.fit(src, sw, sh, MAX_SIDE) : DocScan.clearRim(sheet != null
                     ? DocScan.dewarp(src, sw, sh, sheet, MAX_SIDE) : DocScan.warp(src, sw, sh, page, MAX_SIDE));
             cutWithPage = withPage;
+            // which way up its text is: a page photographed sideways (or upside down) turned upright
+            autoTurns = DocScan.quarterTurns(cut);
+            turned = null;
+            levelled = null;
+        }
+        int turns = (autoTurns + userTurns) % 4;
+        if (turned == null || turnedBy != turns) {
+            turned = DocScan.turn(cut, turns);
+            turnedBy = turns;
             levelled = null;
         }
         if (levelled == null || levelledOn != level) {
@@ -346,13 +367,13 @@ final class ScanPanel extends FrameLayout {
             if (level) {
                 // the text turned level as a whole, then each line straightened, the margins stood upright, the lines
                 // spaced evenly
-                angle = DocScan.skew(cut.px, cut.w, cut.h);
-                straight = DocScan.straighten(DocScan.rotate(cut, angle));
+                angle = DocScan.skew(turned.px, turned.w, turned.h);
+                straight = DocScan.straighten(DocScan.rotate(turned, angle));
                 levelled = straight.image;
             } else {
                 angle = 0;
                 straight = null;
-                levelled = cut;
+                levelled = turned;
             }
             levelledOn = level;
         }
@@ -360,6 +381,7 @@ final class ScanPanel extends FrameLayout {
         final Bitmap bmp = Bitmap.createBitmap(out, levelled.w, levelled.h, Bitmap.Config.ARGB_8888);
         final String note = (withPage ? (manual ? "Края заданы вручную" : "Лист вырезан и выпрямлен")
                 : page == null ? "Лист не найден — всё фото, «Края…» — задать углы" : "Всё фото")
+                + (turns == 1 ? ", повёрнут на 90° по часовой" : turns == 2 ? ", повёрнут на 180°" : turns == 3 ? ", повёрнут на 90° против часовой" : "")
                 + (level ? levelNote() : "")
                 + " · " + levelled.w + "×" + levelled.h + " · " + (System.currentTimeMillis() - t0) + " мс";
         ui.post(new Runnable() {
@@ -367,7 +389,7 @@ final class ScanPanel extends FrameLayout {
             public void run() {
                 Bitmap old = result;
                 result = bmp;
-                picture.setImageBitmap(bmp);
+                picture.setBitmap(bmp);
                 if (old != null && old != bmp) old.recycle();
                 busy = false;
                 status.setText(note);
@@ -384,14 +406,14 @@ final class ScanPanel extends FrameLayout {
         // the turn is part of straightening bent lines; told on its own when that is all there was
         if (angle != 0 && !bent) b.append(String.format(Locale.ROOT, ", текст повёрнут на %.1f°", -angle));
         if (bent) b.append(String.format(Locale.ROOT, ", строки выпрямлены: %d (изгиб до %d пикс.)", st.lines, Math.round(st.bend)));
-        if (st != null && st.margins) b.append(", поля выровнены");
+        if (st != null && st.margins) b.append(", края текста выровнены по вертикали");
         if (st != null && st.spread > 1.01) b.append(", интервалы между строками выровнены");
         return b.length() == 0 ? ", текст уже ровный" : b.toString();
     }
 
     /** What the result was made with: a saved file is used again only for the same. */
     private String settings() {
-        return usePage + ":" + level + ":" + mode;
+        return usePage + ":" + level + ":" + mode + ":" + turnedBy;
     }
 
     /** Saves to Pictures/SemSearch (PNG for black and white and grey, JPEG for colour); then shares it when asked. */

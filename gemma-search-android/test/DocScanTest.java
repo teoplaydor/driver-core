@@ -263,7 +263,11 @@ public class DocScanTest {
         //    stays A4 (0.10.19 stretched it to 1.83); and no black frame along its edges (the shadows between the sheets
         //    of the pile, the paper next to the white corners that levelling uncovered);
         //  - a contract page curling, in the shade, a light patterned cloth along its left edge (as light as the paper
-        //    there): the edge along the paper, not the cloth's pattern (0.10.20 left black blots down the left side)
+        //    there): the edge along the paper, not the cloth's pattern (0.10.20 left black blots down the left side);
+        //  - a contract page held in a hand, wavy, a thumb over its left edge: its lines straight (0.10.21 left them
+        //    wavy, a dense paragraph's lines taken two at a time), no blot where the thumb was;
+        //  - a page photographed sideways, running off the photo's left edge, a table on it: turned upright (0.10.21
+        //    took the table's rules for lines and bent the page into a mess)
         for (int i = 1; i < args.length; i++) realPhoto(new File(args[i]), out);
 
         // 4. a sheet on a white table: nothing apart from it to cut by
@@ -406,8 +410,14 @@ public class DocScanTest {
      * the mean over them of how far their middle strays from its average (std, pixels); how many; and how far apart the
      * left ends of those starting at the margin are (std).
      */
-    /** A phone photo of a sheet: found, cut out A4 (not stretched), its text level, no black frame along its edges. */
+    /**
+     * A phone photo of a sheet: found, cut out A4 (not stretched), the right way up, its text level, its lines straight,
+     * no black frame along its edges (a page photographed sideways comes out lying: its table reaches the photo's
+     * edge, a little of what is past it may stay).
+     */
     static void realPhoto(File f, File out) throws Exception {
+        boolean sideways = f.getName().contains("sideways");
+        double edgeLimit = sideways ? 0.006 : 0.002;
         BufferedImage photo = ImageIO.read(f);
         String name = f.getName().replaceAll("\\.[a-z]+$", "");
         int fw = photo.getWidth(), fh = photo.getHeight();
@@ -427,10 +437,13 @@ public class DocScanTest {
             }
         }
         double ratio = (double) scan.h / scan.w, skew = DocScan.skew(scan.px, scan.w, scan.h);
-        System.out.println(String.format(Locale.ROOT, "  %s: %dx%d (%.3f), text at %.2f°, black in the outer 5%%: %.3f%%", name,
-                scan.w, scan.h, ratio, skew, 100.0 * edge / all));
-        check(Math.abs(ratio - Math.sqrt(2)) < 0.01 && Math.abs(skew) <= 0.3, name + ": A4, not stretched; its text level");
-        check(edge < all / 500, name + ": no black frame along its edges");
+        double[] lines = straightness(scan);
+        System.out.println(String.format(Locale.ROOT, "  %s: %dx%d (%.3f), text at %.2f°, lines bend %.1f px (%d lines), black in the outer 5%%: %.3f%%",
+                name, scan.w, scan.h, ratio, skew, lines[0], (int) lines[1], 100.0 * edge / all));
+        check(Math.abs((sideways ? 1 / ratio : ratio) - Math.sqrt(2)) < 0.01 && Math.abs(skew) <= 0.3,
+                name + ": A4" + (sideways ? " lying (turned upright)" : "") + ", not stretched; its text level");
+        check(lines[1] < 3 || lines[0] < 0.002 * Math.max(scan.w, scan.h), name + ": its lines straight");
+        check(edge < all * edgeLimit, name + ": no black frame along its edges");
     }
 
     static double[] straightness(DocScan.Image im) {

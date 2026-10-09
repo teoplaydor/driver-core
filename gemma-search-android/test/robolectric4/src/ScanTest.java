@@ -30,7 +30,8 @@ import io.github.teoplaydor.semsearch.app.MainActivity;
 /**
  * A document photographed on a table: the viewer offers «Скан для печати» for it (its words are a document's) and not
  * for a dog; the scan cuts the sheet out to its proportions in strict black and white, colour on request, and saves it;
- * «Назад» comes back to the photo. A bent sheet: «Текст ровно» straightens its lines (off, they stay bent).
+ * «Назад» comes back to the photo. A bent sheet: «Текст ровно» straightens its lines (off, they stay bent). A page
+ * photographed sideways: turned upright by itself, «↻» turns it on; the result zooms (a {@code PhotoView}).
  */
 @RunWith(RobolectricTestRunner.class)
 @Config(sdk = 34, qualifiers = "ru-w411dp-h891dp-night-xxhdpi")
@@ -276,6 +277,32 @@ public class ScanTest {
             UiShots.shot(a, "15e-scan-bent-as-cut");
             assertFalse(off, off.contains("строки"));
             assertTrue("the lines straight with it, bent without: " + rowsOn + " vs " + rowsOff, rowsOn > 1.5 * rowsOff);
+            a.onBackPressed();
+            Robo.settle(600);
+            assertNull(Robo.byName(root, "ScanPanel"));
+
+            // the page photographed sideways: upright by itself; «↻» a quarter turn on
+            final Bitmap flat = android.graphics.BitmapFactory.decodeFile(doc.getPath());
+            android.graphics.Matrix m = new android.graphics.Matrix();
+            m.postRotate(90);
+            final Bitmap side = Bitmap.createBitmap(flat, 0, 0, flat.getWidth(), flat.getHeight(), m, true);
+            MainActivity.testLoader = (it, size) -> side.copy(Bitmap.Config.ARGB_8888, true);
+            ((View) Robo.textView(pills(viewer), "Скан для печати").getParent()).performClick();
+            Robo.settle(300);
+            final View panel3 = Robo.byName(root, "ScanPanel");
+            Robo.waitFor("the sideways page", () -> Robo.field(panel3, "result") != null && !(Boolean) Robo.field(panel3, "busy"));
+            Robo.settle(300);
+            final Bitmap upright = (Bitmap) Robo.field(panel3, "result");
+            String turnedNote = status(panel3);
+            System.out.println("sideways: " + turnedNote + " — " + upright.getWidth() + "x" + upright.getHeight());
+            UiShots.shot(a, "15f-scan-sideways");
+            assertTrue(turnedNote, turnedNote.contains("повёрнут на 90°"));
+            assertTrue("upright: the sheet standing", upright.getHeight() > upright.getWidth());
+            assertEquals("the result zooms", "PhotoView", Robo.field(panel3, "picture").getClass().getSimpleName());
+            Robo.textView(panel3, "↻").performClick();
+            Robo.waitFor("a quarter on", () -> !(Boolean) Robo.field(panel3, "busy") && Robo.field(panel3, "result") != upright);
+            Bitmap lying = (Bitmap) Robo.field(panel3, "result");
+            assertTrue("«↻»: lying", lying.getWidth() > lying.getHeight());
             a.onBackPressed();
             Robo.settle(600);
             assertNull(Robo.byName(root, "ScanPanel"));
