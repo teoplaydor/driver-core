@@ -30,7 +30,7 @@ import io.github.teoplaydor.semsearch.app.MainActivity;
 /**
  * A document photographed on a table: the viewer offers «Скан для печати» for it (its words are a document's) and not
  * for a dog; the scan cuts the sheet out to its proportions in strict black and white, colour on request, and saves it;
- * «Назад» comes back to the photo.
+ * «Назад» comes back to the photo. A bent sheet: «Текст ровно» straightens its lines (off, they stay bent).
  */
 @RunWith(RobolectricTestRunner.class)
 @Config(sdk = 34, qualifiers = "ru-w411dp-h891dp-night-xxhdpi")
@@ -64,6 +64,68 @@ public class ScanTest {
             b.compress(Bitmap.CompressFormat.PNG, 100, o);
         }
         return f;
+    }
+
+    /**
+     * A sheet with lines of words lying bent on a dark cloth: bowed — more in its middle than its edges show — its lines
+     * arcs, its sides bulging, the lines closer together towards the bottom (curling away there).
+     */
+    static Bitmap bent() {
+        Bitmap tex = Bitmap.createBitmap(560, 792, Bitmap.Config.ARGB_8888);
+        Canvas t = new Canvas(tex);
+        t.drawColor(Color.rgb(236, 234, 228));
+        Paint p = new Paint();
+        p.setColor(Color.rgb(35, 35, 40));
+        Random r = new Random(5);
+        for (int y = 70; y < 720; y += 24) {
+            int x = 50;
+            while (true) {
+                int w = 10 + r.nextInt(40);
+                if (x + w > 510) {
+                    t.drawRect(x, y, 510, y + 9, p);
+                    break;
+                }
+                t.drawRect(x, y, x + w, y + 9, p);
+                x += w + 8;
+            }
+        }
+        Bitmap b = Bitmap.createBitmap(1200, 900, Bitmap.Config.ARGB_8888);
+        Canvas c = new Canvas(b);
+        c.drawColor(Color.rgb(70, 52, 38));
+        int n = 40;
+        float[] v = new float[(n + 1) * (n + 1) * 2];
+        int i = 0;
+        for (int gy = 0; gy <= n; gy++) {
+            double fv = (double) gy / n;
+            for (int gx = 0; gx <= n; gx++) {
+                double fu = (double) gx / n;
+                double bow = (24 + 16 * fv + 36 * Math.sin(Math.PI * fv)) * Math.sin(Math.PI * fu);
+                double bulge = 14 * Math.sin(Math.PI * fv) * (fu - 0.5) * 2;
+                v[i++] = (float) (340 + 520 * fu + bulge);
+                v[i++] = (float) (80 + 740 * (1.12 * fv - 0.12 * fv * fv) - bow);
+            }
+        }
+        c.drawBitmapMesh(tex, n, n, v, 0, null, 0, new Paint(Paint.FILTER_BITMAP_FLAG | Paint.ANTI_ALIAS_FLAG));
+        return b;
+    }
+
+    /** How sharply the ink falls into rows (straight level lines: high), the sum of squared row counts over the square of all. */
+    static double rows(Bitmap bm) {
+        int w = bm.getWidth(), h = bm.getHeight();
+        int[] px = new int[w * h];
+        bm.getPixels(px, 0, w, 0, 0, w, h);
+        double sum = 0, sq = 0;
+        for (int y = 0; y < h; y++) {
+            int c = 0;
+            for (int x = 0; x < w; x++) if ((px[y * w + x] & 0xFF) < 128) c++;
+            sum += c;
+            sq += (double) c * c;
+        }
+        return sq / (sum * sum) * h;
+    }
+
+    static String status(View panel) throws Exception {
+        return String.valueOf(((TextView) Robo.field(panel, "status")).getText());
     }
 
     static View pills(View viewer) throws Exception {
@@ -188,6 +250,38 @@ public class ScanTest {
         Robo.settle(600);
         assertNull(Robo.byName(root, "ScanPanel"));
         assertNotNull("the viewer under it", Robo.byName(root, "Viewer"));
+
+        // a bent sheet: flattened between its edges, its lines straightened by «Текст ровно»; off, they stay bent
+        final Bitmap bentPhoto = bent();
+        try {
+            MainActivity.testLoader = (it, size) -> bentPhoto.copy(Bitmap.Config.ARGB_8888, true);
+            ((View) Robo.textView(pills(viewer), "Скан для печати").getParent()).performClick();
+            Robo.settle(300);
+            final View panel2 = Robo.byName(root, "ScanPanel");
+            Robo.waitFor("the bent sheet", () -> Robo.field(panel2, "result") != null && !(Boolean) Robo.field(panel2, "busy"));
+            Robo.settle(300);
+            final Bitmap straight = (Bitmap) Robo.field(panel2, "result");
+            String on = status(panel2);
+            double rowsOn = rows(straight); // (the bitmap is let go once replaced)
+            System.out.println("bent, «Текст ровно»: " + on + " — rows " + rowsOn);
+            UiShots.shot(a, "15d-scan-bent");
+            assertTrue(on, on.startsWith("Лист вырезан и выпрямлен") && on.contains("строки выпрямлены")
+                    && on.contains("интервалы между строками выровнены"));
+            Robo.textView(panel2, "Текст ровно").performClick();
+            Robo.waitFor("as cut", () -> !(Boolean) Robo.field(panel2, "busy") && Robo.field(panel2, "result") != straight);
+            Bitmap asCut = (Bitmap) Robo.field(panel2, "result");
+            String off = status(panel2);
+            double rowsOff = rows(asCut);
+            System.out.println("bent, as cut: " + off + " — rows " + rowsOff);
+            UiShots.shot(a, "15e-scan-bent-as-cut");
+            assertFalse(off, off.contains("строки"));
+            assertTrue("the lines straight with it, bent without: " + rowsOn + " vs " + rowsOff, rowsOn > 1.5 * rowsOff);
+            a.onBackPressed();
+            Robo.settle(600);
+            assertNull(Robo.byName(root, "ScanPanel"));
+        } finally {
+            MainActivity.testLoader = null;
+        }
         a.onBackPressed();
         Robo.settle(600);
         a.finish();

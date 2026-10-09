@@ -5,7 +5,8 @@
 #   HiddenTest      — hiding 18+: gallery, search, albums, the hidden folder, hiding and showing by hand
 #   PeopleAppTest   — faces looked for after indexing, people named and corrected, the unnamed, pets by examples
 #   NavTest         — «Назад» in the order things were opened: viewer, search, albums, settings
-#   ScanTest        — a document photo offered as a scan for printing: the sheet cut out, black and white, saved
+#   ScanTest        — a document photo offered as a scan for printing: the sheet cut out, black and white, saved;
+#                     a bent sheet flattened, its lines straightened by «Текст ровно»
 #   AppIndexingTest — MediaStore → decode → embed → SQLite with a stand-in model, Russian bridge
 #   IndexStopTest   — a broken model (the same error file after file, the NPU process gone) stops the run, files unmarked
 #   AutoIndexTest   — background jobs: content triggers on MediaStore, the periodic safety net

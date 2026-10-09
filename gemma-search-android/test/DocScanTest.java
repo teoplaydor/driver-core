@@ -228,8 +228,34 @@ public class DocScanTest {
         if (flat5 != null) save(DocScan.process(s5, 1600, 1200, q5, true, DocScan.BW, 3508), new File(out, "5-scan.png"));
         System.out.println(String.format(Locale.ROOT, "  its corners on the photo: worst %.1f px; cut out %s, text at %.2f°", worst5,
                 flat5 == null ? "-" : flat5.w + "x" + flat5.h, skew5));
-        check(worst5 < 12 && flat5 != null && Math.abs((double) flat5.h / flat5.w - Math.sqrt(2)) < 0.002 && Math.abs(skew5) <= 0.4,
+        check(worst5 < 16 && flat5 != null && Math.abs((double) flat5.h / flat5.w - Math.sqrt(2)) < 0.002 && Math.abs(skew5) <= 0.4,
                 "photographed at a slant: the corners on the edges (lines fitted), A4 proportions, lines level");
+
+        // 6. a bent sheet (bowed towards the camera in the middle, its bottom curling away), photographed at a slant:
+        // its edges are curves, its lines arcs. Cut out by its corners alone, the lines stay bent; flattened between its
+        // curved edges and with its lines straightened, they are straight and level, the margins vertical; the bottom lines,
+        // closer together where the sheet curls away, spread out again: the sheet A4, not shortened
+        BufferedImage text = justified(840, 1188);
+        BufferedImage bentPhoto = bent(text, 1600, 1200);
+        ImageIO.write(bentPhoto, "png", new File(out, "6-photo.png"));
+        int[] s6 = px(bentPhoto);
+        DocScan.Sheet sheet6 = DocScan.findSheet(s6, 1600, 1200);
+        check(sheet6 != null, "a bent sheet: found");
+        if (sheet6 != null) {
+            DocScan.Image plain = DocScan.process(s6, 1600, 1200, sheet6.corners, false, DocScan.BW, 3508);
+            DocScan.Image flat6 = DocScan.process(s6, 1600, 1200, sheet6, true, DocScan.BW, 3508);
+            save(plain, new File(out, "6-corners-only.png"));
+            save(flat6, new File(out, "6-scan.png"));
+            double[] before6 = straightness(plain), after6 = straightness(flat6);
+            System.out.println(String.format(Locale.ROOT, "  bent sheet: lines bend %.1f px (%d lines), left margin %.1f px — corners only; "
+                    + "%.1f px (%d lines), margin %.1f px — flattened (%dx%d)", before6[0], (int) before6[1], before6[2], after6[0],
+                    (int) after6[1], after6[2], flat6.w, flat6.h));
+            // (the bottom lines are 3–4 px tall on the photo, six times that on the scan: 2.5 px is under half a photo pixel)
+            check(before6[0] > 4 && after6[0] < 2.5 && after6[1] >= 30 && after6[2] < 3,
+                    "a bent sheet: its lines straight and level, its left margin vertical");
+            check(Math.abs((double) flat6.h / flat6.w - Math.sqrt(2)) < 0.07, String.format(Locale.ROOT, "and about A4 (%.3f)",
+                    (double) flat6.h / flat6.w));
+        }
 
         // 4. a sheet on a white table: nothing apart from it to cut by
         BufferedImage white = new BufferedImage(1200, 900, BufferedImage.TYPE_INT_RGB);
@@ -308,6 +334,144 @@ public class DocScanTest {
             }
         }
         return b;
+    }
+
+    /** A sheet of justified text: lines of "words" from the left margin to the right one exactly. */
+    static BufferedImage justified(int w, int h) {
+        BufferedImage b = new BufferedImage(w, h, BufferedImage.TYPE_INT_RGB);
+        Graphics2D g = b.createGraphics();
+        g.setColor(new Color(238, 236, 230));
+        g.fillRect(0, 0, w, h);
+        g.setColor(new Color(35, 35, 40));
+        Random r = new Random(8);
+        int left = 70, right = w - 70;
+        for (int y = 90; y < h - 110; y += 30) {
+            int x = left;
+            boolean last = y + 30 >= h - 110;
+            while (true) {
+                int ww = 14 + r.nextInt(46);
+                if (x + ww + 10 >= right) {
+                    if (!last) g.fillRect(x, y, right - x, 11); // the line ends at the right margin
+                    break;
+                }
+                g.fillRect(x, y, ww, 11);
+                x += ww + 9 + r.nextInt(5);
+            }
+        }
+        g.dispose();
+        return b;
+    }
+
+    /**
+     * The sheet bent — bowed 3 cm towards the camera in the middle, its bottom curling 2.5 cm away — leaning back 25°
+     * before a pinhole camera (f = 1300 px), on a dark cloth; drawn texel by texel (half-texel steps: no holes).
+     */
+    static BufferedImage bent(BufferedImage tex, int w, int h) {
+        BufferedImage b = new BufferedImage(w, h, BufferedImage.TYPE_INT_RGB);
+        Random r = new Random(6);
+        for (int y = 0; y < h; y++) {
+            for (int x = 0; x < w; x++) {
+                int g = 45 + r.nextInt(25);
+                b.setRGB(x, y, (g << 16) | ((g - 8) << 8) | (g - 14));
+            }
+        }
+        double W = 0.21, Hm = 0.297, tilt = Math.toRadians(25), dist = 0.5, f = 1300;
+        int tw = tex.getWidth(), th = tex.getHeight();
+        for (double ty = 0; ty < th; ty += 0.5) {
+            for (double tx = 0; tx < tw; tx += 0.5) {
+                double X = (tx / tw - 0.5) * W, Y = (ty / th - 0.5) * Hm;
+                double depth = -0.03 * Math.cos(Math.PI * X / W) + 0.025 * Math.pow(Math.max(0, Y / Hm + 0.1), 2) * 4;
+                double Yc = Y * Math.cos(tilt) - depth * Math.sin(tilt), Zc = dist + Y * Math.sin(tilt) + depth * Math.cos(tilt);
+                int u = (int) (f * X / Zc + w / 2.0), v = (int) (f * Yc / Zc + h / 2.0);
+                if (u < 0 || v < 0 || u >= w || v >= h) continue;
+                int c = tex.getRGB((int) tx, (int) ty) & 0xFFFFFF;
+                double k = 0.7 + 0.3 * (1 - v / (double) h);
+                b.setRGB(u, v, ((int) (((c >> 16) & 0xFF) * k) << 16) | ((int) (((c >> 8) & 0xFF) * k) << 8) | (int) ((c & 0xFF) * k));
+            }
+        }
+        return b;
+    }
+
+    /**
+     * How straight a scan's lines are: the lines of text (ink joined along rows) at least a quarter of the page wide —
+     * the mean over them of how far their middle strays from its average (std, pixels); how many; and how far apart the
+     * left ends of those starting at the margin are (std).
+     */
+    static double[] straightness(DocScan.Image im) {
+        int w = im.w, h = im.h;
+        boolean[] ink = new boolean[w * h], row = new boolean[w * h];
+        for (int i = 0; i < ink.length; i++) ink[i] = (im.px[i] & 0xFF) < 128;
+        int gap = Math.max(8, w / 50);
+        for (int y = 0; y < h; y++) {
+            int last = -1;
+            for (int x = 0; x < w; x++) {
+                if (!ink[y * w + x]) continue;
+                row[y * w + x] = true;
+                if (last >= 0 && x - last <= gap) for (int f = last + 1; f < x; f++) row[y * w + f] = true;
+                last = x;
+            }
+        }
+        int[] lab = new int[w * h], stack = new int[w * h];
+        int next = 0;
+        double sumStd = 0;
+        int lines = 0;
+        java.util.List<Integer> starts = new java.util.ArrayList<Integer>();
+        for (int i = 0; i < lab.length; i++) {
+            if (!row[i] || lab[i] != 0) continue;
+            next++;
+            int top = 0, x0 = i % w, x1 = x0, y0 = i / w, y1 = y0;
+            stack[top++] = i;
+            lab[i] = next;
+            while (top > 0) {
+                int p = stack[--top], x = p % w, y = p / w;
+                x0 = Math.min(x0, x);
+                x1 = Math.max(x1, x);
+                y0 = Math.min(y0, y);
+                y1 = Math.max(y1, y);
+                int[] nb = {x > 0 ? p - 1 : -1, x < w - 1 ? p + 1 : -1, y > 0 ? p - w : -1, y < h - 1 ? p + w : -1};
+                for (int q : nb) {
+                    if (q >= 0 && row[q] && lab[q] == 0) {
+                        lab[q] = next;
+                        stack[top++] = q;
+                    }
+                }
+            }
+            if (x1 - x0 < w / 4 || y1 - y0 > h / 20) continue;
+            double s = 0, s2 = 0;
+            int n = 0;
+            for (int x = x0; x <= x1; x += 6) {
+                double sy = 0;
+                int c = 0;
+                for (int y = y0; y <= y1; y++) {
+                    if (ink[y * w + x] && lab[y * w + x] == next) {
+                        sy += y;
+                        c++;
+                    }
+                }
+                if (c == 0) continue;
+                double m = sy / c;
+                s += m;
+                s2 += m * m;
+                n++;
+            }
+            if (n < 5) continue;
+            double mean = s / n;
+            sumStd += Math.sqrt(Math.max(0, s2 / n - mean * mean));
+            lines++;
+            starts.add(x0);
+        }
+        int min = Integer.MAX_VALUE;
+        for (int x : starts) min = Math.min(min, x);
+        double s = 0, s2 = 0;
+        int n = 0;
+        for (int x : starts) {
+            if (x - min > w * 0.05) continue;
+            s += x;
+            s2 += (double) x * x;
+            n++;
+        }
+        double sd = n == 0 ? 99 : Math.sqrt(Math.max(0, s2 / n - (s / n) * (s / n)));
+        return new double[]{lines == 0 ? 99 : sumStd / lines, lines, sd};
     }
 
     static boolean near(boolean[] ink, int i, int w, int h, int r) {

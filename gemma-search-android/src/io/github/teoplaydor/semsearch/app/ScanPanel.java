@@ -76,6 +76,9 @@ final class ScanPanel extends FrameLayout {
     private int[] src;
     private int sw, sh;
     private float[] page;
+    /** The sheet found, its edges as curves (a bent sheet is flattened between them); null once set by hand. */
+    private DocScan.Sheet sheet;
+    private DocScan.Straight straight;
     private boolean usePage = true, level = true;
     private int mode = DocScan.BW;
     private DocScan.Image cut, levelled;
@@ -286,7 +289,8 @@ final class ScanPanel extends FrameLayout {
                     b.getPixels(px, 0, sw, 0, 0, sw, sh);
                     b.recycle();
                     src = px;
-                    page = DocScan.findPage(src, sw, sh);
+                    sheet = DocScan.findSheet(src, sw, sh);
+                    page = sheet == null ? null : sheet.corners;
                     usePage = page != null;
                     make();
                 } catch (final Throwable e) {
@@ -330,16 +334,23 @@ final class ScanPanel extends FrameLayout {
         long t0 = System.currentTimeMillis();
         boolean withPage = usePage && page != null;
         if (cut == null || cutWithPage != withPage) {
-            cut = withPage ? DocScan.warp(src, sw, sh, page, MAX_SIDE) : DocScan.fit(src, sw, sh, MAX_SIDE);
+            // a bent sheet flattened between its curved edges; corners set by hand: by them alone
+            cut = !withPage ? DocScan.fit(src, sw, sh, MAX_SIDE) : sheet != null ? DocScan.dewarp(src, sw, sh, sheet, MAX_SIDE)
+                    : DocScan.warp(src, sw, sh, page, MAX_SIDE);
             cutWithPage = withPage;
             levelled = null;
         }
         if (levelled == null || levelledOn != level) {
+            levelled = null;
             if (level) {
+                // the text turned level as a whole, then each line straightened, the margins stood upright, the lines
+                // spaced evenly
                 angle = DocScan.skew(cut.px, cut.w, cut.h);
-                levelled = DocScan.rotate(cut, angle);
+                straight = DocScan.straighten(DocScan.rotate(cut, angle));
+                levelled = straight.image;
             } else {
                 angle = 0;
+                straight = null;
                 levelled = cut;
             }
             levelledOn = level;
@@ -348,7 +359,7 @@ final class ScanPanel extends FrameLayout {
         final Bitmap bmp = Bitmap.createBitmap(out, levelled.w, levelled.h, Bitmap.Config.ARGB_8888);
         final String note = (withPage ? (manual ? "Края заданы вручную" : "Лист вырезан и выпрямлен")
                 : page == null ? "Лист не найден — всё фото, «Края…» — задать углы" : "Всё фото")
-                + (level ? (angle != 0 ? String.format(Locale.ROOT, ", текст повёрнут на %.1f°", -angle) : ", текст ровный") : "")
+                + (level ? levelNote() : "")
                 + " · " + levelled.w + "×" + levelled.h + " · " + (System.currentTimeMillis() - t0) + " мс";
         ui.post(new Runnable() {
             @Override
@@ -362,6 +373,19 @@ final class ScanPanel extends FrameLayout {
                 updateChips();
             }
         });
+    }
+
+    /** What «Текст ровно» did, for the status line. */
+    private String levelNote() {
+        StringBuilder b = new StringBuilder();
+        DocScan.Straight st = straight;
+        boolean bent = st != null && st.lines >= 3 && st.bend >= 2;
+        // the turn is part of straightening bent lines; told on its own when that is all there was
+        if (angle != 0 && !bent) b.append(String.format(Locale.ROOT, ", текст повёрнут на %.1f°", -angle));
+        if (bent) b.append(String.format(Locale.ROOT, ", строки выпрямлены: %d (изгиб до %d пикс.)", st.lines, Math.round(st.bend)));
+        if (st != null && st.margins) b.append(", поля выровнены");
+        if (st != null && st.spread > 1.01) b.append(", интервалы между строками выровнены");
+        return b.length() == 0 ? ", текст уже ровный" : b.toString();
     }
 
     /** What the result was made with: a saved file is used again only for the same. */
@@ -558,6 +582,7 @@ final class ScanPanel extends FrameLayout {
         editBar.setVisibility(GONE);
         if (apply) {
             page = editor.corners();
+            sheet = null;
             manual = true;
             usePage = true;
             cut = null;
