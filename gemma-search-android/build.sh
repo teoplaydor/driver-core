@@ -8,8 +8,8 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 ORT_VERSION=1.30.0
-VERSION_CODE=53
-VERSION_NAME=0.10.28
+VERSION_CODE=54
+VERSION_NAME=0.11.0
 ANDROID_JAR=${ANDROID_JAR:-/usr/lib/android-sdk/platforms/android-23/android.jar}
 AAPT2=${AAPT2:-$(ls /usr/lib/android-sdk/build-tools/*/aapt2 2>/dev/null | head -1)}
 DX=${DX:-dalvik-exchange}
@@ -81,8 +81,11 @@ fi
 # --- Java -> dex (no lambdas / indy string concat so legacy dx can handle it).
 # java.* comes from the JDK's Java 8 API (minSdk 26 has it, e.g. java.util.Optional used by ORT);
 # android.* from the platform jar.
+# A few newer framework classes (quick settings tiles) come from compile-only stubs: not dexed, the phone has them.
+rm -rf "$B/stubs" && mkdir -p "$B/stubs"
+javac --release 8 -nowarn -encoding UTF-8 -cp "$ANDROID_JAR" -d "$B/stubs" $(find stubs -name '*.java')
 javac --release 8 -XDstringConcat=inline -nowarn -encoding UTF-8 \
-  -cp "$ANDROID_JAR:$B/deps/ort-classes" -d "$B/classes" \
+  -cp "$ANDROID_JAR:$B/stubs:$B/deps/ort-classes" -d "$B/classes" \
   $(find src "$B/gen" -name '*.java')
 "$DX" --dex --min-sdk-version=26 --output="$B/apk/classes.dex" "$B/classes" "$B/deps/ort-classes"
 

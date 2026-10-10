@@ -11,6 +11,18 @@
         <item name="android:navigationBarColor">#0E1116</item>
         <item name="android:windowBackground">@color/bg</item>
     </style>
+    <!-- The quick note: a card over whatever is on the screen. -->
+    <style name="QuickTheme" parent="android:Theme.Material.NoActionBar">
+        <item name="android:windowIsTranslucent">true</item>
+        <item name="android:windowBackground">@android:color/transparent</item>
+        <item name="android:windowAnimationStyle">@null</item>
+        <item name="android:windowDrawsSystemBarBackgrounds">true</item>
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+        <item name="android:colorAccent">#8DA6C0</item>
+        <item name="android:colorControlActivated">#8DA6C0</item>
+        <item name="android:textColorHighlight">#3A4858</item>
+    </style>
     <color name="bg">#0E1116</color>
     <color name="icon_bg">#18202A</color>
 </resources>

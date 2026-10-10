@@ -41,6 +41,8 @@ final class SettingsPanel extends FrameLayout implements Engine.Listener {
     private ProgressLine facesProgress;
     private View batteryRow;
     private TextView unrestrictedValue;
+    private TextView assistantValue;
+    private Toggle voiceIconToggle;
 
     SettingsPanel(MainActivity activity) {
         super(activity);
@@ -80,6 +82,7 @@ final class SettingsPanel extends FrameLayout implements Engine.Listener {
         column.addView(sv, new LinearLayout.LayoutParams(-1, 0, 1));
 
         buildModel();
+        buildQuick();
         buildIndex();
         buildSoundAndFiles();
         buildSpeed();
@@ -827,6 +830,75 @@ final class SettingsPanel extends FrameLayout implements Engine.Listener {
     private double soundMb;
 
     /** Documents from the folders given, and sound (EmbeddingGemma's audio part, downloaded on request). */
+    private void buildQuick() {
+        final Context c = getContext();
+        LinearLayout card = section("Быстрые заметки");
+        TextView how = Ui.text(c, "Скажите, например: «напомни завтра в 9 позвонить маме», «каждый понедельник в 10 планёрка», "
+                + "«купить молоко, хлеб и сыр» — заметка сохранится сразу, с напоминанием или списком. «Найди…» откроет поиск.",
+                13, Ui.TEXT2, Ui.REGULAR);
+        how.setPadding(Ui.dp(c, 18), Ui.dp(c, 12), Ui.dp(c, 18), Ui.dp(c, 4));
+        card.addView(how);
+        action(card, "Попробовать", true, new Runnable() {
+            @Override
+            public void run() {
+                a.startActivity(QuickNotes.intent(c, false));
+            }
+        });
+        assistantValue = row(card, "Удержание кнопки питания", "сделайте приложение «цифровым помощником» — удержание "
+                + "питания (или «Домой») откроет заметку голосом", new Runnable() {
+            @Override
+            public void run() {
+                QuickNotes.openAssistantSettings(a);
+            }
+        });
+        voiceIconToggle = new Toggle(c, QuickNotes.iconShown(c));
+        voiceIconToggle.setListener(new Toggle.Listener() {
+            @Override
+            public void changed(boolean on) {
+                QuickNotes.showIcon(c, on);
+                if (on) a.toast("Значок «Голосовая заметка» появится в списке приложений");
+            }
+        });
+        toggleRow(card, "Значок «Голосовая заметка»", "его можно повесить на жест: Samsung — «Боковая клавиша → Двойное "
+                + "нажатие → Открыть приложение», Pixel — Quick Tap (двойное касание задней панели), другие — быстрый запуск "
+                + "и жесты в настройках", voiceIconToggle);
+        row(card, "Плитка в шторке", "«Заметка голосом» в быстрых настройках — и на заблокированном экране", new Runnable() {
+            @Override
+            public void run() {
+                if (!QuickNotes.askForTile(a, new Runnable() {
+                    @Override
+                    public void run() {
+                        a.toast("Плитка «Заметка голосом» в шторке");
+                    }
+                })) {
+                    a.toast("Опустите шторку, нажмите на карандаш и перетащите плитку «Заметка голосом»");
+                }
+            }
+        });
+        row(card, "Виджет на главный экран", "«Сказать заметку» в одно касание", new Runnable() {
+            @Override
+            public void run() {
+                if (!QuickNotes.askForWidget(c)) a.toast("Долгое нажатие на главном экране → «Виджеты» → «Смысловой поиск»");
+            }
+        });
+    }
+
+    private void showQuick() {
+        if (assistantValue == null) return;
+        Boolean on = QuickNotes.isAssistant(getContext());
+        assistantValue.setText(Boolean.TRUE.equals(on) ? "включено" : "настроить");
+        assistantValue.setTextColor(Boolean.TRUE.equals(on) ? Ui.TEXT2 : Ui.ACCENT);
+        boolean icon = QuickNotes.iconShown(getContext());
+        if (voiceIconToggle.isOn() != icon) voiceIconToggle.setOn(icon, false);
+    }
+
+    @Override
+    public void onWindowFocusChanged(boolean focus) {
+        super.onWindowFocusChanged(focus);
+        // back from the phone's settings: the assistant may be chosen now
+        if (focus) showQuick();
+    }
+
     private void buildSoundAndFiles() {
         Context c = getContext();
         LinearLayout card = section("Документы и звук");
@@ -1065,6 +1137,7 @@ final class SettingsPanel extends FrameLayout implements Engine.Listener {
 
     @Override
     public void onEngineChanged() {
+        showQuick();
         Engine.State st = e.state;
         boolean busy = st == Engine.State.DOWNLOADING || st == Engine.State.LOADING;
         String mv;

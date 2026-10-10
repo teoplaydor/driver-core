@@ -55,6 +55,8 @@ public final class MainActivity extends Activity implements Engine.Listener, Vie
     /** A new note (the app icon's shortcut; with EXTRA_VOICE dictated at once), a note shown (its reminder tapped). */
     static final String ACTION_NEW_NOTE = "io.github.teoplaydor.semsearch.NEW_NOTE",
             ACTION_OPEN_NOTE = "io.github.teoplaydor.semsearch.OPEN_NOTE", EXTRA_VOICE = "voice";
+    /** A note opened in its editor (with ACTION_OPEN_NOTE); a search asked for by voice (the quick note's «найди…»). */
+    static final String EXTRA_EDIT = "edit", ACTION_SEARCH = "io.github.teoplaydor.semsearch.SEARCH", EXTRA_QUERY = "query";
     private static final int RECENT_LIMIT = 3000;
 
     /** Test hook: thumbnails for items that have no MediaStore entry (screenshots on Robolectric). */
@@ -86,6 +88,7 @@ public final class MainActivity extends Activity implements Engine.Listener, Vie
     private Engine.Callback<String> dictated;
     /** A note to show once the index is there (a reminder tapped while the app was starting). */
     private long noteToOpen = -1;
+    private boolean noteToEdit;
     private Sheet sheet;
     /** The accelerator check's progress sheet while it is open, and since when the person waits for a check. */
     private Sheet benchSheet;
@@ -277,7 +280,27 @@ public final class MainActivity extends Activity implements Engine.Listener, Vie
             setIntent(new Intent());
             if (noteEditor != null) noteEditor.done();
             noteToOpen = intent.getLongExtra(Reminders.EXTRA_NOTE, -1);
+            noteToEdit = intent.getBooleanExtra(EXTRA_EDIT, false);
             openPendingNote();
+            return;
+        }
+        if (ACTION_SEARCH.equals(intent.getAction())) {
+            String q = intent.getStringExtra(EXTRA_QUERY);
+            if (q == null || q.trim().isEmpty()) return;
+            if (!engine.ready()) {
+                if (pendingShare == null) toast(engine.hasModelFiles() ? "Модель ещё загружается — поиск начнётся сам" : "Сначала скачайте модель");
+                pendingShare = intent;
+                return;
+            }
+            setIntent(new Intent());
+            if (noteEditor != null) noteEditor.done();
+            // asked by voice: among everything, whatever the filter was
+            if (filter != F_ALL) {
+                filter = F_ALL;
+                rail.select(F_ALL, false);
+                rail.showNewNote(false);
+            }
+            searchFor(q.trim());
             return;
         }
         // text shared «В заметки» (the share target named so): a new note with it
@@ -2004,6 +2027,11 @@ public final class MainActivity extends Activity implements Engine.Listener, Vie
         noteToOpen = -1;
         if (it == null) {
             toast("Этой заметки уже нет");
+            return;
+        }
+        if (noteToEdit) {
+            noteToEdit = false;
+            openNoteEditor(it, null, null);
             return;
         }
         if (viewer != null) viewer.close();

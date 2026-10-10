@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- The app icon's long-press menu: a new note, a note dictated at once. -->
+<!-- The app icon's long-press menu: a new note, a quick note by voice. -->
 <shortcuts xmlns:android="http://schemas.android.com/apk/res/android">
     <shortcut
         android:enabled="true"
@@ -19,12 +19,8 @@
         android:shortcutLongLabel="@string/shortcut_voice_long"
         android:shortcutShortLabel="@string/shortcut_voice">
         <intent
-            android:action="io.github.teoplaydor.semsearch.NEW_NOTE"
-            android:targetClass="io.github.teoplaydor.semsearch.app.MainActivity"
-            android:targetPackage="io.github.teoplaydor.semsearch">
-            <extra
-                android:name="voice"
-                android:value="true" />
-        </intent>
+            android:action="io.github.teoplaydor.semsearch.QUICK_NOTE"
+            android:targetClass="io.github.teoplaydor.semsearch.app.QuickNoteActivity"
+            android:targetPackage="io.github.teoplaydor.semsearch" />
     </shortcut>
 </shortcuts>

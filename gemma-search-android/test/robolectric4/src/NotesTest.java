@@ -265,6 +265,22 @@ public class NotesTest {
         a.onBackPressed();
         Robo.settle(600);
 
+        // from the quick note: «Изменить» opens the note in its editor; «найди…» searches
+        Robo.call(a, "onNewIntent", new Intent("io.github.teoplaydor.semsearch.OPEN_NOTE").putExtra("note_id", code.id).putExtra("edit", true));
+        Robo.settle(500);
+        assertNotNull("the editor", editor(a));
+        assertTrue(text(a).getText().toString().startsWith("Код домофона"));
+        a.onBackPressed();
+        Robo.settle(500);
+        Robo.call(a, "onNewIntent", new Intent("io.github.teoplaydor.semsearch.SEARCH").putExtra("query", "47к1290"));
+        Robo.waitFor("searched by voice", () -> {
+            List<IndexStore.Item> g = ScanTest.grid(a);
+            return !g.isEmpty() && g.get(0) == code;
+        });
+        assertEquals("47к1290", ((EditText) Robo.field(a, "query")).getText().toString());
+        a.onBackPressed();
+        Robo.settle(500);
+
         // emptied: deleted
         Robo.call(a, "openNoteEditor", toPhoto, null, null);
         Robo.settle(400);

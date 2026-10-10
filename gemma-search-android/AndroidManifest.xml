@@ -22,6 +22,18 @@
         android:name="android.permission.SCHEDULE_EXACT_ALARM"
         android:maxSdkVersion="32" />
     <uses-permission android:name="android.permission.USE_EXACT_ALARM" />
+    <!-- quick notes by voice: the phone's speech recognizer listens for the app -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+
+    <queries>
+        <!-- the phone's speech recognizer (Android 11+ hides other apps' services unless named here) -->
+        <intent>
+            <action android:name="android.speech.RecognitionService" />
+        </intent>
+        <intent>
+            <action android:name="android.speech.action.RECOGNIZE_SPEECH" />
+        </intent>
+    </queries>
 
     <application
         android:allowBackup="false"
@@ -73,6 +85,64 @@
                 <data android:mimeType="text/plain" />
             </intent-filter>
         </activity-alias>
+        <!--
+          A note by voice over whatever is on the screen: holding the power (or home) button once the app is the phone's
+          assistant, the «Голосовая заметка» icon (a side key's double press, Quick Tap), the tile, the widget, the
+          icon's shortcut
+        -->
+        <activity
+            android:name=".app.QuickNoteActivity"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden"
+            android:excludeFromRecents="true"
+            android:exported="true"
+            android:label="@string/voice_note_label"
+            android:launchMode="singleInstance"
+            android:taskAffinity="io.github.teoplaydor.semsearch.quick"
+            android:theme="@style/QuickTheme"
+            android:windowSoftInputMode="adjustResize|stateHidden">
+            <intent-filter>
+                <action android:name="android.intent.action.ASSIST" />
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
+            <intent-filter>
+                <action android:name="io.github.teoplaydor.semsearch.QUICK_NOTE" />
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
+        </activity>
+        <!-- its own icon in the app list (off until turned on in the settings): phones open «an app» on a gesture -->
+        <activity-alias
+            android:name=".app.VoiceNote"
+            android:enabled="false"
+            android:exported="true"
+            android:icon="@mipmap/ic_voice_note"
+            android:label="@string/voice_note_label"
+            android:targetActivity=".app.QuickNoteActivity">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity-alias>
+        <service
+            android:name=".app.QuickTile"
+            android:exported="true"
+            android:icon="@drawable/ic_tile_mic"
+            android:label="@string/tile_label"
+            android:permission="android.permission.BIND_QUICK_SETTINGS_TILE">
+            <intent-filter>
+                <action android:name="android.service.quicksettings.action.QS_TILE" />
+            </intent-filter>
+        </service>
+        <receiver
+            android:name=".app.QuickWidget"
+            android:exported="true"
+            android:label="@string/tile_label">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+            </intent-filter>
+            <meta-data
+                android:name="android.appwidget.provider"
+                android:resource="@xml/widget_quick_info" />
+        </receiver>
         <!-- the vision encoder on the Snapdragon NPU: its own ONNX Runtime build (QNN), its own process -->
         <service
             android:name=".app.NpuService"

@@ -7,4 +7,9 @@
     <string name="shortcut_note_long">Новая заметка</string>
     <string name="shortcut_voice">Голосом</string>
     <string name="shortcut_voice_long">Заметка голосом</string>
+    <string name="voice_note_label">Голосовая заметка</string>
+    <string name="tile_label">Заметка голосом</string>
+    <string name="widget_voice">Сказать заметку</string>
+    <string name="widget_type">Напечатать заметку</string>
+    <string name="widget_description">Заметка голосом в одно касание: «завтра в 9 позвонить маме» — и напоминание стоит</string>
 </resources>

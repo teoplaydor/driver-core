@@ -257,16 +257,31 @@ final class NoteEditor extends FrameLayout {
         if (remind > 0) remindLine.setText("Напомнит " + when(remind) + (repeat != Spoken.ONCE ? ", " + Spoken.repeatLabel(repeat) : ""));
     }
 
-    /** «12 октября, 9:00» (today and tomorrow by name). */
+    private static final String[] ON_DAY = {"в воскресенье", "в понедельник", "во вторник", "в среду", "в четверг", "в пятницу",
+            "в субботу"};
+
+    /** «сегодня в 9:00», «завтра в 9:00», «в пятницу в 18:30» (this week), «12 октября в 9:00», «3 марта 2027 г. в 9:00». */
     static String when(long at) {
         java.util.Calendar now = java.util.Calendar.getInstance(), t = java.util.Calendar.getInstance();
         t.setTimeInMillis(at);
         String time = DateFormat.getTimeInstance(DateFormat.SHORT).format(new Date(at));
-        int days = (t.get(java.util.Calendar.YEAR) - now.get(java.util.Calendar.YEAR)) * 366
-                + t.get(java.util.Calendar.DAY_OF_YEAR) - now.get(java.util.Calendar.DAY_OF_YEAR);
+        java.util.Calendar day0 = (java.util.Calendar) now.clone(), day1 = (java.util.Calendar) t.clone();
+        for (java.util.Calendar d : new java.util.Calendar[]{day0, day1}) {
+            d.set(java.util.Calendar.HOUR_OF_DAY, 12);
+            d.set(java.util.Calendar.MINUTE, 0);
+            d.set(java.util.Calendar.SECOND, 0);
+            d.set(java.util.Calendar.MILLISECOND, 0);
+        }
+        long days = Math.round((day1.getTimeInMillis() - day0.getTimeInMillis()) / 86_400_000.0);
         if (days == 0) return "сегодня в " + time;
         if (days == 1) return "завтра в " + time;
-        return DateFormat.getDateInstance(DateFormat.LONG).format(new Date(at)) + ", " + time;
+        if (days == 2) return "послезавтра в " + time;
+        if (days > 2 && days < 7) return ON_DAY[t.get(java.util.Calendar.DAY_OF_WEEK) - 1] + " в " + time;
+        boolean ru = "ru".equals(java.util.Locale.getDefault().getLanguage());
+        if (!ru) return DateFormat.getDateInstance(DateFormat.LONG).format(new Date(at)) + ", " + time;
+        String date = new java.text.SimpleDateFormat(t.get(java.util.Calendar.YEAR) == now.get(java.util.Calendar.YEAR)
+                ? "d MMMM" : "d MMMM yyyy 'г.'", java.util.Locale.getDefault()).format(new Date(at));
+        return date + " в " + time;
     }
 
     private void chooseReminder() {
