@@ -471,6 +471,8 @@ public final class Spoken {
                 // a time alone: today, or tomorrow when it has passed (an hour without «утра» may mean the evening)
                 if (c.getTimeInMillis() <= now && hour >= 0 && !am && !pm && !night && !partOfDay && h < 12 && repeat == ONCE) {
                     c.add(Calendar.HOUR_OF_DAY, 12);
+                    // the evening's passed too: tomorrow morning's comes first
+                    if (c.getTimeInMillis() <= now) c.add(Calendar.HOUR_OF_DAY, -12);
                 }
                 if (c.getTimeInMillis() <= now && hour < 0 && repeat == ONCE && relativeMs < 0) {
                     c.setTimeInMillis(now + 3_600_000L); // «сегодня» late: in an hour

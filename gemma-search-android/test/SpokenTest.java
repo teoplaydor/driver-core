@@ -112,6 +112,12 @@ public class SpokenTest {
         boolean asks = want.wantsReminder && want.remindAt == 0 && want.text.equals("Позвонить в банк");
         if (!asks) bad++;
         System.out.println((asks ? "ok   " : "FAIL ") + "«напомни» without a time: the time is to be asked");
+        // late in the evening: «в 8» — tomorrow morning, not tomorrow evening
+        long late = NOW + (7 * 60 + 30) * 60_000L; // 22:50
+        Spoken.Result kids = Spoken.parse("в 8 разбудить детей", late, TZ);
+        boolean morning = kids.text.equals("Разбудить детей") && fmt(kids.remindAt).startsWith("2026-10-15 08:00");
+        if (!morning) bad++;
+        System.out.println((morning ? "ok   " : "FAIL ") + "«в 8 разбудить детей» at 22:50 → " + fmt(kids.remindAt));
         // a search
         search("найди фото с котом", "фото с котом");
         search("Покажи чеки из кафе", "чеки из кафе");
