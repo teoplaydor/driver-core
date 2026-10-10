@@ -27,8 +27,11 @@ public final class TextExtract {
     public static final int MAX_CHARS = 6000;
     public static final int NONE = 0, TEXT = 1, DOCX = 2, XLSX = 3, PPTX = 4, ODF = 5, RTF = 6, HTML = 7, EPUB = 8, FB2 = 9,
             PDF = 10;
-    /** The most read of a file: a PDF whole (its text may be anywhere), any other at most this much. */
-    public static final int MAX_PDF_BYTES = 64 << 20, MAX_ENTRY_BYTES = 8 << 20;
+    /**
+     * The most read of a file: a PDF up to 32 MB (a bigger one is mostly pictures; its first pages' text is in the part
+     * read, and the phone's memory is spared), any other part at most this much.
+     */
+    public static final int MAX_PDF_BYTES = 32 << 20, MAX_ENTRY_BYTES = 8 << 20;
 
     private static final String[] TEXT_EXT = {"txt", "md", "markdown", "rst", "csv", "tsv", "log", "ini", "cfg", "conf",
             "json", "xml", "yaml", "yml", "toml", "css", "js", "ts", "tsx", "jsx", "py", "java", "kt", "cs", "cpp", "cc",
