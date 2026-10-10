@@ -39,6 +39,7 @@ import io.github.teoplaydor.semsearch.core.PhotoTags;
 import io.github.teoplaydor.semsearch.core.QnnRuntime;
 import io.github.teoplaydor.semsearch.core.QueryBridge;
 import io.github.teoplaydor.semsearch.core.SigLip;
+import io.github.teoplaydor.semsearch.core.Spoken;
 import io.github.teoplaydor.semsearch.core.StageProgress;
 import io.github.teoplaydor.semsearch.core.VectorMath;
 
@@ -2440,6 +2441,12 @@ public final class Engine {
      */
     public void addNote(final String text, final IndexStore.Item to, final boolean pinned, final long remind,
                         final Callback<IndexStore.Item> cb) {
+        addNote(text, to, pinned, remind, Spoken.ONCE, cb);
+    }
+
+    /** A new note as above, its reminder repeating ({@code repeat}: Spoken.DAILY, WEEKLY…). */
+    public void addNote(final String text, final IndexStore.Item to, final boolean pinned, final long remind, final int repeat,
+                        final Callback<IndexStore.Item> cb) {
         ml.submit(new Runnable() {
             @Override
             public void run() {
@@ -2448,7 +2455,7 @@ public final class Engine {
                             null, text, System.currentTimeMillis(), noteVector(text));
                     if (pinned) store.setPinned(it, true);
                     if (remind > 0) {
-                        store.setRemind(it, remind);
+                        store.setRemind(it, remind, repeat);
                         Reminders.schedule(ctx, it);
                     }
                     post(cb, it, null);
@@ -2502,17 +2509,52 @@ public final class Engine {
         });
     }
 
-    /** A reminder of the note at {@code at} (0: none any more). */
+    /** A reminder of the note at {@code at} (0: none any more — and no repeating either). */
     public void setReminder(final IndexStore.Item it, final long at) {
+        setReminder(it, at, at == 0 ? Spoken.ONCE : it.repeat);
+    }
+
+    /** A reminder of the note at {@code at}, repeating so. */
+    public void setReminder(final IndexStore.Item it, final long at, final int repeat) {
         it.remind = at;
+        it.repeat = repeat;
         ml.submit(new Runnable() {
             @Override
             public void run() {
-                store.setRemind(it, at);
+                store.setRemind(it, at, repeat);
                 Reminders.schedule(ctx, it);
                 notifyChanged();
             }
         });
+    }
+
+    /** The reminder put off to {@code at} (its repeating, if any, keeps to {@code base}'s time). */
+    void snooze(final long id, final long at, final long base, final Runnable then) {
+        ml.submit(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    IndexStore.Item it = store == null ? null : store.find(id);
+                    if (it == null) return;
+                    store.setRemind(it, at);
+                    Reminders.schedule(ctx, it, base);
+                    notifyChanged();
+                } finally {
+                    then.run();
+                }
+            }
+        });
+    }
+
+    /** The next of a repeating reminder after {@code base} still ahead of now. */
+    static long nextRepeat(long base, int repeat) {
+        long now = System.currentTimeMillis(), next = base;
+        java.util.TimeZone tz = java.util.TimeZone.getDefault();
+        int guard = 0;
+        do {
+            next = Spoken.next(next, repeat, tz);
+        } while (next > 0 && next <= now && guard++ < 5000);
+        return next;
     }
 
     /** {@code r} run on the model's thread once the index is open (and the reminders set again). */
@@ -2520,15 +2562,23 @@ public final class Engine {
         ml.submit(r);
     }
 
-    /** A reminder set for {@code at} went off (Reminders): none set on the note any more, if it is still that one. */
-    void reminded(final long id, final long at, final Runnable then) {
+    /**
+     * A reminder set for {@code at} went off (Reminders): if it is still that one, none set on the note any more — or,
+     * repeating, the next after {@code base} (its regular time, which a put-off reminder does not move).
+     */
+    void reminded(final long id, final long at, final long base, final Runnable then) {
         ml.submit(new Runnable() {
             @Override
             public void run() {
                 try {
                     IndexStore.Item it = store == null ? null : store.find(id);
                     if (it != null && it.remind > 0 && it.remind == at) {
-                        store.setRemind(it, 0);
+                        if (it.repeat != Spoken.ONCE) {
+                            store.setRemind(it, nextRepeat(base > 0 ? base : at, it.repeat));
+                            Reminders.schedule(ctx, it);
+                        } else {
+                            store.setRemind(it, 0);
+                        }
                         notifyChanged();
                     }
                 } finally {
@@ -2545,8 +2595,13 @@ public final class Engine {
             if (it.remind > now) {
                 Reminders.schedule(ctx, it);
             } else {
-                Reminders.notify(ctx, it.id, it.body);
-                s.setRemind(it, 0);
+                Reminders.notify(ctx, it.id, it.body, it.remind, it.repeat);
+                if (it.repeat != Spoken.ONCE) {
+                    s.setRemind(it, nextRepeat(it.remind, it.repeat));
+                    Reminders.schedule(ctx, it);
+                } else {
+                    s.setRemind(it, 0);
+                }
             }
         }
     }

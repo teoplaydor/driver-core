@@ -51,6 +51,8 @@ public final class IndexStore {
         /** A note: kept first among the notes; when to remind of it (0: never); when last changed (0: never). */
         public boolean pinned;
         public long remind, edited;
+        /** How the reminder repeats (Spoken.ONCE, DAILY…). */
+        public int repeat;
         float[] norms = new float[DIMS.length];
 
         void computeNorms() {
@@ -83,12 +85,12 @@ public final class IndexStore {
     private HashSet<Long> hidden = new HashSet<Long>();
 
     public IndexStore(Context ctx) {
-        SQLiteOpenHelper helper = new SQLiteOpenHelper(ctx, "index.db", null, 2) {
+        SQLiteOpenHelper helper = new SQLiteOpenHelper(ctx, "index.db", null, 3) {
             @Override
             public void onCreate(SQLiteDatabase d) {
                 d.execSQL("CREATE TABLE items (id INTEGER PRIMARY KEY AUTOINCREMENT, kind INTEGER, media_id INTEGER,"
                         + " uri TEXT, title TEXT, body TEXT, date INTEGER, emb BLOB, pinned INTEGER DEFAULT 0,"
-                        + " remind INTEGER DEFAULT 0, edited INTEGER DEFAULT 0)");
+                        + " remind INTEGER DEFAULT 0, edited INTEGER DEFAULT 0, repeat INTEGER DEFAULT 0)");
             }
 
             @Override
@@ -99,10 +101,12 @@ public final class IndexStore {
                     d.execSQL("ALTER TABLE items ADD COLUMN remind INTEGER DEFAULT 0");
                     d.execSQL("ALTER TABLE items ADD COLUMN edited INTEGER DEFAULT 0");
                 }
+                // 3: reminders that repeat
+                if (o < 3) d.execSQL("ALTER TABLE items ADD COLUMN repeat INTEGER DEFAULT 0");
             }
         };
         db = helper.getWritableDatabase();
-        Cursor c = db.rawQuery("SELECT id, kind, media_id, uri, title, body, date, emb, pinned, remind, edited FROM items", null);
+        Cursor c = db.rawQuery("SELECT id, kind, media_id, uri, title, body, date, emb, pinned, remind, edited, repeat FROM items", null);
         try {
             while (c.moveToNext()) {
                 Item it = new Item();
@@ -118,6 +122,7 @@ public final class IndexStore {
                 it.pinned = c.getInt(8) != 0;
                 it.remind = c.getLong(9);
                 it.edited = c.getLong(10);
+                it.repeat = c.getInt(11);
                 it.computeNorms();
                 track(it, true);
                 items.add(it);
@@ -182,6 +187,14 @@ public final class IndexStore {
         v.put("pinned", pinned ? 1 : 0);
         db.update("items", v, "id = ?", new String[]{String.valueOf(it.id)});
         it.pinned = pinned;
+    }
+
+    public synchronized void setRemind(Item it, long at, int repeat) {
+        ContentValues v = new ContentValues();
+        v.put("repeat", repeat);
+        db.update("items", v, "id = ?", new String[]{String.valueOf(it.id)});
+        it.repeat = repeat;
+        setRemind(it, at);
     }
 
     public synchronized void setRemind(Item it, long at) {

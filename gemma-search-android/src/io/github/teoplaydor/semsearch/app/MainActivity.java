@@ -41,6 +41,8 @@ import java.util.Map;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
+import io.github.teoplaydor.semsearch.core.Spoken;
+
 /**
  * The app is a gallery: recent photos by default, the same staggered grid for search results.
  * Settings live in a panel, the viewer opens over the grid, notes are one tab of the gallery.
@@ -1829,7 +1831,7 @@ public final class MainActivity extends Activity implements Engine.Listener, Vie
         if (e.remind > 0 && (note == null || note.remind != e.remind)) askNotifications();
         if (note == null) {
             if (text.trim().isEmpty()) return;
-            engine.addNote(text, photo, e.pinned, e.remind, new Engine.Callback<IndexStore.Item>() {
+            engine.addNote(text, photo, e.pinned, e.remind, e.repeat, new Engine.Callback<IndexStore.Item>() {
                 @Override
                 public void done(IndexStore.Item it, Exception err) {
                     if (err != null) toast("Не сохранилось: " + err.getMessage());
@@ -1847,7 +1849,7 @@ public final class MainActivity extends Activity implements Engine.Listener, Vie
         }
         if (!text.equals(note.body)) engine.updateNote(note, text, null);
         if (e.pinned != note.pinned) engine.setPinned(note, e.pinned);
-        if (e.remind != note.remind) engine.setReminder(note, e.remind);
+        if (e.remind != note.remind || e.repeat != note.repeat) engine.setReminder(note, e.remind, e.remind > 0 ? e.repeat : Spoken.ONCE);
         if (resultsLabel == null) showRecent(false);
     }
 
@@ -1876,6 +1878,11 @@ public final class MainActivity extends Activity implements Engine.Listener, Vie
      * is set. The time chosen (0: none) to {@code cb}; nothing when the sheet is closed.
      */
     void chooseReminder(long current, final Engine.Callback<Long> cb) {
+        chooseReminder(current, Spoken.ONCE, cb, null);
+    }
+
+    /** As above, and «Повторять…» (how often, to {@code repeatCb}) when one is set. */
+    void chooseReminder(long current, final int repeat, final Engine.Callback<Long> cb, final Engine.Callback<Integer> repeatCb) {
         final java.util.Calendar now = java.util.Calendar.getInstance();
         final java.util.List<String> labels = new java.util.ArrayList<String>();
         final java.util.List<Long> times = new java.util.ArrayList<Long>();
@@ -1889,19 +1896,45 @@ public final class MainActivity extends Activity implements Engine.Listener, Vie
         times.add(at(1, 9));
         labels.add("Выбрать день и время…");
         times.add(-1L);
+        if (current > 0 && repeatCb != null) {
+            labels.add(repeat == Spoken.ONCE ? "Повторять…" : "Повтор: " + Spoken.repeatLabel(repeat) + "…");
+            times.add(-2L);
+        }
         if (current > 0) {
             labels.add("Без напоминания");
             times.add(0L);
         }
-        sheet = Sheet.choose(root, current > 0 ? "Напомнит " + NoteEditor.when(current) : "Напомнить", labels.toArray(new String[0]),
+        String title = current > 0 ? "Напомнит " + NoteEditor.when(current) : "Напомнить";
+        if (current > 0 && repeat != Spoken.ONCE) title += ", " + Spoken.repeatLabel(repeat);
+        sheet = Sheet.choose(root, title, labels.toArray(new String[0]),
                 null, -1, new Sheet.Choice() {
                     @Override
                     public void chosen(int i) {
                         long t = times.get(i);
                         if (t >= 0) cb.done(t, null);
+                        else if (t == -2) chooseRepeat(repeat, repeatCb);
                         else pickDayAndTime(cb);
                     }
                 });
+    }
+
+    private static final int[] REPEATS = {Spoken.ONCE, Spoken.DAILY, Spoken.WEEKDAYS, Spoken.WEEKLY, Spoken.MONTHLY, Spoken.YEARLY};
+
+    /** How often a reminder comes again: never, every day, on weekdays, every week, month, year. */
+    void chooseRepeat(int current, final Engine.Callback<Integer> cb) {
+        String[] labels = new String[REPEATS.length];
+        int selected = 0;
+        for (int i = 0; i < REPEATS.length; i++) {
+            String l = REPEATS[i] == Spoken.ONCE ? "не повторять" : Spoken.repeatLabel(REPEATS[i]);
+            labels[i] = Character.toUpperCase(l.charAt(0)) + l.substring(1);
+            if (REPEATS[i] == current) selected = i;
+        }
+        sheet = Sheet.choose(root, "Повторять", labels, null, selected, new Sheet.Choice() {
+            @Override
+            public void chosen(int i) {
+                cb.done(REPEATS[i], null);
+            }
+        });
     }
 
     /** Today (+{@code days}) at {@code hour}:00. */
@@ -2249,13 +2282,20 @@ public final class MainActivity extends Activity implements Engine.Listener, Vie
 
     @Override
     public void remind(final IndexStore.Item note) {
-        chooseReminder(note.remind, new Engine.Callback<Long>() {
+        chooseReminder(note.remind, note.repeat, new Engine.Callback<Long>() {
             @Override
             public void done(Long at, Exception e) {
                 if (at == null) return;
                 if (at > 0) askNotifications();
                 engine.setReminder(note, at);
                 toast(at > 0 ? "Напомнит " + NoteEditor.when(at) : "Напоминание убрано");
+                if (viewer != null) viewer.refreshNote();
+            }
+        }, new Engine.Callback<Integer>() {
+            @Override
+            public void done(Integer repeat, Exception e) {
+                engine.setReminder(note, note.remind, repeat);
+                toast(repeat == Spoken.ONCE ? "Напомнит один раз" : "Будет напоминать " + Spoken.repeatLabel(repeat));
                 if (viewer != null) viewer.refreshNote();
             }
         });

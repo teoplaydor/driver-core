@@ -480,6 +480,8 @@ final class Viewer extends FrameLayout {
         StringBuilder b = new StringBuilder("Заметка");
         if (it.pinned) b.append(" · закреплена");
         if (it.remind > 0) b.append(" · напомнит ").append(NoteEditor.when(it.remind));
+        if (it.remind > 0 && it.repeat != io.github.teoplaydor.semsearch.core.Spoken.ONCE)
+            b.append(", ").append(io.github.teoplaydor.semsearch.core.Spoken.repeatLabel(it.repeat));
         if (it.edited > 0) b.append(" · изменена ").append(DateFormat.getDateInstance(DateFormat.MEDIUM).format(new Date(it.edited)));
         return b.toString();
     }

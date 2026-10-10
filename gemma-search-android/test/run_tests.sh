@@ -63,6 +63,7 @@ java -Djava.awt.headless=true -Dfile.encoding=UTF-8 -Dstdout.encoding=UTF-8 -cp 
 java -Djava.awt.headless=true -Dfile.encoding=UTF-8 -Dstdout.encoding=UTF-8 -cp "$T/cls:$T/ort-desktop.jar" PdfPagesTest "$T/pdf"
 java -Dfile.encoding=UTF-8 -Dstdout.encoding=UTF-8 -cp "$T/cls" NoteTextTest
 java -Dfile.encoding=UTF-8 -Dstdout.encoding=UTF-8 -cp "$T/cls" PcmTest
+java -Dfile.encoding=UTF-8 -Dstdout.encoding=UTF-8 -cp "$T/cls" SpokenTest
 # documents' text: files made by LibreOffice, python-pptx, fpdf2, pikepdf (and pdftotext's words to compare)
 python3 -m pip install -q fpdf2 pikepdf python-pptx
 rm -rf "$T/files" && python3 test/files/make_docs.py "$T/files"

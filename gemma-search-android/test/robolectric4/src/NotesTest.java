@@ -189,6 +189,31 @@ public class NotesTest {
         a.onBackPressed();
         Robo.settle(600);
 
+        // a daily reminder: when it rings, the next day's is set; put off by an hour, it rings then, and the next is
+        // still the regular time a day later
+        nm.cancelAll();
+        long daily = System.currentTimeMillis() + 2 * 3_600_000L;
+        e.setReminder(code, daily, 1 /* Spoken.DAILY */);
+        Robo.waitFor("the daily alarm", () -> alarms.peekNextScheduledAlarm() != null && alarms.peekNextScheduledAlarm().triggerAtTime == daily);
+        ((android.content.BroadcastReceiver) receiver).onReceive(a, Shadows.shadowOf(alarms.peekNextScheduledAlarm().operation).getSavedIntent());
+        Robo.waitFor("the next day's", () -> code.remind == daily + 86_400_000L && code.repeat == 1);
+        n = Shadows.shadowOf(nm).getAllNotifications().get(0);
+        assertEquals("каждый день", String.valueOf(n.extras.getCharSequence("android.subText")));
+        assertEquals(3, n.actions.length);
+        assertEquals("Через час", String.valueOf(n.actions[1].title));
+        long tapped = System.currentTimeMillis();
+        ((android.content.BroadcastReceiver) receiver).onReceive(a, Shadows.shadowOf(n.actions[1].actionIntent).getSavedIntent());
+        Robo.waitFor("put off by an hour", () -> code.remind >= tapped + 3_600_000L && code.remind < tapped + 3_660_000L);
+        assertEquals("the notification gone", 0, Shadows.shadowOf(nm).getAllNotifications().size());
+        assertEquals("still daily", 1, code.repeat);
+        long snoozed = code.remind;
+        Robo.waitFor("the put-off alarm", () -> alarms.peekNextScheduledAlarm() != null && alarms.peekNextScheduledAlarm().triggerAtTime == snoozed);
+        ((android.content.BroadcastReceiver) receiver).onReceive(a, Shadows.shadowOf(alarms.peekNextScheduledAlarm().operation).getSavedIntent());
+        Robo.waitFor("then the regular time again", () -> code.remind == daily + 86_400_000L);
+        e.setReminder(code, 0);
+        Robo.waitFor("none", () -> code.remind == 0 && code.repeat == 0);
+        nm.cancelAll();
+
         // its exact word finds it first (a code the meaning of a query will not)
         final Object[] found = new Object[1];
         e.search("47к1290", true, true, true, (r, err) -> found[0] = err != null ? err : r);

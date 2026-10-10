@@ -21,6 +21,7 @@ import java.text.DateFormat;
 import java.util.Date;
 
 import io.github.teoplaydor.semsearch.core.NoteText;
+import io.github.teoplaydor.semsearch.core.Spoken;
 
 /**
  * A note written or changed, over the whole screen: its text (a list's items with boxes to tick: «Список» gives the
@@ -40,6 +41,7 @@ final class NoteEditor extends FrameLayout {
     private final LinearLayout remindRow;
     boolean pinned;
     long remind;
+    int repeat;
     private boolean closing, editing;
 
     NoteEditor(MainActivity activity, IndexStore.Item note, IndexStore.Item photo, String start) {
@@ -49,6 +51,7 @@ final class NoteEditor extends FrameLayout {
         this.photo = note == null ? photo : null;
         pinned = note != null && note.pinned;
         remind = note != null ? note.remind : 0;
+        repeat = note != null ? note.repeat : Spoken.ONCE;
         final Context c = activity;
         setBackgroundColor(Ui.BG);
         setClickable(true);
@@ -136,6 +139,7 @@ final class NoteEditor extends FrameLayout {
             @Override
             public void onClick(View v) {
                 remind = 0;
+                repeat = Spoken.ONCE;
                 showReminder();
             }
         });
@@ -250,7 +254,7 @@ final class NoteEditor extends FrameLayout {
 
     void showReminder() {
         remindRow.setVisibility(remind > 0 ? VISIBLE : GONE);
-        if (remind > 0) remindLine.setText("Напомнит " + when(remind));
+        if (remind > 0) remindLine.setText("Напомнит " + when(remind) + (repeat != Spoken.ONCE ? ", " + Spoken.repeatLabel(repeat) : ""));
     }
 
     /** «12 октября, 9:00» (today and tomorrow by name). */
@@ -266,11 +270,18 @@ final class NoteEditor extends FrameLayout {
     }
 
     private void chooseReminder() {
-        a.chooseReminder(remind, new Engine.Callback<Long>() {
+        a.chooseReminder(remind, repeat, new Engine.Callback<Long>() {
             @Override
             public void done(Long at, Exception e) {
                 if (at == null) return;
                 remind = at;
+                if (at == 0) repeat = Spoken.ONCE;
+                showReminder();
+            }
+        }, new Engine.Callback<Integer>() {
+            @Override
+            public void done(Integer r, Exception e) {
+                repeat = r;
                 showReminder();
             }
         });
