@@ -17,7 +17,8 @@ import java.util.concurrent.CopyOnWriteArrayList;
 
 /**
  * MediaStore stand-in for the "media" authority: images and videos as rows (id, date, name, size, album)
- * with an optional file behind each, served fresh to every query like the real provider.
+ * with an optional file behind each, served fresh to every query like the real provider; sounds (recordings, music)
+ * as rows of their own.
  */
 public final class FakeMediaStore extends ContentProvider {
     public static final class Row {
@@ -46,6 +47,26 @@ public final class FakeMediaStore extends ContentProvider {
     }
 
     public static final List<Row> ROWS = new CopyOnWriteArrayList<Row>();
+
+    /** A sound: id, date, file name, title, artist, length (ms), folder and the file behind it. */
+    public static final class Sound {
+        final long id, dateAdded, durationMs;
+        final String name, title, artist, bucket;
+        final File file;
+
+        public Sound(long id, long dateAdded, String name, String title, String artist, long durationMs, String bucket, File file) {
+            this.id = id;
+            this.dateAdded = dateAdded;
+            this.name = name;
+            this.title = title;
+            this.artist = artist;
+            this.durationMs = durationMs;
+            this.bucket = bucket;
+            this.file = file;
+        }
+    }
+
+    public static final List<Sound> SOUNDS = new CopyOnWriteArrayList<Sound>();
     public static volatile int queries;
 
     public static void install() {
@@ -66,6 +87,7 @@ public final class FakeMediaStore extends ContentProvider {
     @Override
     public Cursor query(Uri uri, String[] proj, String sel, String[] args, String sort) {
         queries++;
+        if (uri.getPath().contains("/audio/")) return sounds(uri, proj);
         boolean video = uri.getPath().contains("/video/");
         Long only = idOf(uri);
         List<Row> rows = new ArrayList<Row>();
@@ -96,9 +118,44 @@ public final class FakeMediaStore extends ContentProvider {
         return c;
     }
 
+    private Cursor sounds(Uri uri, String[] proj) {
+        Long only = idOf(uri);
+        List<Sound> rows = new ArrayList<Sound>();
+        for (Sound r : SOUNDS) if (only == null || r.id == only) rows.add(r);
+        Collections.sort(rows, new Comparator<Sound>() {
+            @Override
+            public int compare(Sound a, Sound b) {
+                return Long.compare(b.dateAdded, a.dateAdded);
+            }
+        });
+        MatrixCursor c = new MatrixCursor(proj);
+        for (Sound r : rows) {
+            Object[] row = new Object[proj.length];
+            for (int k = 0; k < proj.length; k++) {
+                switch (proj[k]) {
+                    case "_id": row[k] = r.id; break;
+                    case "date_added": row[k] = r.dateAdded; break;
+                    case "_display_name": row[k] = r.name; break;
+                    case "title": row[k] = r.title; break;
+                    case "artist": row[k] = r.artist; break;
+                    case "duration": row[k] = r.durationMs; break;
+                    case "mime_type": row[k] = "audio/x-wav"; break;
+                    case "bucket_display_name": row[k] = r.bucket; break;
+                    default: row[k] = null;
+                }
+            }
+            c.addRow(row);
+        }
+        return c;
+    }
+
     @Override
     public ParcelFileDescriptor openFile(Uri uri, String mode) throws FileNotFoundException {
         Long id = idOf(uri);
+        if (uri.getPath().contains("/audio/")) {
+            for (Sound r : SOUNDS) if (id != null && r.id == id) return ParcelFileDescriptor.open(r.file, ParcelFileDescriptor.MODE_READ_ONLY);
+            throw new FileNotFoundException(String.valueOf(uri));
+        }
         for (Row r : ROWS) {
             if (id != null && r.id == id && r.file != null) return ParcelFileDescriptor.open(r.file, ParcelFileDescriptor.MODE_READ_ONLY);
         }
@@ -107,7 +164,7 @@ public final class FakeMediaStore extends ContentProvider {
 
     @Override
     public String getType(Uri uri) {
-        return uri.getPath().contains("/video/") ? "video/mp4" : "image/png";
+        return uri.getPath().contains("/video/") ? "video/mp4" : uri.getPath().contains("/audio/") ? "audio/x-wav" : "image/png";
     }
 
     @Override

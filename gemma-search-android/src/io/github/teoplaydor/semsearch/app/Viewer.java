@@ -118,6 +118,9 @@ final class Viewer extends FrameLayout {
 
         /** A reminder of the note chosen (or taken away). */
         void remind(IndexStore.Item note);
+
+        /** A PDF's page as a picture (null when it cannot be drawn), off the main thread. */
+        void pdfPage(IndexStore.Item file, int page, Engine.Callback<Bitmap> cb);
     }
 
     private final Host host;
@@ -255,7 +258,7 @@ final class Viewer extends FrameLayout {
                 RectF fit = p.photo.bitmap() != null ? p.photo.fitRect() : null;
                 top.animate().alpha(1f).setDuration(260).setStartDelay(120).start();
                 bottom.animate().alpha(1f).setDuration(260).setStartDelay(120).start();
-                if (tile == null || fit == null || fit.width() <= 0 || p.item.kind == IndexStore.KIND_NOTE) {
+                if (tile == null || fit == null || fit.width() <= 0 || MasonryView.card(p.item)) {
                     scrim.animate().alpha(1f).setDuration(220).start();
                     p.setAlpha(0f);
                     p.setScaleX(0.94f);
@@ -338,7 +341,7 @@ final class Viewer extends FrameLayout {
         };
         top.animate().alpha(0f).setDuration(150).start();
         bottom.animate().alpha(0f).setDuration(150).start();
-        Rect tile = p.item.kind == IndexStore.KIND_NOTE ? null : host.tileRect(p.item);
+        Rect tile = MasonryView.card(p.item) ? null : host.tileRect(p.item);
         if (tile != null && p.photo.bitmap() != null && !p.photo.zoomed()) {
             // swiped up or down: from where the swipe left it (the page's offset and scale, moved onto the photo)
             float ps = p.getScaleX();
@@ -387,7 +390,7 @@ final class Viewer extends FrameLayout {
         subtitle.setText(it.kind == IndexStore.KIND_NOTE ? noteState(it) : it.title != null ? it.title : "");
         actions.removeAllViews();
         loadFaces(it);
-        if (it.kind == IndexStore.KIND_NOTE) {
+        if (MasonryView.card(it)) {
             tagsBox.setVisibility(GONE);
         } else if (tagsShown) {
             loadTags(it);
@@ -428,6 +431,14 @@ final class Viewer extends FrameLayout {
                 @Override
                 public void run() {
                     host.delete(it);
+                }
+            });
+        } else if (MasonryView.card(it)) {
+            // a document or a sound: in another app
+            action(Icon.OPEN, "Открыть", new Runnable() {
+                @Override
+                public void run() {
+                    host.openWith(it);
                 }
             });
         } else {
@@ -726,6 +737,8 @@ final class Viewer extends FrameLayout {
         final PhotoView photo;
         final ImageView play;
         VideoView video;
+        /** A sound playing on this page. */
+        MediaPlayer player;
         ScrollView noteView;
 
         Page(Context c) {
@@ -769,6 +782,16 @@ final class Viewer extends FrameLayout {
             if (it.kind == IndexStore.KIND_NOTE) {
                 photo.setVisibility(GONE);
                 showNote(it);
+                return;
+            }
+            if (it.kind == IndexStore.KIND_AUDIO) {
+                photo.setVisibility(GONE);
+                showSound(it);
+                return;
+            }
+            if (it.kind == IndexStore.KIND_FILE) {
+                photo.setVisibility(GONE);
+                showDocument(it);
                 return;
             }
             photo.setVisibility(VISIBLE);
@@ -840,6 +863,183 @@ final class Viewer extends FrameLayout {
             });
             noteView.addView(holder, new ScrollView.LayoutParams(-1, -1));
             addView(noteView, new LayoutParams(-1, -1));
+        }
+
+        /** A card over the page, scrolling when it is long; a tap beside it shows or hides the panels. */
+        private LinearLayout cardPage(Context c, int color) {
+            noteView = new ScrollView(c);
+            noteView.setFillViewport(true);
+            noteView.setVerticalScrollBarEnabled(false);
+            FrameLayout holder = new FrameLayout(c);
+            LinearLayout card = new LinearLayout(c);
+            card.setOrientation(LinearLayout.VERTICAL);
+            card.setBackground(Ui.round(c, color, 24));
+            card.setPadding(Ui.dp(c, 24), Ui.dp(c, 20), Ui.dp(c, 24), Ui.dp(c, 22));
+            FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(-1, -2, Gravity.CENTER);
+            lp.setMargins(Ui.dp(c, 20), Ui.dp(c, 90), Ui.dp(c, 20), Ui.dp(c, 110));
+            holder.addView(card, lp);
+            holder.setOnClickListener(new OnClickListener() {
+                @Override
+                public void onClick(View v) {
+                    toggleChrome();
+                }
+            });
+            noteView.addView(holder, new ScrollView.LayoutParams(-1, -1));
+            addView(noteView, new LayoutParams(-1, -1));
+            return card;
+        }
+
+        /** A sound: its name, length and source, a play button with its progress (the phone's player). */
+        private void showSound(final IndexStore.Item it) {
+            final Context c = getContext();
+            LinearLayout card = cardPage(c, MasonryView.cardColor(it));
+            ImageView wave = Ui.icon(c, Icon.AUDIO, Ui.ACCENT, 56, 2f);
+            card.addView(wave, new LinearLayout.LayoutParams(Ui.dp(c, 56), Ui.dp(c, 56)));
+            TextView name = Ui.text(c, it.title == null ? "" : it.title, 21, Ui.TEXT, Ui.SEMIBOLD);
+            name.setPadding(0, Ui.dp(c, 14), 0, Ui.dp(c, 4));
+            name.setTextIsSelectable(true);
+            card.addView(name);
+            if (it.body != null && !it.body.isEmpty()) card.addView(Ui.text(c, it.body, 15, Ui.TEXT2, Ui.REGULAR));
+            LinearLayout row = new LinearLayout(c);
+            row.setGravity(Gravity.CENTER_VERTICAL);
+            row.setPadding(0, Ui.dp(c, 20), 0, 0);
+            final ImageView toggle = Ui.icon(c, Icon.PLAY, Ui.ON_ACCENT, 52);
+            toggle.setBackground(Ui.round(c, Ui.ACCENT, 26));
+            toggle.setContentDescription("Слушать");
+            Ui.pressable(toggle);
+            row.addView(toggle, new LinearLayout.LayoutParams(Ui.dp(c, 52), Ui.dp(c, 52)));
+            final android.widget.SeekBar bar = new android.widget.SeekBar(c);
+            bar.setMax(1000);
+            row.addView(bar, new LinearLayout.LayoutParams(0, -2, 1));
+            final TextView time = Ui.text(c, "", 13, Ui.TEXT2, Ui.MEDIUM);
+            row.addView(time);
+            card.addView(row);
+            final Runnable tick = new Runnable() {
+                @Override
+                public void run() {
+                    MediaPlayer mp = player;
+                    if (mp == null || item != it) return;
+                    try {
+                        int d = Math.max(1, mp.getDuration());
+                        bar.setProgress((int) (1000L * mp.getCurrentPosition() / d));
+                        time.setText(Sound.duration(mp.getCurrentPosition()) + " / " + Sound.duration(d));
+                    } catch (IllegalStateException ignored) {
+                        // released meanwhile
+                    }
+                    if (mp.isPlaying()) postDelayed(this, 250);
+                }
+            };
+            bar.setOnSeekBarChangeListener(new android.widget.SeekBar.OnSeekBarChangeListener() {
+                @Override
+                public void onProgressChanged(android.widget.SeekBar b, int v, boolean user) {
+                    MediaPlayer mp = player;
+                    if (user && mp != null) {
+                        try {
+                            mp.seekTo((int) ((long) v * mp.getDuration() / 1000));
+                        } catch (IllegalStateException ignored) {
+                            // not prepared yet
+                        }
+                    }
+                }
+
+                @Override
+                public void onStartTrackingTouch(android.widget.SeekBar b) {
+                }
+
+                @Override
+                public void onStopTrackingTouch(android.widget.SeekBar b) {
+                }
+            });
+            toggle.setOnClickListener(new OnClickListener() {
+                @Override
+                public void onClick(View v) {
+                    if (player == null) {
+                        try {
+                            final MediaPlayer mp = new MediaPlayer();
+                            mp.setDataSource(c, Uri.parse(it.uri));
+                            mp.setOnPreparedListener(new MediaPlayer.OnPreparedListener() {
+                                @Override
+                                public void onPrepared(MediaPlayer m) {
+                                    if (player != m) return;
+                                    m.start();
+                                    post(tick);
+                                }
+                            });
+                            mp.setOnCompletionListener(new MediaPlayer.OnCompletionListener() {
+                                @Override
+                                public void onCompletion(MediaPlayer m) {
+                                    toggle.setImageDrawable(new Icon(Icon.PLAY, Ui.ON_ACCENT, Ui.dp(c, 1.8f)));
+                                    bar.setProgress(1000);
+                                }
+                            });
+                            player = mp;
+                            mp.prepareAsync();
+                        } catch (Exception e) {
+                            time.setText("Не играет: " + e.getMessage());
+                            return;
+                        }
+                        toggle.setImageDrawable(new Icon(Icon.PAUSE, Ui.ON_ACCENT, Ui.dp(c, 1.8f)));
+                        return;
+                    }
+                    try {
+                        if (player.isPlaying()) {
+                            player.pause();
+                            toggle.setImageDrawable(new Icon(Icon.PLAY, Ui.ON_ACCENT, Ui.dp(c, 1.8f)));
+                        } else {
+                            player.start();
+                            toggle.setImageDrawable(new Icon(Icon.PAUSE, Ui.ON_ACCENT, Ui.dp(c, 1.8f)));
+                            post(tick);
+                        }
+                    } catch (IllegalStateException ignored) {
+                        // still preparing
+                    }
+                }
+            });
+        }
+
+        /** A document: its type and name; a PDF's first pages as pictures; its text, to read and copy. */
+        private void showDocument(final IndexStore.Item it) {
+            final Context c = getContext();
+            final LinearLayout card = cardPage(c, MasonryView.cardColor(it));
+            String n = it.title == null ? "" : it.title;
+            int dot = n.lastIndexOf('.');
+            TextView tag = Ui.text(c, dot > 0 ? n.substring(dot + 1).toUpperCase(java.util.Locale.ROOT) : "ДОКУМЕНТ", 12.5f, Ui.ACCENT, Ui.SEMIBOLD);
+            card.addView(tag);
+            TextView name = Ui.text(c, Engine.baseName(n), 21, Ui.TEXT, Ui.SEMIBOLD);
+            name.setPadding(0, Ui.dp(c, 6), 0, Ui.dp(c, 12));
+            name.setTextIsSelectable(true);
+            card.addView(name);
+            final LinearLayout pagesBox = new LinearLayout(c);
+            pagesBox.setOrientation(LinearLayout.VERTICAL);
+            card.addView(pagesBox);
+            if (n.toLowerCase(java.util.Locale.ROOT).endsWith(".pdf")) loadPdfPage(it, pagesBox, 0);
+            if (it.body != null && !it.body.isEmpty()) {
+                card.addView(noteText(c, it.body));
+            } else {
+                card.addView(Ui.text(c, "Текста в файле нет (скан или картинки) — «Открыть», чтобы посмотреть его целиком", 15, Ui.TEXT2,
+                        Ui.REGULAR));
+            }
+        }
+
+        /** A PDF's pages one after another (the first three), each once the one before is drawn. */
+        private void loadPdfPage(final IndexStore.Item it, final LinearLayout box, final int page) {
+            if (page >= 3) return;
+            host.pdfPage(it, page, new Engine.Callback<Bitmap>() {
+                @Override
+                public void done(Bitmap b, Exception e) {
+                    if (b == null || item != it) return;
+                    Context c = getContext();
+                    ImageView v = new ImageView(c);
+                    v.setImageBitmap(b);
+                    v.setAdjustViewBounds(true);
+                    v.setBackground(Ui.round(c, 0xFFFFFFFF, 6));
+                    v.setClipToOutline(true);
+                    LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-1, -2);
+                    lp.bottomMargin = Ui.dp(c, 10);
+                    box.addView(v, lp);
+                    loadPdfPage(it, box, page + 1);
+                }
+            });
         }
 
         private TextView noteText(Context c, String t) {
@@ -914,6 +1114,14 @@ final class Viewer extends FrameLayout {
         }
 
         void stopVideo() {
+            if (player != null) {
+                try {
+                    player.release();
+                } catch (Exception ignored) {
+                    // released already
+                }
+                player = null;
+            }
             if (video == null) return;
             video.stopPlayback();
             removeView(video);

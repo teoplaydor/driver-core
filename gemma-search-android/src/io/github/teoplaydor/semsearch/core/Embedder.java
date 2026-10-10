@@ -9,6 +9,11 @@ public interface Embedder extends Closeable {
 
     float[] embedDocument(String text) throws Exception;
 
+    /** A document with a title (a file's name): EmbeddingGemma's "title: … | text: …" prompt. */
+    default float[] embedDocument(String title, String text) throws Exception {
+        return embedDocument(title == null || title.isEmpty() ? text : title + "\n" + text);
+    }
+
     /** @param maxSoftTokens token budget per image, or 0 for the model default. */
     float[] embedImage(ImagePreprocessor.Source image, int maxSoftTokens) throws Exception;
 
@@ -16,6 +21,21 @@ public interface Embedder extends Closeable {
     float[][] embedImages(List<ImagePreprocessor.Source> images, int maxSoftTokens) throws Exception;
 
     float[] embedVideo(List<ImagePreprocessor.Source> frames, int maxSoftTokens) throws Exception;
+
+    /** A video with its sound ({@code pcm}: mono 16 kHz; null, or a model without audio: the frames alone). */
+    default float[] embedVideo(List<ImagePreprocessor.Source> frames, int maxSoftTokens, float[] pcm) throws Exception {
+        return embedVideo(frames, maxSoftTokens);
+    }
+
+    /** Whether {@link #embedAudio} works: the audio encoder is loaded. */
+    default boolean supportsAudio() {
+        return false;
+    }
+
+    /** A clip of sound (mono 16 kHz samples; the first 30 s count) as one vector, in the space of the text. */
+    default float[] embedAudio(float[] pcm) throws Exception {
+        throw new UnsupportedOperationException("звук не поддерживается этой моделью");
+    }
 
     boolean supportsImages();
 

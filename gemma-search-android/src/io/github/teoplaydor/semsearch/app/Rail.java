@@ -12,7 +12,7 @@ import android.widget.ImageView;
 import android.widget.LinearLayout;
 
 /**
- * The translucent vertical panel under the thumb: settings on top, the four filters (a highlight
+ * The translucent vertical panel under the thumb: settings on top, the six filters (a highlight
  * glides between them), albums by meaning, "new note" while notes are shown, and search at the bottom where the
  * thumb rests. Icons only; a filter's name flashes in a small chip beside the panel when it changes.
  */
@@ -29,8 +29,8 @@ final class Rail extends FrameLayout {
         void albumsTapped();
     }
 
-    static final int[] FILTER_ICONS = {Icon.GRID, Icon.IMAGE, Icon.VIDEO, Icon.NOTE};
-    static final String[] FILTER_NAMES = {"Все", "Фото", "Видео", "Заметки"};
+    static final int[] FILTER_ICONS = {Icon.GRID, Icon.IMAGE, Icon.VIDEO, Icon.NOTE, Icon.FILE, Icon.AUDIO};
+    static final String[] FILTER_NAMES = {"Все", "Фото", "Видео", "Заметки", "Файлы", "Аудио"};
     static final int BACKGROUND = 0xD9141920;
 
     private final LinearLayout column;

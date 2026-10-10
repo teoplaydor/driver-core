@@ -33,6 +33,7 @@ import io.github.teoplaydor.semsearch.core.NoteText;
 import io.github.teoplaydor.semsearch.core.OnnxPatcher;
 import io.github.teoplaydor.semsearch.core.OrtProfile;
 import io.github.teoplaydor.semsearch.core.PatternSource;
+import io.github.teoplaydor.semsearch.core.Pcm;
 import io.github.teoplaydor.semsearch.core.People;
 import io.github.teoplaydor.semsearch.core.PhotoTags;
 import io.github.teoplaydor.semsearch.core.QnnRuntime;
@@ -423,8 +424,10 @@ public final class Engine {
             public void run() {
                 try {
                     HfRepo r = new HfRepo(repo, token);
-                    HfRepo.Plan plan = HfRepo.plan(r.listFiles(), vision, fp32 || gemmaFp32Vision() != null,
-                            vision && gemmaFp16Vision() != null);
+                    List<HfRepo.RemoteFile> files = r.listFiles();
+
+                    HfRepo.Plan plan = keepAudio(HfRepo.plan(files, vision, fp32 || gemmaFp32Vision() != null,
+                            vision && gemmaFp16Vision() != null), files);
                     dlTotal = plan.totalBytes;
                     if (!modelDir.exists() && !modelDir.mkdirs()) throw new Exception("нет доступа к памяти");
                     r.download(plan, modelDir, new HfRepo.Progress() {
@@ -568,8 +571,15 @@ public final class Engine {
             if (notesSig != null && !notesSig.equals(prefs.getString("notes_sig", ""))) {
                 step = "переиндексация заметок";
                 for (IndexStore.Item n : store.notes()) store.updateEmbedding(n, model.embedDocument(NoteText.plain(n.body)));
+                // sound and documents are in the same space: they are indexed again
+                if (store.count(IndexStore.KIND_AUDIO) + store.count(IndexStore.KIND_FILE) > 0) {
+                    store.clearKind(IndexStore.KIND_AUDIO);
+                    store.clearKind(IndexStore.KIND_FILE);
+                    prefs.edit().putBoolean("reindex_pending", true).apply();
+                }
                 prefs.edit().putString("notes_sig", notesSig).apply();
             }
+            checkVideoSound();
             embedWaitingNotes();
             notesUsable = notesSig != null;
             loadedFull = full;
@@ -679,7 +689,132 @@ public final class Engine {
                 accelLabel += " · детализация сборки, не " + maxBudget();
             }
         }
+        if (m instanceof EmbeddingGemma2 && !liteRtSpace()) attachAudio((EmbeddingGemma2) m, plan);
         return m;
+    }
+
+    // ------------------------------------------------------------------ sound (EmbeddingGemma's audio encoder)
+
+    /** Why the audio encoder did not load, or null. */
+    private volatile String audioError;
+
+    /** The audio encoder into the model when it was downloaded (a failure leaves the rest working). */
+    private void attachAudio(EmbeddingGemma2 m, HfRepo.Plan plan) {
+        audioError = null;
+        File f = plan.audioModel == null ? null : new File(modelDir, plan.audioModel);
+        if (f == null || !f.exists()) return;
+        try {
+            m.loadAudio(f, threads);
+        } catch (Exception e) {
+            audioError = e.getMessage();
+            android.util.Log.w("SemSearch", "audio encoder", e);
+        }
+    }
+
+    /** A plan made anew keeps the audio encoder when the one before had it. */
+    private HfRepo.Plan keepAudio(HfRepo.Plan plan, List<HfRepo.RemoteFile> files) throws java.io.IOException {
+        HfRepo.Plan old = manifest.exists() ? HfRepo.loadManifest(manifest) : null;
+        return old != null && old.audioModel != null ? HfRepo.withAudio(plan, files) : plan;
+    }
+
+    /** The audio encoder is on the phone. */
+    public boolean audioDownloaded() {
+        HfRepo.Plan p = gemmaPlan();
+        return p != null && p.audioModel != null && new File(modelDir, p.audioModel).exists();
+    }
+
+    /** Sound can be embedded now: the audio encoder is loaded into the text model. */
+    public boolean audioReady() {
+        Embedder m = model;
+        return m != null && m.supportsAudio();
+    }
+
+    public String audioError() {
+        return audioError;
+    }
+
+    /** The audio encoder's size on the Hub (bytes, or -1 when the repo has none). */
+    public void audioSize(final Callback<Long> cb) {
+        net.submit(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    post(cb, HfRepo.audioBytes(new HfRepo(repo(), prefs.getString("token", "")).listFiles()), null);
+                } catch (Exception e) {
+                    post(cb, null, e);
+                }
+            }
+        });
+    }
+
+    /**
+     * Downloads EmbeddingGemma's audio encoder (the repo's smallest version), then reloads the model with it: from then
+     * on recordings, voice messages and music are indexed, and videos with their sound.
+     */
+    public void downloadAudio() {
+        if (state == State.DOWNLOADING || state == State.LOADING || !manifest.exists()) return;
+        final String repo = repo(), token = prefs.getString("token", "");
+        stopIndex();
+        cancelDownload = false;
+        dlError = null;
+        state = State.DOWNLOADING;
+        status = "Получаю список файлов…";
+        dlDone = 0;
+        dlTotal = 0;
+        notifyChanged();
+        net.submit(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    HfRepo r = new HfRepo(repo, token);
+                    HfRepo.Plan plan = HfRepo.withAudio(HfRepo.loadManifest(manifest), r.listFiles());
+                    dlTotal = plan.totalBytes;
+                    r.download(plan, modelDir, new HfRepo.Progress() {
+                        @Override
+                        public boolean onProgress(String file, long fd, long ft, long all, long allTotal) {
+                            dlDone = all;
+                            dlTotal = allTotal;
+                            status = "Скачиваю " + file;
+                            notifyChanged();
+                            return !cancelDownload;
+                        }
+                    });
+                    HfRepo.saveManifest(plan, repo, manifest);
+                    prefs.edit().putBoolean("reindex_pending", true).apply();
+                } catch (Exception e) {
+                    dlError = cancelDownload ? "Загрузка остановлена — её можно продолжить" : "Звук: " + e.getMessage();
+                }
+                unloadModel();
+                loadModel();
+            }
+        });
+    }
+
+    /** Deletes the audio encoder (the sounds already in the index stay searchable). */
+    public void deleteAudio() {
+        stopIndex();
+        ml.submit(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    HfRepo.Plan p = HfRepo.loadManifest(manifest);
+                    if (p == null || p.audioModel == null) return;
+                    String audio = p.audioModel;
+                    p.audioModel = null;
+                    for (java.util.Iterator<HfRepo.RemoteFile> it = p.files.iterator(); it.hasNext(); ) {
+                        if (it.next().path.startsWith(audio)) it.remove();
+                    }
+                    File tmp = new File(manifest.getPath() + ".tmp");
+                    HfRepo.saveManifest(p, HfRepo.manifestRepo(manifest), tmp);
+                    if (!tmp.renameTo(manifest)) throw new java.io.IOException("manifest");
+                    File[] files = new File(modelDir, "onnx").listFiles();
+                    if (files != null) for (File f : files) if (f.getName().startsWith(new File(audio).getName())) f.delete();
+                } catch (Exception e) {
+                    android.util.Log.w("SemSearch", "delete audio", e);
+                }
+                loadNow(loadedFull);
+            }
+        });
     }
 
     /** SigLIP 2 with the accelerator the auto-check chose; an NPU/GPU that fails falls back to the CPU. */
@@ -866,7 +1001,9 @@ public final class Engine {
                 if (gemmaFp16Vision() == null) {
                     try {
                         HfRepo r = new HfRepo(repo, token);
-                        HfRepo.Plan plan = HfRepo.plan(r.listFiles(), true, gemmaFp32Vision() != null, true);
+                        List<HfRepo.RemoteFile> files = r.listFiles();
+
+                        HfRepo.Plan plan = keepAudio(HfRepo.plan(files, true, gemmaFp32Vision() != null, true), files);
                         dlTotal = plan.totalBytes;
                         r.download(plan, modelDir, progress);
                         HfRepo.saveManifest(plan, repo, manifest);
@@ -928,7 +1065,9 @@ public final class Engine {
                 if (gemmaFp32Vision() == null) {
                     try {
                         HfRepo r = new HfRepo(repo, token);
-                        HfRepo.Plan plan = HfRepo.plan(r.listFiles(), true, true, gemmaFp16Vision() != null);
+                        List<HfRepo.RemoteFile> files = r.listFiles();
+
+                        HfRepo.Plan plan = keepAudio(HfRepo.plan(files, true, true, gemmaFp16Vision() != null), files);
                         dlTotal = plan.totalBytes;
                         r.download(plan, modelDir, progress);
                         HfRepo.saveManifest(plan, repo, manifest);
@@ -1031,18 +1170,23 @@ public final class Engine {
 
     public void search(final String query, final boolean photos, final boolean videos, final boolean notes,
                        final Callback<SearchResult> cb) {
+        search(query, IndexStore.mask(photos, videos, false) | (notes ? IndexStore.TEXT : 0), cb);
+    }
+
+    /** A search over the {@code kinds} (IndexStore bits): pictures by the photo model, the rest by the text's meaning. */
+    public void search(final String query, final int kinds, final Callback<SearchResult> cb) {
         ml.submit(new Runnable() {
             @Override
             public void run() {
                 try {
                     requireModel();
                     long t0 = System.currentTimeMillis();
-                    boolean withNotes = notes && notesUsable;
-                    QueryVectors qv = queryVectors(query, photos || videos, withNotes, bridgeMode());
+                    boolean media = (kinds & IndexStore.MEDIA) != 0, text = (kinds & IndexStore.TEXT) != 0 && notesUsable;
+                    QueryVectors qv = queryVectors(query, media, text, bridgeMode());
                     SearchResult r = new SearchResult();
-                    r.set(store.searchTiers(qv.media, mediaDims(), qv.notes, notesDims(), photos, videos, withNotes,
+                    r.set(store.searchTiers(qv.media, mediaDims(), qv.notes, notesDims(), text ? kinds : kinds & IndexStore.MEDIA,
                             photo == model, -1));
-                    if (notes) withWords(r, query);
+                    if ((kinds & IndexStore.TEXT) != 0) withWords(r, query, kinds);
                     r.millis = System.currentTimeMillis() - t0;
                     r.label = "«" + query + "»" + (qv.english != null ? " → для фото «" + qv.english + "»" : "");
                     post(cb, r, null);
@@ -1054,14 +1198,19 @@ public final class Engine {
     }
 
     /**
-     * The notes that have the query's words as they are (a code, a name, the start of a word: what meaning alone may
-     * miss) first among the results; the rest as they were.
+     * The notes, documents and sounds that have the query's words as they are (a code, a name, the start of a word: what
+     * meaning alone may miss; a document's or a recording's name too) first among the results; the rest as they were.
      */
-    private void withWords(SearchResult r, String query) {
+    private void withWords(SearchResult r, String query, int kinds) {
         List<IndexStore.Hit> exact = new ArrayList<IndexStore.Hit>();
         java.util.Set<Long> ids = new java.util.HashSet<Long>();
-        for (IndexStore.Item n : store.notes()) {
-            if (NoteText.hasWords(n.body, query)) {
+        List<IndexStore.Item> texts = new ArrayList<IndexStore.Item>();
+        if ((kinds & IndexStore.NOTES) != 0) texts.addAll(store.notes());
+        if ((kinds & IndexStore.FILES) != 0) texts.addAll(store.items(IndexStore.KIND_FILE));
+        if ((kinds & IndexStore.AUDIO) != 0) texts.addAll(store.items(IndexStore.KIND_AUDIO));
+        for (IndexStore.Item n : texts) {
+            String words = n.kind == IndexStore.KIND_NOTE ? n.body : (n.title == null ? "" : n.title) + "\n" + (n.body == null ? "" : n.body);
+            if (NoteText.hasWords(words, query)) {
                 exact.add(new IndexStore.Hit(n, 1f));
                 ids.add(n.id);
             }
@@ -1241,6 +1390,13 @@ public final class Engine {
 
     public void similar(final IndexStore.Item item, final boolean photos, final boolean videos, final boolean notes,
                         final Callback<SearchResult> cb) {
+        similar(item, IndexStore.mask(photos, videos, false) | (notes ? IndexStore.TEXT : 0), cb);
+    }
+
+    /** What is like {@code item} among the {@code kinds} (IndexStore bits) in its space. */
+    public void similar(final IndexStore.Item item, final int wanted, final Callback<SearchResult> cb) {
+        final boolean photos = (wanted & IndexStore.PHOTOS) != 0, videos = (wanted & IndexStore.VIDEOS) != 0,
+                notes = (wanted & IndexStore.TEXT) != 0;
         ml.submit(new Runnable() {
             @Override
             public void run() {
@@ -1253,10 +1409,11 @@ public final class Engine {
                 SearchResult r = new SearchResult();
                 // Notes and pictures are only comparable when one model embedded both.
                 boolean same = photo != null && photo == model && notesUsable;
-                boolean note = item.kind == IndexStore.KIND_NOTE;
+                boolean note = IndexStore.textSpace(item.kind);
                 int dims = note ? notesDims() : mediaDims();
-                r.set(store.searchTiers(item.emb, dims, item.emb, dims, (photos && (!note || same)), (videos && (!note || same)),
-                        notes && (note || same) && notesUsable, true, item.id));
+                int kinds = IndexStore.mask(photos && (!note || same), videos && (!note || same), false)
+                        | (notes && (note || same) && notesUsable ? wanted & IndexStore.TEXT : 0);
+                r.set(store.searchTiers(item.emb, dims, item.emb, dims, kinds, true, item.id));
                 r.millis = System.currentTimeMillis() - t0;
                 r.label = "похожие";
                 post(cb, r, null);
@@ -1285,7 +1442,7 @@ public final class Engine {
             public void run() {
                 try {
                     requireModel();
-                    if (item.emb == null || item.kind == IndexStore.KIND_NOTE) throw new IllegalStateException("у этого файла нет вектора картинки");
+                    if (item.emb == null || !IndexStore.picture(item.kind)) throw new IllegalStateException("у этого файла нет вектора картинки");
                     PhotoTags t = photoTags();
                     if (t.vecs.length > 0 && t.vecs[0].length != item.emb.length) {
                         throw new IllegalStateException("индекс построен другой моделью — переиндексируйте галерею");
@@ -4287,6 +4444,15 @@ public final class Engine {
                     if (videoLimit() > 0) {
                         for (Media.Entry e : Media.recentVideos(cr, videoLimit())) if (isNew(e, true)) n++;
                     }
+                    // sound and documents need EmbeddingGemma: in the background only when it is the photo model too
+                    boolean gemma = photoModel() == FastModel.GEMMA && !liteRtSpace();
+                    boolean sound = gemma && audioDownloaded() && soundIndexOn();
+                    if (sound && AutoIndex.hasAudioAccess(ctx)) {
+                        for (Media.Entry e : Media.recentAudio(cr, AUDIO_LIMIT)) if (isNew(e, true)) n++;
+                    }
+                    if (gemma && !Folders.chosen(prefs).isEmpty()) {
+                        for (Media.Entry e : Folders.scan(ctx, prefs, sound).files) if (isNew(e, true)) n++;
+                    }
                     post(cb, n, null);
                 } catch (Exception e) {
                     post(cb, null, e);
@@ -4297,6 +4463,20 @@ public final class Engine {
 
     /** Drops index entries of photos/videos that are gone from the phone (only with access to the whole gallery). */
     private int pruneDeleted(ContentResolver cr) {
+        int gone = 0;
+        java.util.Set<Long> sounds = AutoIndex.hasAudioAccess(ctx) ? Media.allIds(cr, IndexStore.KIND_AUDIO) : null;
+        if (sounds != null) {
+            for (IndexStore.Item it : store.items(IndexStore.KIND_AUDIO)) {
+                if ((it.mediaId & Folders.FILE_BIT) == 0 && !sounds.contains(it.mediaId)) {
+                    store.delete(it);
+                    gone++;
+                }
+            }
+        }
+        return gone + prunePictures(cr);
+    }
+
+    private int prunePictures(ContentResolver cr) {
         if (!AutoIndex.hasFullMediaAccess(ctx)) return 0;
         java.util.Set<Long> photos = Media.allIds(cr, IndexStore.KIND_PHOTO), videos = Media.allIds(cr, IndexStore.KIND_VIDEO);
         if (photos == null || videos == null) return 0;
@@ -4331,7 +4511,7 @@ public final class Engine {
         sumWaitMs = sumVisionMs = sumTextMs = 0;
         timedPhotos = 0;
         idxTotal = 0;
-        idxStatus = "Ищу фото и видео…";
+        idxStatus = documentsIndexing() || soundIndexing() ? "Ищу фото, видео, звук и документы…" : "Ищу фото и видео…";
         notifyChanged();
         ml.submit(new Runnable() {
             @Override
@@ -4360,6 +4540,19 @@ public final class Engine {
                                 if (isNew(e, background)) queue.add(e);
                             }
                         }
+                    }
+                    // sound and documents: EmbeddingGemma's text space (not the photo model's)
+                    List<Media.Entry> more = new ArrayList<Media.Entry>();
+                    if (soundIndexing() && AutoIndex.hasAudioAccess(ctx)) {
+                        for (Media.Entry e : Media.recentAudio(cr, AUDIO_LIMIT)) if (isNew(e, background)) more.add(e);
+                    }
+                    if (documentsIndexing()) {
+                        Folders.Scan scan = Folders.scan(ctx, prefs, soundIndexing());
+                        if (pruneFiles(scan, soundIndexing()) > 0) notifyChanged();
+                        for (Media.Entry e : scan.files) if (isNew(e, background)) more.add(e);
+                    }
+                    synchronized (queue) {
+                        queue.addAll(more);
                         idxTotal = queue.size();
                     }
                     idxStarted = System.currentTimeMillis();
@@ -4442,9 +4635,16 @@ public final class Engine {
                     }
                 }
             }
-            if (batch.get(0).kind == IndexStore.KIND_VIDEO) {
+            int kind = batch.get(0).kind;
+            if (kind == IndexStore.KIND_VIDEO) {
                 collectText();
                 indexVideo(batch.get(0));
+            } else if (kind == IndexStore.KIND_AUDIO) {
+                collectText();
+                indexAudio(batch.get(0));
+            } else if (kind == IndexStore.KIND_FILE) {
+                collectText();
+                indexFile(batch.get(0));
             } else {
                 indexPhotos(batch);
             }
@@ -4725,7 +4925,15 @@ public final class Engine {
                 List<io.github.teoplaydor.semsearch.core.ImagePreprocessor.Source> src =
                         new ArrayList<io.github.teoplaydor.semsearch.core.ImagePreprocessor.Source>();
                 for (Bitmap f : frames) src.add(new Media.BitmapSource(f));
-                float[] emb = photo.embedVideo(src, 0);
+                float[] pcm = null;
+                if (videoSound()) {
+                    try {
+                        pcm = soundOf(e, VIDEO_SOUND_S, 0);
+                    } catch (Exception silent) {
+                        pcm = null; // no sound track, or one the phone cannot decode: the frames alone
+                    }
+                }
+                float[] emb = pcm != null && pcm.length > Pcm.RATE / 2 ? photo.embedVideo(src, 0, pcm) : photo.embedVideo(src, 0);
                 checkAdult(store.add(e.kind, e.id, e.uri.toString(), e.name, null, e.date, emb));
                 idxDone++;
                 videoHangs = 0;
@@ -4751,6 +4959,244 @@ public final class Engine {
                 Journal.add(ctx, "app", "индексация: " + videoSkipNote);
             }
         }
+    }
+
+    /** How much of a sound the audio encoder hears (it takes 30 s at most), and of a video's soundtrack. */
+    static final double SOUND_S = 30, VIDEO_SOUND_S = 20, SOUND_SKIP_S = 10;
+    static final int AUDIO_LIMIT = 5000;
+
+    /** A recording, a voice message, a song: its first half-minute of sound (after any silence) as one vector. */
+    private void indexAudio(final Media.Entry e) {
+        idxStatus = idxDone + " из " + idxTotal + " · звук " + (e.name != null ? e.name : "") + "…";
+        notifyChanged();
+        try {
+            float[] pcm = soundOf(e, SOUND_S, SOUND_SKIP_S);
+            if (pcm.length < Pcm.RATE / 4) throw new IllegalStateException("звука меньше четверти секунды");
+            if (e.duration <= 0) e.duration = durationOf(e.uri);
+            float[] emb = model.embedAudio(pcm);
+            replaceOld(e);
+            store.add(e.kind, e.id, e.uri.toString(), soundTitle(e), soundLine(e), e.date, emb);
+            idxDone++;
+        } catch (Throwable t) {
+            fail(e, t);
+        }
+    }
+
+    /** A document: its text's meaning (with its name as the title), or for a scan its first page's picture. */
+    private void indexFile(final Media.Entry e) {
+        idxStatus = idxDone + " из " + idxTotal + " · документ " + (e.name != null ? e.name : "") + "…";
+        notifyChanged();
+        try {
+            final int type = io.github.teoplaydor.semsearch.core.TextExtract.type(e.name, e.mime);
+            String text = withTimeout("текст " + e.name, new Callable<String>() {
+                @Override
+                public String call() throws Exception {
+                    java.io.InputStream in = ctx.getContentResolver().openInputStream(e.uri);
+                    if (in == null) throw new java.io.IOException("файл не открылся");
+                    try {
+                        return io.github.teoplaydor.semsearch.core.TextExtract.extract(new java.io.BufferedInputStream(in, 1 << 16),
+                                type, io.github.teoplaydor.semsearch.core.TextExtract.MAX_CHARS);
+                    } finally {
+                        in.close();
+                    }
+                }
+            });
+            String title = baseName(e.name);
+            float[] emb = null;
+            if (text.length() >= 20) {
+                emb = model.embedDocument(title, text);
+            } else if (type == io.github.teoplaydor.semsearch.core.TextExtract.PDF && model.supportsImages()) {
+                // a scan, or text the reader cannot get at: what the first page looks like
+                Bitmap page = Media.pdfPage(ctx, e.uri, 0, 1280);
+                if (page != null) {
+                    try {
+                        emb = model.embedImage(new Media.BitmapSource(page), maxBudget());
+                    } finally {
+                        page.recycle();
+                    }
+                }
+            }
+            if (emb == null) emb = model.embedDocument(title, title); // its name is all there is
+            replaceOld(e);
+            store.add(e.kind, e.id, e.uri.toString(), e.name, text, e.date, emb);
+            idxDone++;
+        } catch (Throwable t) {
+            fail(e, t);
+        }
+    }
+
+    /** The index's older version of a changed file goes before the new one comes. */
+    private void replaceOld(Media.Entry e) {
+        IndexStore.Item old = store.findMedia(e.kind, e.id);
+        if (old != null) store.delete(old);
+    }
+
+    /** A sound's mono 16 kHz samples, decoded on a thread of its own (a file that hangs counts as unreadable). */
+    private float[] soundOf(final Media.Entry e, final double seconds, final double skip) throws Exception {
+        return withTimeout("звук " + e.name, new Callable<float[]>() {
+            @Override
+            public float[] call() throws Exception {
+                hangIfTest(e);
+                return Sound.decode(ctx, e.uri, seconds, skip);
+            }
+        });
+    }
+
+    private <T> T withTimeout(String what, Callable<T> job) throws Exception {
+        java.util.concurrent.FutureTask<T> task = new java.util.concurrent.FutureTask<T>(job);
+        Thread t = new Thread(task, "file-read");
+        t.setDaemon(true);
+        t.start();
+        try {
+            return task.get(openTimeoutS, java.util.concurrent.TimeUnit.SECONDS);
+        } catch (java.util.concurrent.TimeoutException te) {
+            task.cancel(true);
+            Journal.add(ctx, "app", "индексация: " + what + " — не прочитан за " + openTimeoutS + " с");
+            throw new OpenTimeout(what + ": не прочитан за " + openTimeoutS + " с (файл недоступен или ещё в облаке?)");
+        } catch (ExecutionException ee) {
+            throw ee.getCause() instanceof Exception ? (Exception) ee.getCause() : ee;
+        }
+    }
+
+    private long durationOf(Uri uri) {
+        android.media.MediaMetadataRetriever r = new android.media.MediaMetadataRetriever();
+        try {
+            r.setDataSource(ctx, uri);
+            String d = r.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_DURATION);
+            return d == null ? 0 : Long.parseLong(d);
+        } catch (Exception ex) {
+            return 0;
+        } finally {
+            try {
+                r.release();
+            } catch (Exception ignored) {
+                // released already
+            }
+        }
+    }
+
+    static String baseName(String name) {
+        if (name == null) return "";
+        int dot = name.lastIndexOf('.');
+        return dot > 0 ? name.substring(0, dot) : name;
+    }
+
+    /** A sound's name: its title (music), else its file's name. */
+    static String soundTitle(Media.Entry e) {
+        return e.title != null && !e.title.trim().isEmpty() ? e.title : baseName(e.name);
+    }
+
+    /** "0:42 · Диктофон": a sound's length and who or where it is from. */
+    static String soundLine(Media.Entry e) {
+        StringBuilder b = new StringBuilder();
+        if (e.duration > 0) b.append(Sound.duration(e.duration));
+        String from = e.artist != null ? e.artist : e.folder;
+        if (from != null && !from.isEmpty()) b.append(b.length() > 0 ? " · " : "").append(from);
+        return b.toString();
+    }
+
+    /** Documents (and sound files) gone from the chosen folders, out of the index; only after a complete scan. */
+    private int pruneFiles(Folders.Scan scan, boolean withSound) {
+        if (!scan.complete) return 0;
+        int n = 0;
+        for (IndexStore.Item it : store.items(IndexStore.KIND_FILE)) {
+            if (!scan.ids.contains(it.mediaId)) {
+                store.delete(it);
+                n++;
+            }
+        }
+        if (withSound) {
+            for (IndexStore.Item it : store.items(IndexStore.KIND_AUDIO)) {
+                if ((it.mediaId & Folders.FILE_BIT) != 0 && !scan.ids.contains(it.mediaId)) {
+                    store.delete(it);
+                    n++;
+                }
+            }
+        }
+        return n;
+    }
+
+    // ------------------------------------------------------------------ what is indexed besides pictures
+
+    /** Sound is indexed: the audio encoder is loaded (and the user did not turn it off). */
+    boolean soundIndexing() {
+        return audioReady() && prefs.getBoolean("sound_index", true);
+    }
+
+    public boolean soundIndexOn() {
+        return prefs.getBoolean("sound_index", true);
+    }
+
+    public void setSoundIndex(boolean on) {
+        prefs.edit().putBoolean("sound_index", on).apply();
+        notifyChanged();
+    }
+
+    /** Documents are indexed: folders were chosen and a text model for them is here (not SigLIP's short one). */
+    boolean documentsIndexing() {
+        Embedder m = model;
+        return !Folders.chosen(prefs).isEmpty() && m != null && !(m instanceof SigLip) && notesUsable;
+    }
+
+    /** The audio encoder can be downloaded: EmbeddingGemma 2 is on the phone and nothing else is being fetched. */
+    public boolean canDownloadAudio() {
+        return manifest.exists() && state != State.DOWNLOADING && state != State.LOADING;
+    }
+
+    /** A video's vector takes its sound too: one model for both, its audio encoder loaded, the setting on. */
+    boolean videoSound() {
+        Embedder m = model;
+        return m != null && m == photo && m.supportsAudio() && prefs.getBoolean("video_sound", true);
+    }
+
+    public boolean videoSoundOn() {
+        return prefs.getBoolean("video_sound", true);
+    }
+
+    /** Videos with their sound or without: the videos are indexed again (their vectors differ). */
+    public void setVideoSound(final boolean on) {
+        prefs.edit().putBoolean("video_sound", on).apply();
+        ml.submit(new Runnable() {
+            @Override
+            public void run() {
+                if (checkVideoSound()) notifyChanged();
+            }
+        });
+    }
+
+    /** When videos' sound changed (the audio encoder came or went, the setting): their vectors made anew. */
+    private boolean checkVideoSound() {
+        if (store == null || model == null) return false;
+        String sig = videoSound() ? "sound" : "";
+        if (sig.equals(prefs.getString("video_sound_sig", ""))) return false;
+        store.clearKind(IndexStore.KIND_VIDEO);
+        prefs.edit().putString("video_sound_sig", sig).putBoolean("reindex_pending", true).apply();
+        return true;
+    }
+
+    public List<Uri> folders() {
+        return Folders.chosen(prefs);
+    }
+
+    /** A folder of documents given: its files indexed in the next run (one starts now when nothing runs). */
+    public void addFolder(Uri tree) {
+        Folders.add(ctx, prefs, tree);
+        notifyChanged();
+        if (!indexing && state == State.READY) startIndexFromPrefs(false);
+    }
+
+    /** A folder taken away: its files leave the index. */
+    public void removeFolder(final Uri tree) {
+        Folders.remove(ctx, prefs, tree);
+        ml.submit(new Runnable() {
+            @Override
+            public void run() {
+                if (store == null) return;
+                Folders.Scan scan = Folders.scan(ctx, prefs, soundIndexing());
+                if (pruneFiles(scan, true) > 0) notifyChanged();
+            }
+        });
+        notifyChanged();
     }
 
     /** Why the rest of the videos were left for another run (for the end of the run's status). */
@@ -4805,7 +5251,13 @@ public final class Engine {
 
     /** Not in the index yet; files that failed before only count when the user started the run. */
     private boolean isNew(Media.Entry e, boolean skipFailed) {
-        return !store.hasMedia(e.kind, e.id) && !(skipFailed && failedBefore(e));
+        if (store.hasMedia(e.kind, e.id)) {
+            // a document (or a sound file in a chosen folder) changed since: indexed again
+            if ((e.id & Folders.FILE_BIT) == 0) return false;
+            IndexStore.Item old = store.findMedia(e.kind, e.id);
+            if (old == null || old.date == e.date) return false;
+        }
+        return !(skipFailed && failedBefore(e));
     }
 
     // Files that could not be indexed (a broken video, an unsupported format): without this list the

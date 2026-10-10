@@ -45,6 +45,10 @@ cp test/parity/reference.mjs "$T/reference.mjs"
 java -Xmx3g -cp "$T/cls:$T/ort-desktop.jar" PipelineParityTest "$T/models/dummy" "$T/reference.json"
 # Same check with the ONNX Runtime classes rebuilt for the APK.
 java -Xmx3g -cp "$T/cls:build/deps/ort-classes:$T/ort-desktop.jar" PipelineParityTest "$T/models/dummy" "$T/reference.json"
+# Audio: the Gemma 4 log-mel features and the audio encoder in the pipeline (alone, and a video's sound).
+cp test/parity/reference_audio.mjs "$T/reference_audio.mjs"
+(cd "$T" && node reference_audio.mjs "$PWD/models" dummy > reference_audio.json)
+java -Xmx3g -cp "$T/cls:build/deps/ort-classes:$T/ort-desktop.jar" AudioParityTest "$T/models/dummy" "$T/reference_audio.json"
 
 echo "== 2b. Russian stemmer vs Snowball, query bridge"
 python3 -m pip install -q snowballstemmer
@@ -58,6 +62,11 @@ java -Dfile.encoding=UTF-8 -Dstdout.encoding=UTF-8 -cp "$T/cls:$T/ort-desktop.ja
 java -Djava.awt.headless=true -Dfile.encoding=UTF-8 -Dstdout.encoding=UTF-8 -cp "$T/cls:$T/ort-desktop.jar" DocScanTest "$T/docscan" test/docscan/*.jpg
 java -Djava.awt.headless=true -Dfile.encoding=UTF-8 -Dstdout.encoding=UTF-8 -cp "$T/cls:$T/ort-desktop.jar" PdfPagesTest "$T/pdf"
 java -Dfile.encoding=UTF-8 -Dstdout.encoding=UTF-8 -cp "$T/cls" NoteTextTest
+java -Dfile.encoding=UTF-8 -Dstdout.encoding=UTF-8 -cp "$T/cls" PcmTest
+# documents' text: files made by LibreOffice, python-pptx, fpdf2, pikepdf (and pdftotext's words to compare)
+python3 -m pip install -q fpdf2 pikepdf python-pptx
+rm -rf "$T/files" && python3 test/files/make_docs.py "$T/files"
+java -Dfile.encoding=UTF-8 -Dstdout.encoding=UTF-8 -cp "$T/cls" TextExtractTest "$T/files"
 
 echo "== 2e. faces (YuNet + SFace) vs OpenCV's FaceDetectorYN / FaceRecognizerSF on stand-in graphs"
 python3 -m pip install -q "opencv-python-headless==4.12.0.88" pillow

@@ -47,6 +47,11 @@ public final class AutoIndex {
         return granted(c, Manifest.permission.READ_EXTERNAL_STORAGE);
     }
 
+    /** Read access to sound files (recordings, voice messages, music). */
+    static boolean hasAudioAccess(Context c) {
+        return granted(c, Build.VERSION.SDK_INT >= 33 ? "android.permission.READ_MEDIA_AUDIO" : Manifest.permission.READ_EXTERNAL_STORAGE);
+    }
+
     /** Access to the whole gallery: only then can a photo missing from MediaStore be treated as deleted. */
     static boolean hasFullMediaAccess(Context c) {
         return Build.VERSION.SDK_INT >= 33 ? granted(c, "android.permission.READ_MEDIA_IMAGES")
@@ -74,6 +79,8 @@ public final class AutoIndex {
             int descendants = 1; // TriggerContentUri.FLAG_NOTIFY_FOR_DESCENDANTS
             add.invoke(b, make.newInstance(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, descendants));
             add.invoke(b, make.newInstance(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, descendants));
+            // new recordings and voice messages too (indexed when the audio encoder is there)
+            if (hasAudioAccess(c)) add.invoke(b, make.newInstance(MediaStore.Audio.Media.EXTERNAL_CONTENT_URI, descendants));
             // let a burst of new photos settle, but never wait longer than two minutes
             JobInfo.Builder.class.getMethod("setTriggerContentUpdateDelay", long.class).invoke(b, 15_000L);
             JobInfo.Builder.class.getMethod("setTriggerContentMaxDelay", long.class).invoke(b, 120_000L);

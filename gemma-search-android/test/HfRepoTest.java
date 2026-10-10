@@ -27,6 +27,12 @@ public class HfRepoTest {
         check(names.contains("onnx/model_q4.onnx_data") && names.contains("onnx/model_q4.onnx_data_1"), "external data chunks included");
         check(!names.contains("onnx/model_fp16.onnx") && !names.contains("onnx/audio_encoder_q4.onnx"), "other dtypes / audio skipped");
         check(names.contains("tokenizer.json") && names.contains("processor_config.json"), "configs included");
+        HfRepo.Plan withAudio = HfRepo.withAudio(HfRepo.plan(files, true), files);
+        check("onnx/audio_encoder_q4.onnx".equals(withAudio.audioModel) && withAudio.totalBytes == p.totalBytes + 70_000
+                && HfRepo.audioBytes(files) == 70_000, "audio encoder added on request (q4), its size");
+        File am = new File(dir.getPath() + "-audio-manifest.json");
+        HfRepo.saveManifest(withAudio, "onnx-community/embeddinggemma-2-ONNX", am);
+        check("onnx/audio_encoder_q4.onnx".equals(HfRepo.loadManifest(am).audioModel), "the manifest keeps the audio encoder");
         HfRepo.Plan textOnly = HfRepo.plan(files, false);
         check(textOnly.visionModel == null && textOnly.totalBytes < p.totalBytes, "text-only plan is smaller");
 

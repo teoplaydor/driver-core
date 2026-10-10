@@ -14,9 +14,31 @@ import java.util.List;
 
 import io.github.teoplaydor.semsearch.core.VectorMath;
 
-/** Persistent vector index (SQLite) mirrored in memory for brute-force cosine search. */
+/**
+ * Persistent vector index (SQLite) mirrored in memory for brute-force cosine search. Photos and videos are in the photo
+ * model's space; notes, sound (audio) and documents (files) in EmbeddingGemma's text space: they are searched with the
+ * text query.
+ */
 public final class IndexStore {
-    public static final int KIND_PHOTO = 0, KIND_VIDEO = 1, KIND_NOTE = 2;
+    public static final int KIND_PHOTO = 0, KIND_VIDEO = 1, KIND_NOTE = 2, KIND_AUDIO = 3, KIND_FILE = 4;
+    static final int KINDS = 5;
+    /** Kinds as bits ({@code 1 << kind}): which of them a search, the gallery, a filter takes. */
+    public static final int PHOTOS = 1, VIDEOS = 1 << 1, NOTES = 1 << 2, AUDIO = 1 << 3, FILES = 1 << 4,
+            MEDIA = PHOTOS | VIDEOS, TEXT = NOTES | AUDIO | FILES, ALL = MEDIA | TEXT;
+
+    /** Whether a kind's vectors are in the text space (notes, sound, documents) rather than the photo model's. */
+    public static boolean textSpace(int kind) {
+        return kind == KIND_NOTE || kind == KIND_AUDIO || kind == KIND_FILE;
+    }
+
+    /** A picture (photo or video): what the photo model embeds, what can be hidden, what has faces. */
+    public static boolean picture(int kind) {
+        return kind == KIND_PHOTO || kind == KIND_VIDEO;
+    }
+
+    static int mask(boolean photos, boolean videos, boolean notes) {
+        return (photos ? PHOTOS : 0) | (videos ? VIDEOS : 0) | (notes ? NOTES : 0);
+    }
     public static final int[] DIMS = {128, 256, 512, 768};
 
     public static final class Item {
@@ -50,7 +72,13 @@ public final class IndexStore {
 
     private final SQLiteDatabase db;
     private final List<Item> items = new ArrayList<Item>();
-    private final HashSet<Long> photoIds = new HashSet<Long>(), videoIds = new HashSet<Long>();
+    /** Each kind's ids (MediaStore ids; a file's, a hash of its address): what is in the index already. */
+    @SuppressWarnings("unchecked")
+    private final HashSet<Long>[] ids = new HashSet[KINDS];
+
+    {
+        for (int k = 0; k < KINDS; k++) ids[k] = new HashSet<Long>();
+    }
     /** Photos and videos kept out of the gallery, search and albums ({@link #key}s): 18+ (Engine). */
     private HashSet<Long> hidden = new HashSet<Long>();
 
@@ -100,9 +128,8 @@ public final class IndexStore {
     }
 
     private void track(Item it, boolean add) {
-        HashSet<Long> set = it.kind == KIND_PHOTO ? photoIds : it.kind == KIND_VIDEO ? videoIds : null;
-        if (set == null) return;
-        if (add) set.add(it.mediaId); else set.remove(it.mediaId);
+        if (it.kind == KIND_NOTE || it.kind < 0 || it.kind >= KINDS) return;
+        if (add) ids[it.kind].add(it.mediaId); else ids[it.kind].remove(it.mediaId);
     }
 
     public synchronized Item add(int kind, long mediaId, String uri, String title, String body, long date, float[] emb) {
@@ -204,14 +231,34 @@ public final class IndexStore {
         track(it, false);
     }
 
+    /** Every photo and video gone (another photo model: their vectors are not comparable any more). */
     public synchronized void clearMedia() {
-        db.delete("items", "kind != ?", new String[]{String.valueOf(KIND_NOTE)});
+        clearKind(KIND_PHOTO);
+        clearKind(KIND_VIDEO);
+    }
+
+    /** Every item of a kind gone (to be indexed again). */
+    public synchronized void clearKind(int kind) {
+        db.delete("items", "kind = ?", new String[]{String.valueOf(kind)});
         List<Item> keep = new ArrayList<Item>();
-        for (Item it : items) if (it.kind == KIND_NOTE) keep.add(it);
+        for (Item it : items) if (it.kind != kind) keep.add(it);
         items.clear();
         items.addAll(keep);
-        photoIds.clear();
-        videoIds.clear();
+        if (kind >= 0 && kind < KINDS) ids[kind].clear();
+    }
+
+    /** The item of a kind with this id (MediaStore's, or a file's), or null. */
+    public synchronized Item findMedia(int kind, long mediaId) {
+        if (kind < 0 || kind >= KINDS || !ids[kind].contains(mediaId)) return null;
+        for (Item it : items) if (it.kind == kind && it.mediaId == mediaId) return it;
+        return null;
+    }
+
+    /** Every item of a kind. */
+    public synchronized List<Item> items(int kind) {
+        List<Item> out = new ArrayList<Item>();
+        for (Item it : items) if (it.kind == kind) out.add(it);
+        return out;
     }
 
     /** A photo's or video's lasting name: its kind and MediaStore id (the row id changes when the index is rebuilt). */
@@ -237,7 +284,7 @@ public final class IndexStore {
     }
 
     public synchronized boolean isHidden(Item it) {
-        return it.kind != KIND_NOTE && !hidden.isEmpty() && hidden.contains(key(it));
+        return picture(it.kind) && !hidden.isEmpty() && hidden.contains(key(it));
     }
 
     /** The hidden photos and videos, newest first. */
@@ -254,7 +301,7 @@ public final class IndexStore {
     }
 
     public synchronized boolean hasMedia(int kind, long mediaId) {
-        return (kind == KIND_PHOTO ? photoIds : videoIds).contains(mediaId);
+        return kind >= 0 && kind < KINDS && ids[kind].contains(mediaId);
     }
 
     public synchronized int count(int kind) {
@@ -265,13 +312,17 @@ public final class IndexStore {
 
     /** Photos and/or videos (and notes), newest first: the gallery view. */
     public synchronized List<Item> recent(boolean photos, boolean videos, boolean notes, int limit) {
+        return recent(mask(photos, videos, notes), limit);
+    }
+
+    /** The items of the {@code kinds} (bits), newest first: the gallery view; the notes alone, pinned ones first. */
+    public synchronized List<Item> recent(int kinds, int limit) {
         List<Item> out = new ArrayList<Item>();
         for (Item it : items) {
             if (isHidden(it)) continue;
-            if ((it.kind == KIND_PHOTO && photos) || (it.kind == KIND_VIDEO && videos) || (it.kind == KIND_NOTE && notes)) out.add(it);
+            if ((kinds & (1 << it.kind)) != 0) out.add(it);
         }
-        // the notes alone: the pinned ones first
-        Collections.sort(out, notes && !photos && !videos ? PINNED_NEWEST : new Comparator<Item>() {
+        Collections.sort(out, kinds == NOTES ? PINNED_NEWEST : new Comparator<Item>() {
             @Override
             public int compare(Item a, Item b) {
                 return Long.compare(b.date, a.date);
@@ -283,7 +334,7 @@ public final class IndexStore {
     /** Every photo and video, hidden ones too (what the gallery's statistics are taken over). */
     public synchronized List<Item> media() {
         List<Item> out = new ArrayList<Item>();
-        for (Item it : items) if (it.kind != KIND_NOTE) out.add(it);
+        for (Item it : items) if (picture(it.kind)) out.add(it);
         return out;
     }
 
@@ -317,8 +368,8 @@ public final class IndexStore {
     public synchronized List<Hit> search(float[] qMedia, int mediaDims, float[] qNotes, int notesDims, boolean photos,
                                          boolean videos, boolean notes, boolean sameSpace, int limit, long excludeId) {
         List<Hit> media = (photos || videos) && qMedia != null
-                ? rank(qMedia, mediaDims, photos, videos, false, excludeId) : new ArrayList<Hit>();
-        List<Hit> nt = notes && qNotes != null ? rank(qNotes, notesDims, false, false, true, excludeId) : new ArrayList<Hit>();
+                ? rank(qMedia, mediaDims, mask(photos, videos, false), excludeId) : new ArrayList<Hit>();
+        List<Hit> nt = notes && qNotes != null ? rank(qNotes, notesDims, TEXT, excludeId) : new ArrayList<Hit>();
         List<Hit> all = new ArrayList<Hit>(media.size() + nt.size());
         if (sameSpace || media.isEmpty() || nt.isEmpty()) {
             all.addAll(media);
@@ -363,9 +414,18 @@ public final class IndexStore {
 
     public synchronized Tiers searchTiers(float[] qMedia, int mediaDims, float[] qNotes, int notesDims, boolean photos,
                                           boolean videos, boolean notes, boolean sameSpace, long excludeId) {
-        List<Hit> media = (photos || videos) && qMedia != null
-                ? rank(qMedia, mediaDims, photos, videos, false, excludeId) : new ArrayList<Hit>();
-        List<Hit> nt = notes && qNotes != null ? rank(qNotes, notesDims, false, false, true, excludeId) : new ArrayList<Hit>();
+        return searchTiers(qMedia, mediaDims, qNotes, notesDims, mask(photos, videos, false) | (notes ? TEXT : 0), sameSpace, excludeId);
+    }
+
+    /**
+     * The tiers over the {@code kinds} (bits): photos and videos with {@code qMedia}, notes, sound and documents with
+     * {@code qNotes}, each group's own typical item telling what stands out.
+     */
+    public synchronized Tiers searchTiers(float[] qMedia, int mediaDims, float[] qNotes, int notesDims, int kinds,
+                                          boolean sameSpace, long excludeId) {
+        List<Hit> media = (kinds & MEDIA) != 0 && qMedia != null
+                ? rank(qMedia, mediaDims, kinds & MEDIA, excludeId) : new ArrayList<Hit>();
+        List<Hit> nt = (kinds & TEXT) != 0 && qNotes != null ? rank(qNotes, notesDims, kinds & TEXT, excludeId) : new ArrayList<Hit>();
         Tiers tm = tiers(media), tn = tiers(nt), out = new Tiers();
         List<Hit> sureM = new ArrayList<Hit>(), sureN = new ArrayList<Hit>(), moreM = new ArrayList<Hit>(tm.more),
                 moreN = new ArrayList<Hit>(tn.more);
@@ -442,7 +502,7 @@ public final class IndexStore {
         }
     };
 
-    private List<Hit> rank(float[] q, int dims, boolean photos, boolean videos, boolean notes, long excludeId) {
+    private List<Hit> rank(float[] q, int dims, int kinds, long excludeId) {
         int d = Math.min(dims, q.length);
         int di = -1;
         for (int i = 0; i < DIMS.length; i++) if (DIMS[i] == d) di = i;
@@ -450,9 +510,7 @@ public final class IndexStore {
         List<Hit> hits = new ArrayList<Hit>();
         for (Item it : items) {
             if (it.id == excludeId || it.emb.length < d || isHidden(it)) continue;
-            if ((it.kind == KIND_PHOTO && !photos) || (it.kind == KIND_VIDEO && !videos) || (it.kind == KIND_NOTE && !notes)) {
-                continue;
-            }
+            if ((kinds & (1 << it.kind)) == 0) continue;
             float bn = di >= 0 ? it.norms[di] : VectorMath.prefixNorm(it.emb, 0, d);
             hits.add(new Hit(it, VectorMath.cosinePrefix(q, qn, it.emb, 0, bn, d)));
         }
@@ -470,11 +528,11 @@ public final class IndexStore {
         List<Hit> hits = new ArrayList<Hit>();
         for (Item it : items) {
             if (it.id == excludeId || it.emb.length < d || isHidden(it)) continue;
-            if ((it.kind == KIND_PHOTO && !photos) || (it.kind == KIND_VIDEO && !videos) || (it.kind == KIND_NOTE && !notes)) {
+            if ((it.kind == KIND_PHOTO && !photos) || (it.kind == KIND_VIDEO && !videos) || (textSpace(it.kind) && !notes)) {
                 continue;
             }
             float bn = DIMS[di] == d ? it.norms[di] : VectorMath.prefixNorm(it.emb, 0, d);
-            boolean note = it.kind == KIND_NOTE;
+            boolean note = textSpace(it.kind);
             hits.add(new Hit(it, VectorMath.cosinePrefix(note ? qNotes : qMedia, note ? qnn : qmn, it.emb, 0, bn, d)));
         }
         Collections.sort(hits, new Comparator<Hit>() {

@@ -14,7 +14,7 @@ from onnx import TensorProto, helper, numpy_helper
 src_tok, out = sys.argv[1], sys.argv[2]
 os.makedirs(os.path.join(out, "onnx"), exist_ok=True)
 rng = np.random.default_rng(0)
-H, E, PATCH = 16, 8, 16
+H, E, PATCH, FEAT = 16, 8, 16, 128
 D = PATCH * PATCH * 3
 
 # --- tokenizer: Gemma tokenizer + Gemma-4-style multimodal tokens, <bos> ... <eos> template
@@ -49,11 +49,19 @@ json.dump({"model_type": "embedding_gemma2", "architectures": ["EmbeddingGemma2M
            "image_token_id": ids["<|image|>"], "video_token_id": ids["<|video|>"], "audio_token_id": ids["<|audio|>"],
            "text_config": {"model_type": "gemma4_text", "hidden_size": H, "vocab_size": V, "rms_norm_eps": 1e-06,
                            "rope_theta": 1000000.0, "final_logit_softcapping": None},
-           "vision_config": {"model_type": "gemma4_vision", "hidden_size": H}, "audio_config": None},
+           "vision_config": {"model_type": "gemma4_vision", "hidden_size": H},
+           "audio_config": {"model_type": "gemma4_audio", "hidden_size": H}},
           open(os.path.join(out, "config.json"), "w"))
 json.dump({"processor_class": "EmbeddingGemma2Processor",
            "image_processor": {"patch_size": PATCH, "max_soft_tokens": 280, "pooling_kernel_size": 3},
-           "video_processor": {"patch_size": PATCH, "max_soft_tokens": 70, "pooling_kernel_size": 3, "max_frames": 32}},
+           "video_processor": {"patch_size": PATCH, "max_soft_tokens": 70, "pooling_kernel_size": 3, "max_frames": 32},
+           # Gemma 4 audio features as the Python extractor saves them (its defaults, lengths in samples)
+           "feature_extractor": {"feature_extractor_type": "Gemma4AudioFeatureExtractor", "feature_size": FEAT,
+                                 "sampling_rate": 16000, "padding_value": 0.0, "return_attention_mask": True,
+                                 "frame_length": 320, "hop_length": 160, "fft_length": 512, "min_frequency": 0.0,
+                                 "max_frequency": 8000.0, "preemphasis": 0.0, "preemphasis_htk_flavor": True,
+                                 "fft_overdrive": False, "dither": 0.0, "input_scale_factor": 1.0, "mel_floor": 0.001,
+                                 "per_bin_mean": None, "per_bin_stddev": None}},
           open(os.path.join(out, "processor_config.json"), "w"))
 json.dump({"processor_class": "EmbeddingGemma2Processor"}, open(os.path.join(out, "preprocessor_config.json"), "w"))
 
@@ -143,4 +151,30 @@ m = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 17)])
 m.ir_version = 8
 onnx.checker.check_model(m)
 onnx.save(m, os.path.join(out, "onnx", "vision_encoder.onnx"))
+# --- audio encoder: like the real one, every 4th mel frame (two stride-2 convolutions), the valid ones only, to H
+inits = [init("w_a", rng.normal(0, 0.05, (FEAT, H)).astype(np.float32)),
+         init("b_a", rng.normal(0, 0.05, (H,)).astype(np.float32)),
+         init("st0", np.array([0], np.int64)), init("en", np.array([2**62], np.int64)),
+         init("ax1", np.array([1], np.int64)), init("st4", np.array([4], np.int64)),
+         init("ax0", np.array([0], np.int64)), init("shp_flat", np.array([-1], np.int64)),
+         init("shp_f", np.array([-1, FEAT], np.int64))]
+nodes = [helper.make_node("Slice", ["input_features", "st0", "en", "ax1", "st4"], ["f4"]),
+         helper.make_node("Slice", ["input_features_mask", "st0", "en", "ax1", "st4"], ["m4"]),
+         helper.make_node("Reshape", ["f4", "shp_f"], ["f2"]),
+         helper.make_node("Reshape", ["m4", "shp_flat"], ["m1"]),
+         helper.make_node("NonZero", ["m1"], ["nz"]),
+         helper.make_node("Squeeze", ["nz", "ax0"], ["idx"]),
+         helper.make_node("Gather", ["f2", "idx"], ["g"], axis=0),
+         helper.make_node("MatMul", ["g", "w_a"], ["proj"]),
+         helper.make_node("Add", ["proj", "b_a"], ["audio_features"])]
+graph = helper.make_graph(
+    nodes, "dummy_audio",
+    [helper.make_tensor_value_info("input_features", TensorProto.FLOAT, ["batch", "frames", FEAT]),
+     helper.make_tensor_value_info("input_features_mask", TensorProto.BOOL, ["batch", "frames"])],
+    [helper.make_tensor_value_info("audio_features", TensorProto.FLOAT, ["tokens", H])],
+    inits)
+m = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 17)])
+m.ir_version = 8
+onnx.checker.check_model(m)
+onnx.save(m, os.path.join(out, "onnx", "audio_encoder.onnx"))
 print("ok", out, "vocab", V, ids)

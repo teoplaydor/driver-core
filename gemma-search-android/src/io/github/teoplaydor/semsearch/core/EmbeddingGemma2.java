@@ -24,7 +24,8 @@ import ai.onnxruntime.platform.Fp16Conversions;
  * On-device EmbeddingGemma 2 (ONNX export from onnx-community/embeddinggemma-2-ONNX).
  *
  * Mirrors transformers.js {@code EmbeddingGemma2Model}: the vision encoder turns each image
- * (or video frame) into soft tokens, and the text model consumes {@code input_ids},
+ * (or video frame) into soft tokens, the audio encoder the log-mel features of a clip
+ * ({@link AudioFeatures}), and the text model consumes {@code input_ids},
  * {@code attention_mask} and the per-modality feature matrices, returning the mean-pooled,
  * L2-normalised {@code sentence_embedding}.
  */
@@ -38,6 +39,8 @@ public final class EmbeddingGemma2 implements Embedder, Embedder.Staged {
     private final OrtSession visionSession;
     /** The vision encoder elsewhere (the NPU process) instead of {@link #visionSession}. */
     private final VisionRunner visionRunner;
+    /** The audio encoder, once {@link #loadAudio} found it (it is downloaded apart from the rest). */
+    private volatile OrtSession audioSession;
     private final HfTokenizer tokenizer;
     private final ModelConfig cfg;
     /** With an NPU (NNAPI) the vision graph runs with fixed shapes: this many images of this many patches. */
@@ -178,6 +181,10 @@ public final class EmbeddingGemma2 implements Embedder, Embedder.Staged {
         if (cfg.videoTokenId < 0 && cfg.videoToken != null && tokenizer.tokenId(cfg.videoToken) != null) {
             cfg.videoTokenId = tokenizer.tokenId(cfg.videoToken);
         }
+        if (cfg.audioToken == null && cfg.audioTokenId >= 0) cfg.audioToken = tokenizer.token(cfg.audioTokenId);
+        if (cfg.audioTokenId < 0 && cfg.audioToken != null && tokenizer.tokenId(cfg.audioToken) != null) {
+            cfg.audioTokenId = tokenizer.tokenId(cfg.audioToken);
+        }
         cfg.hasVideo = cfg.hasVideo || (cfg.videoToken != null && cfg.videoTokenId >= 0 && cfg.hasVideoProcessor);
     }
 
@@ -203,6 +210,28 @@ public final class EmbeddingGemma2 implements Embedder, Embedder.Staged {
         return supportsImages() && cfg.hasVideo;
     }
 
+    /**
+     * The audio encoder (its own graph, downloaded on request): from now on the model embeds audio, and videos with
+     * their sound. On the CPU.
+     */
+    public void loadAudio(File audioModel, int threads) throws IOException {
+        if (cfg.audio == null || cfg.audioToken == null || cfg.audioTokenId < 0) {
+            throw new IOException("у модели нет звуковой части (нет настроек звука или токена <|audio|>)");
+        }
+        try {
+            OrtSession s = env.createSession(audioModel.getPath(), options(threads, false));
+            OrtSession old = audioSession;
+            audioSession = s;
+            if (old != null) old.close();
+        } catch (OrtException e) {
+            throw new IOException("звуковой энкодер " + audioModel.getName() + ": " + e.getMessage(), e);
+        }
+    }
+
+    public boolean supportsAudio() {
+        return audioSession != null;
+    }
+
     public int embeddingDim() { return embeddingDim; }
 
     public int defaultImageTokens() { return cfg.image.maxSoftTokens; }
@@ -223,6 +252,13 @@ public final class EmbeddingGemma2 implements Embedder, Embedder.Staged {
 
     public float[] embedDocument(String text) throws OrtException {
         return embedText(DOCUMENT_PREFIX + text, 2048);
+    }
+
+    /** The model card's document prompt with a title: "title: {title} | text: {text}". */
+    @Override
+    public float[] embedDocument(String title, String text) throws OrtException {
+        String t = title == null ? "" : title.replace('\n', ' ').trim();
+        return embedText("title: " + (t.isEmpty() ? "none" : t) + " | text: " + text, 2048);
     }
 
     public float[] embedText(String text, int maxTokens) throws OrtException {
@@ -314,6 +350,14 @@ public final class EmbeddingGemma2 implements Embedder, Embedder.Staged {
 
     /** A video is a sequence of frames, each an image-like block of video soft tokens. */
     public float[] embedVideo(List<ImagePreprocessor.Source> frames, int maxSoftTokens) throws OrtException {
+        return embedVideo(frames, maxSoftTokens, null);
+    }
+
+    /**
+     * A video with its sound: the frames' blocks, then (after a space, as the processor joins the placeholders of a
+     * video and its audio) the audio's block. {@code pcm}: mono 16 kHz samples, or null for none.
+     */
+    public float[] embedVideo(List<ImagePreprocessor.Source> frames, int maxSoftTokens, float[] pcm) throws OrtException {
         if (!supportsVideo()) throw new IllegalStateException("video is not supported by this model");
         ModelConfig.ImageParams p = budget(cfg.video, maxSoftTokens);
         long t0 = System.nanoTime();
@@ -334,12 +378,78 @@ public final class EmbeddingGemma2 implements Embedder, Embedder.Staged {
             System.arraycopy(a, 0, feats, off, a.length);
             off += a.length;
         }
+        float[] audioFeats = new float[0];
+        int nAudio = 0;
+        if (pcm != null && supportsAudio()) {
+            AudioFeatures af = AudioFeatures.extract(pcm, cfg.audio);
+            nAudio = af.softTokens();
+            audioFeats = encodeAudio(af);
+            sb.append(' ').append(audioBlock(nAudio));
+        }
         int[] ids = tokenizer.encode(sb.toString());
         lastVisionMs = (System.nanoTime() - t0) / 1000000;
         long t1 = System.nanoTime();
-        float[] emb = runTextModel(ids, new float[0], 0, feats, total);
+        float[] emb = runTextModel(ids, new float[0], 0, feats, total, audioFeats, nAudio);
         lastTextMs = (System.nanoTime() - t1) / 1000000;
         return emb;
+    }
+
+    // ------------------------------------------------------------------ audio
+
+    /** A clip (mono samples at the extractor's rate, 16 kHz; the first 30 s count) as one vector. */
+    public float[] embedAudio(float[] pcm) throws OrtException {
+        if (!supportsAudio()) throw new IllegalStateException("звуковой энкодер не загружен");
+        long t0 = System.nanoTime();
+        AudioFeatures af = AudioFeatures.extract(pcm, cfg.audio);
+        int n = af.softTokens();
+        float[] feats = encodeAudio(af);
+        int[] ids = tokenizer.encode(audioBlock(n));
+        lastVisionMs = (System.nanoTime() - t0) / 1000000;
+        long t1 = System.nanoTime();
+        float[] emb = runTextModel(ids, new float[0], 0, new float[0], 0, feats, n);
+        lastTextMs = (System.nanoTime() - t1) / 1000000;
+        return emb;
+    }
+
+    /** The placeholder of a clip with {@code n} soft tokens: {@code <|audio>} n × {@code <|audio|>} {@code <audio|>}. */
+    private String audioBlock(int n) {
+        StringBuilder sb = new StringBuilder(cfg.boaToken == null ? "" : cfg.boaToken);
+        for (int i = 0; i < n; i++) sb.append(cfg.audioToken);
+        if (cfg.eoaToken != null) sb.append(cfg.eoaToken);
+        return sb.toString();
+    }
+
+    /** The audio encoder over a clip's features: its soft tokens ({@code n × hidden}), the valid ones only. */
+    private float[] encodeAudio(AudioFeatures af) throws OrtException {
+        int want = af.softTokens();
+        if (want == 0) return new float[0];
+        OrtSession s = audioSession;
+        Map<String, OnnxTensor> in = new HashMap<String, OnnxTensor>();
+        try {
+            for (String name : s.getInputNames()) {
+                if ("input_features".equals(name)) {
+                    in.put(name, floatTensor(s, name, af.features, new long[]{1, af.frames, af.featureSize}));
+                } else if ("input_features_mask".equals(name)) {
+                    in.put(name, OnnxTensor.createTensor(env, new boolean[][]{af.mask}));
+                } else {
+                    throw new IllegalStateException("unexpected audio encoder input: " + name);
+                }
+            }
+            OrtSession.Result r = s.run(in);
+            try {
+                OnnxTensor t = (OnnxTensor) (r.get("audio_features").isPresent() ? r.get("audio_features").get() : r.get(0));
+                float[] data = toFloats(t);
+                if (data.length != want * cfg.hiddenSize) {
+                    throw new IllegalStateException("audio encoder returned " + java.util.Arrays.toString(t.getInfo().getShape())
+                            + " for " + want + " soft tokens");
+                }
+                return data;
+            } finally {
+                r.close();
+            }
+        } finally {
+            for (OnnxTensor t : in.values()) t.close();
+        }
     }
 
     private static ModelConfig.ImageParams budget(ModelConfig.ImageParams base, int maxSoftTokens) {
@@ -476,13 +586,20 @@ public final class EmbeddingGemma2 implements Embedder, Embedder.Staged {
 
     private float[] runTextModel(int[] ids, float[] imageFeats, int nImage, float[] videoFeats, int nVideo)
             throws OrtException {
-        int imageCount = 0, videoCount = 0;
+        return runTextModel(ids, imageFeats, nImage, videoFeats, nVideo, new float[0], 0);
+    }
+
+    private float[] runTextModel(int[] ids, float[] imageFeats, int nImage, float[] videoFeats, int nVideo,
+                                 float[] audioFeats, int nAudio) throws OrtException {
+        int imageCount = 0, videoCount = 0, audioCount = 0;
         for (int id : ids) {
             if (id == cfg.imageTokenId) imageCount++;
             if (id == cfg.videoTokenId) videoCount++;
+            if (id == cfg.audioTokenId) audioCount++;
         }
         if (imageCount != nImage) throw new IllegalStateException("image tokens " + imageCount + " != features " + nImage);
         if (videoCount != nVideo) throw new IllegalStateException("video tokens " + videoCount + " != features " + nVideo);
+        if (audioCount != nAudio) throw new IllegalStateException("audio tokens " + audioCount + " != features " + nAudio);
 
         long[] idsL = new long[ids.length];
         long[] mask = new long[ids.length];
@@ -503,7 +620,7 @@ public final class EmbeddingGemma2 implements Embedder, Embedder.Staged {
                 } else if ("video_features".equals(name)) {
                     in.put(name, floatTensor(textSession, name, videoFeats, new long[]{nVideo, h}));
                 } else if ("audio_features".equals(name)) {
-                    in.put(name, floatTensor(textSession, name, new float[0], new long[]{0, h}));
+                    in.put(name, floatTensor(textSession, name, audioFeats, new long[]{nAudio, h}));
                 } else {
                     throw new IllegalStateException("unexpected text model input: " + name);
                 }
@@ -570,6 +687,12 @@ public final class EmbeddingGemma2 implements Embedder, Embedder.Staged {
         } catch (OrtException ignored) {
         }
         if (visionRunner != null) visionRunner.close();
+        if (audioSession != null) {
+            try {
+                audioSession.close();
+            } catch (OrtException ignored) {
+            }
+        }
         if (visionSession != null) {
             try {
                 visionSession.close();

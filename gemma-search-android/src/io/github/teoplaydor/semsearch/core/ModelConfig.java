@@ -14,11 +14,13 @@ import java.util.Map;
 public final class ModelConfig {
     public int hiddenSize;
     public int imageTokenId = -1, videoTokenId = -1, audioTokenId = -1, boiTokenId = -1, eoiTokenId = -1;
-    public String imageToken, boiToken, eoiToken, videoToken;
+    public String imageToken, boiToken, eoiToken, videoToken, audioToken, boaToken, eoaToken;
+    /** The audio features' settings, or null when the model has no audio part (no feature extractor). */
+    public AudioFeatures.Params audio;
     public ImageParams image = new ImageParams(280);
     public ImageParams video = new ImageParams(280);
     public int maxFrames = 32;
-    public boolean hasVision, hasVideo, hasVideoProcessor;
+    public boolean hasVision, hasVideo, hasVideoProcessor, hasAudio;
 
     /** Gemma 4 image processor settings (defaults match transformers.js). */
     public static final class ImageParams {
@@ -61,12 +63,16 @@ public final class ModelConfig {
         c.boiTokenId = (int) MiniJson.num(cfg, "boi_token_id", MiniJson.num(cfg, "boi_token_index", -1));
         c.eoiTokenId = (int) MiniJson.num(cfg, "eoi_token_id", MiniJson.num(cfg, "eoi_token_index", -1));
         c.hasVision = cfg.get("vision_config") != null;
+        c.hasAudio = cfg.get("audio_config") != null;
 
         Map<String, Object> tc = MiniJson.obj(readJson(new File(dir, "tokenizer_config.json")));
         c.imageToken = tokenString(tc, "image_token");
         c.boiToken = tokenString(tc, "boi_token");
         c.eoiToken = tokenString(tc, "eoi_token");
         c.videoToken = tokenString(tc, "video_token");
+        c.audioToken = tokenString(tc, "audio_token");
+        c.boaToken = tokenString(tc, "boa_token");
+        c.eoaToken = tokenString(tc, "eoa_token");
 
         Map<String, Object> p = MiniJson.obj(readJson(new File(dir, "processor_config.json")));
         Map<String, Object> ip = p == null ? null : MiniJson.obj(p.get("image_processor"));
@@ -79,6 +85,12 @@ public final class ModelConfig {
         c.hasVideoProcessor = vp != null;
         c.hasVideo = vp != null && c.videoToken != null && c.videoTokenId >= 0;
         c.maxFrames = (int) MiniJson.num(vp, "max_frames", c.maxFrames);
+        Map<String, Object> fe = p == null ? null : MiniJson.obj(p.get("feature_extractor"));
+        if (fe == null) {
+            Map<String, Object> pre = MiniJson.obj(readJson(new File(dir, "preprocessor_config.json")));
+            if (pre != null && pre.get("feature_size") != null) fe = pre;
+        }
+        if (fe != null) c.audio = AudioFeatures.Params.read(fe);
         return c;
     }
 

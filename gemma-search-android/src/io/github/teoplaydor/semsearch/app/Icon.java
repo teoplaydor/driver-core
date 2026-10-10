@@ -14,7 +14,7 @@ final class Icon extends Drawable {
     static final int SEARCH = 0, CLOSE = 1, BACK = 2, TUNE = 3, IMAGE = 4, SHARE = 5, OPEN = 6, SIMILAR = 7, PLAY = 8,
             PLUS = 9, NOTE = 10, TRASH = 11, CHECK = 12, CHEVRON = 13, STOP = 14, DOWNLOAD = 15, VIDEO = 16, INFO = 17,
             GRID = 18, TAG = 19, ALBUMS = 20, HIDE = 21, SHOW = 22, LOCK = 23, PERSON = 24, SCAN = 25, EDIT = 26, PIN = 27,
-            BELL = 28, MIC = 29, LIST = 30;
+            BELL = 28, MIC = 29, LIST = 30, FILE = 31, AUDIO = 32, PAUSE = 33, FOLDER = 34;
 
     private final int kind;
     private final Paint p = new Paint(Paint.ANTI_ALIAS_FLAG);
@@ -295,6 +295,41 @@ final class Icon extends Drawable {
                 line(c, 11, 7, 20, 7);
                 line(c, 11, 17, 20, 17);
                 line(c, 11, 12, 17, 12);
+                break;
+            case FILE: // a page with a folded corner and lines of text
+                path.moveTo(6, 3.5f);
+                path.lineTo(14, 3.5f);
+                path.lineTo(18.5f, 8);
+                path.lineTo(18.5f, 20.5f);
+                path.lineTo(6, 20.5f);
+                path.close();
+                c.drawPath(path, p);
+                poly(c, 13.5f, 3.8f, 13.5f, 8.5f, 18.2f, 8.5f);
+                line(c, 9, 12.5f, 15.5f, 12.5f);
+                line(c, 9, 16, 13.5f, 16);
+                break;
+            case AUDIO: // a sound wave: bars of several heights
+                line(c, 4, 10.5f, 4, 13.5f);
+                line(c, 7.6f, 7.5f, 7.6f, 16.5f);
+                line(c, 11.2f, 4.5f, 11.2f, 19.5f);
+                line(c, 14.8f, 8.5f, 14.8f, 15.5f);
+                line(c, 18.4f, 6.5f, 18.4f, 17.5f);
+                line(c, 21.5f, 10.5f, 21.5f, 13.5f);
+                break;
+            case PAUSE:
+                line(c, 9, 6, 9, 18);
+                line(c, 15, 6, 15, 18);
+                break;
+            case FOLDER:
+                path.moveTo(3.5f, 7);
+                path.lineTo(3.5f, 18.5f);
+                path.lineTo(20.5f, 18.5f);
+                path.lineTo(20.5f, 8.5f);
+                path.lineTo(11.5f, 8.5f);
+                path.lineTo(9.5f, 5.5f);
+                path.lineTo(3.5f, 5.5f);
+                path.close();
+                c.drawPath(path, p);
                 break;
             case INFO:
                 c.drawCircle(12, 12, 8, p);

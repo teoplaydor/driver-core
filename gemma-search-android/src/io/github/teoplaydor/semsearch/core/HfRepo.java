@@ -44,6 +44,8 @@ public final class HfRepo {
         public String accelVision;
         /** Half-precision vision graph for the GPU (EmbeddingGemma: onnx/vision_encoder_fp16.onnx), or null. */
         public String fp16Vision;
+        /** The audio encoder (EmbeddingGemma: onnx/audio_encoder_q4.onnx), downloaded on request, or null. */
+        public String audioModel;
         public long totalBytes;
     }
 
@@ -195,6 +197,29 @@ public final class HfRepo {
             p.accelVision = full;
         }
         return p;
+    }
+
+    /**
+     * {@code p} with the audio encoder added (its smallest quantisation, as the rest): the files still missing are
+     * downloaded by {@link #download}, those there are skipped.
+     */
+    public static Plan withAudio(Plan p, List<RemoteFile> files) throws IOException {
+        if (p.audioModel != null) return p;
+        String a = pickComponent(files, "audio_encoder", p, DTYPE_SUFFIXES);
+        if (a == null) throw new IOException("В репозитории нет onnx/audio_encoder*.onnx");
+        p.audioModel = a;
+        p.totalBytes = 0;
+        for (RemoteFile f : p.files) p.totalBytes += Math.max(0, f.size);
+        return p;
+    }
+
+    /** How many bytes the audio encoder {@link #withAudio} would add (its graph and data), or -1 when there is none. */
+    public static long audioBytes(List<RemoteFile> files) {
+        Plan p = new Plan();
+        if (pickComponent(files, "audio_encoder", p, DTYPE_SUFFIXES) == null) return -1;
+        long n = 0;
+        for (RemoteFile f : p.files) n += Math.max(0, f.size);
+        return n;
     }
 
     private static Plan planDefault(List<RemoteFile> files, boolean withVision) throws IOException {
@@ -354,6 +379,7 @@ public final class HfRepo {
         sb.append(",\"vision\":").append(MiniJson.write(plan.visionModel));
         if (plan.accelVision != null) sb.append(",\"accel_vision\":").append(MiniJson.write(plan.accelVision));
         if (plan.fp16Vision != null) sb.append(",\"fp16_vision\":").append(MiniJson.write(plan.fp16Vision));
+        if (plan.audioModel != null) sb.append(",\"audio\":").append(MiniJson.write(plan.audioModel));
         sb.append(",\"files\":[");
         for (int i = 0; i < plan.files.size(); i++) {
             RemoteFile f = plan.files.get(i);
@@ -377,6 +403,7 @@ public final class HfRepo {
         p.visionModel = MiniJson.str(m, "vision", null);
         p.accelVision = MiniJson.str(m, "accel_vision", null);
         p.fp16Vision = MiniJson.str(m, "fp16_vision", null);
+        p.audioModel = MiniJson.str(m, "audio", null);
         for (Object o : MiniJson.arr(m.get("files"))) {
             Map<String, Object> f = MiniJson.obj(o);
             RemoteFile rf = new RemoteFile(MiniJson.str(f, "path", ""), MiniJson.num(f, "size", -1));

@@ -14,6 +14,7 @@ import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
 
+import java.util.List;
 import java.util.Locale;
 
 import io.github.teoplaydor.semsearch.core.HfRepo;
@@ -80,6 +81,7 @@ final class SettingsPanel extends FrameLayout implements Engine.Listener {
 
         buildModel();
         buildIndex();
+        buildSoundAndFiles();
         buildSpeed();
         buildSearch();
         buildPeople();
@@ -817,6 +819,119 @@ final class SettingsPanel extends FrameLayout implements Engine.Listener {
         });
     }
 
+    private TextView foldersValue, soundValue, soundNote, soundButton, soundDelete;
+    private LinearLayout foldersBox;
+    private View soundIndexRow, videoSoundRow;
+    private Toggle soundIndexToggle, videoSoundToggle;
+    private String foldersShown;
+    private double soundMb;
+
+    /** Documents from the folders given, and sound (EmbeddingGemma's audio part, downloaded on request). */
+    private void buildSoundAndFiles() {
+        Context c = getContext();
+        LinearLayout card = section("Документы и звук");
+        foldersValue = row(card, "Папки с документами", "PDF, Word, Excel, PowerPoint, OpenDocument, RTF, текст, книги; "
+                + "приложение читает только выбранные папки", null);
+        foldersBox = new LinearLayout(c);
+        foldersBox.setOrientation(LinearLayout.VERTICAL);
+        card.addView(foldersBox);
+        action(card, "Добавить папку", false, new Runnable() {
+            @Override
+            public void run() {
+                a.pickFolder();
+            }
+        });
+        soundValue = row(card, "Поиск по звуку", "записи, голосовые, музыка — по тому, что в них звучит; звуковая часть "
+                + "EmbeddingGemma 2, на телефоне", null);
+        soundNote = note(card);
+        soundButton = action(card, "Скачать звуковую часть", true, new Runnable() {
+            @Override
+            public void run() {
+                a.requestAudioAccess();
+                e.downloadAudio();
+                onEngineChanged();
+            }
+        });
+        soundIndexToggle = new Toggle(c, e.soundIndexOn());
+        soundIndexToggle.setListener(new Toggle.Listener() {
+            @Override
+            public void changed(boolean on) {
+                e.setSoundIndex(on);
+                if (on) a.requestAudioAccess();
+            }
+        });
+        soundIndexRow = toggleRow(card, "Записи, голосовые, музыка", "звуки телефона и из выбранных папок", soundIndexToggle);
+        videoSoundToggle = new Toggle(c, e.videoSoundOn());
+        videoSoundToggle.setListener(new Toggle.Listener() {
+            @Override
+            public void changed(boolean on) {
+                e.setVideoSound(on);
+            }
+        });
+        videoSoundRow = toggleRow(card, "Звук в видео", "видео находится и по тому, что в нём говорят и звучит; при смене "
+                + "видео индексируются заново", videoSoundToggle);
+        soundDelete = quiet(card, "Удалить звуковую часть", Ui.TEXT2, new Runnable() {
+            @Override
+            public void run() {
+                Sheet.confirm(root(), "Удалить звуковую часть?", "Найденные звуки останутся в поиске; новые не будут "
+                        + "индексироваться, пока она не скачана снова.", "Удалить", new Runnable() {
+                    @Override
+                    public void run() {
+                        e.deleteAudio();
+                    }
+                });
+            }
+        });
+        if (!e.audioDownloaded() && e.hasModelFiles()) {
+            e.audioSize(new Engine.Callback<Long>() {
+                @Override
+                public void done(Long n, Exception err) {
+                    if (n != null && n > 0) {
+                        soundMb = n / 1048576.0;
+                        onEngineChanged();
+                    }
+                }
+            });
+        }
+    }
+
+    /** The folders' rows (each with ✕), rebuilt when they changed. */
+    private void showFolders() {
+        List<android.net.Uri> fs = e.folders();
+        String key = fs.toString();
+        if (key.equals(foldersShown)) return;
+        foldersShown = key;
+        foldersBox.removeAllViews();
+        Context c = getContext();
+        for (final android.net.Uri u : fs) {
+            LinearLayout r = new LinearLayout(c);
+            r.setGravity(Gravity.CENTER_VERTICAL);
+            r.setPadding(Ui.dp(c, 18), Ui.dp(c, 6), Ui.dp(c, 8), Ui.dp(c, 6));
+            r.addView(Ui.icon(c, Icon.FOLDER, Ui.TEXT2, 22), new LinearLayout.LayoutParams(Ui.dp(c, 22), Ui.dp(c, 22)));
+            TextView t = Ui.text(c, Folders.label(u), 14, Ui.TEXT, Ui.REGULAR);
+            t.setPadding(Ui.dp(c, 10), 0, 0, 0);
+            r.addView(t, new LinearLayout.LayoutParams(0, -2, 1));
+            ImageView x = Ui.icon(c, Icon.CLOSE, Ui.TEXT3, 36);
+            x.setContentDescription("Убрать папку " + Folders.label(u));
+            x.setOnClickListener(new OnClickListener() {
+                @Override
+                public void onClick(View v) {
+                    Sheet.confirm(root(), "Убрать папку «" + Folders.label(u) + "»?", "Её документы уйдут из поиска; сами файлы "
+                            + "останутся на месте.", "Убрать", new Runnable() {
+                        @Override
+                        public void run() {
+                            e.removeFolder(u);
+                            onEngineChanged();
+                        }
+                    });
+                }
+            });
+            Ui.pressable(x);
+            r.addView(x, new LinearLayout.LayoutParams(Ui.dp(c, 36), Ui.dp(c, 36)));
+            foldersBox.addView(r);
+        }
+    }
+
     private void buildPeople() {
         LinearLayout card = section("Люди и питомцы");
         facesValue = row(card, "Узнавание людей по лицам", "лица находит YuNet, сравнивает SFace (модели OpenCV); всё на телефоне", null);
@@ -1022,6 +1137,25 @@ final class SettingsPanel extends FrameLayout implements Engine.Listener {
         rowOf(dimsValue).setVisibility(fast ? GONE : VISIBLE);
         sideValue.setText(a.railSide() == 0 ? "справа" : "слева");
         boolean faces = e.facesInstalled();
+        IndexStore st0 = e.store();
+        int docs = st0 == null ? 0 : st0.count(IndexStore.KIND_FILE), sounds = st0 == null ? 0 : st0.count(IndexStore.KIND_AUDIO);
+        int nf = e.folders().size();
+        foldersValue.setText(nf == 0 ? "нет" : nf + " " + MainActivity.plural(nf, "папка", "папки", "папок") + " · " + docs + " "
+                + MainActivity.plural(docs, "документ", "документа", "документов"));
+        showFolders();
+        boolean audio = e.audioDownloaded() || e.audioReady();
+        soundValue.setText(e.audioReady() ? "включён · " + sounds + " " + MainActivity.plural(sounds, "звук", "звука", "звуков") : audio ? (e.audioError() != null ? "ошибка" : "скачан")
+                : st == Engine.State.DOWNLOADING ? "скачиваю" : "не скачан");
+        soundValue.setTextColor(e.audioReady() ? Ui.ACCENT : e.audioError() != null ? Ui.DANGER : Ui.TEXT2);
+        soundNote.setText(e.audioError() != null ? "Звуковая часть не загрузилась: " + e.audioError()
+                : audio && !AutoIndex.hasAudioAccess(getContext()) ? "Нет доступа к аудио — звуки из выбранных папок найдутся, "
+                + "записи и голосовые телефона нет" : "");
+        soundNote.setVisibility(soundNote.getText().length() > 0 ? VISIBLE : GONE);
+        soundButton.setText(soundMb > 0 ? String.format(Locale.ROOT, "Скачать звуковую часть (%.0f МБ)", soundMb) : "Скачать звуковую часть");
+        soundButton.setVisibility(!audio && !e.audioReady() && !busy && e.photoModel() == FastModel.GEMMA ? VISIBLE : GONE);
+        soundIndexRow.setVisibility(audio ? VISIBLE : GONE);
+        videoSoundRow.setVisibility(audio && e.photoModel() == FastModel.GEMMA ? VISIBLE : GONE);
+        soundDelete.setVisibility(audio && !busy ? VISIBLE : GONE);
         facesValue.setText(e.faceDownloading ? "скачиваю" : faces ? "включено" : "не скачано");
         facesValue.setTextColor(faces ? Ui.ACCENT : Ui.TEXT2);
         facesProgress.setVisibility(e.faceDownloading || e.faceScanning ? VISIBLE : GONE);

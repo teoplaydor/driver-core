@@ -381,10 +381,73 @@ final class MasonryView extends ViewGroup {
         contentHeight = max + padBottom;
     }
 
+    /** Notes, documents and sounds are cards of text (not pictures). */
+    static boolean card(IndexStore.Item it) {
+        return IndexStore.textSpace(it.kind);
+    }
+
+    /** A card's background: notes, documents and sounds each their shade. */
+    static int cardColor(IndexStore.Item it) {
+        return it.kind == IndexStore.KIND_FILE ? 0xFF1A2029 : it.kind == IndexStore.KIND_AUDIO ? 0xFF1B1D2A : Ui.NOTE;
+    }
+
+    /**
+     * A card's text: a note's own; a document's type over its name and its first lines; a sound's length and source over
+     * its name.
+     */
+    static CharSequence cardText(Context c, IndexStore.Item it) {
+        if (it.kind == IndexStore.KIND_NOTE) return it.body == null ? "" : it.body;
+        android.text.SpannableStringBuilder b = new android.text.SpannableStringBuilder();
+        String tag;
+        if (it.kind == IndexStore.KIND_FILE) {
+            String n = it.title == null ? "" : it.title;
+            int dot = n.lastIndexOf('.');
+            tag = dot > 0 && n.length() - dot <= 6 ? n.substring(dot + 1).toUpperCase(java.util.Locale.ROOT) : "ДОКУМЕНТ";
+        } else {
+            tag = "ЗВУК" + (it.body != null && !it.body.isEmpty() ? " · " + it.body : "");
+        }
+        b.append(tag);
+        b.setSpan(new android.text.style.ForegroundColorSpan(Ui.ACCENT), 0, tag.length(), 0);
+        b.setSpan(new android.text.style.RelativeSizeSpan(0.8f), 0, tag.length(), 0);
+        b.setSpan(new FontSpan(Ui.font(c, Ui.SEMIBOLD)), 0, tag.length(), 0);
+        String name = it.kind == IndexStore.KIND_FILE ? Engine.baseName(it.title) : it.title;
+        if (name != null && !name.isEmpty()) {
+            b.append('\n');
+            int from = b.length();
+            b.append(name);
+            b.setSpan(new FontSpan(Ui.font(c, Ui.MEDIUM)), from, b.length(), 0);
+            b.setSpan(new android.text.style.ForegroundColorSpan(0xFFDCE3EA), from, b.length(), 0);
+        }
+        if (it.kind == IndexStore.KIND_FILE && it.body != null && !it.body.isEmpty()) {
+            String t = it.body.length() > 500 ? it.body.substring(0, 500) : it.body;
+            b.append('\n').append(t.replaceAll("\\n{2,}", "\n"));
+        }
+        return b;
+    }
+
+    /** A typeface for a span of text (TypefaceSpan takes one only from Android 9). */
+    static final class FontSpan extends android.text.style.MetricAffectingSpan {
+        private final android.graphics.Typeface tf;
+
+        FontSpan(android.graphics.Typeface tf) {
+            this.tf = tf;
+        }
+
+        @Override
+        public void updateDrawState(TextPaint p) {
+            p.setTypeface(tf);
+        }
+
+        @Override
+        public void updateMeasureState(TextPaint p) {
+            p.setTypeface(tf);
+        }
+    }
+
     private int heightFor(IndexStore.Item it, int w, int maxLines) {
-        if (it.kind == IndexStore.KIND_NOTE) {
+        if (card(it)) {
             int pad = Ui.dp(getContext(), NOTE_PAD_DP);
-            String body = it.body == null ? "" : it.body;
+            CharSequence body = cardText(getContext(), it);
             StaticLayout l = new StaticLayout(body, notePaint, Math.max(1, w - 2 * pad), Layout.Alignment.ALIGN_NORMAL,
                     NOTE_SPACING, 0f, true);
             int lines = Math.max(1, Math.min(l.getLineCount(), maxLines));
@@ -451,13 +514,13 @@ final class MasonryView extends ViewGroup {
         t.badge.setVisibility(it.kind == IndexStore.KIND_VIDEO || pin ? VISIBLE : GONE);
         t.badge.setImageDrawable(new Icon(pin ? Icon.PIN : Icon.VIDEO, pin ? Ui.ACCENT : 0xFFE6ECF2, Ui.dp(getContext(), 1.7f)));
         t.badge.setBackground(pin ? null : Ui.round(getContext(), 0x66000000, 13));
-        if (it.kind == IndexStore.KIND_NOTE) {
-            t.setBackground(Ui.round(getContext(), Ui.NOTE, 10));
+        if (card(it)) {
+            t.setBackground(Ui.round(getContext(), cardColor(it), 10));
             t.img.setVisibility(GONE);
             t.img.setImageBitmap(null);
             t.note.setVisibility(VISIBLE);
             t.note.setMaxLines(columns <= 2 ? 10 : 7);
-            t.note.setText(it.body);
+            t.note.setText(cardText(getContext(), it));
             t.key = it.id;
         } else {
             t.setBackground(Ui.round(getContext(), Ui.SURFACE2, 10));
@@ -467,7 +530,7 @@ final class MasonryView extends ViewGroup {
         addViewInLayout(t, -1, new LayoutParams(iw[i], ih[i]), true);
         place(i, t);
         mark(t, false);
-        if (it.kind != IndexStore.KIND_NOTE) host.bindThumb(t, it, iw[i], ih[i]);
+        if (!card(it)) host.bindThumb(t, it, iw[i], ih[i]);
         shown.put(i, t);
         if (intro && iy[i] < getScrollY() + getHeight()) {
             // the first screen rises in, top to bottom

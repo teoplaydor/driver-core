@@ -46,7 +46,10 @@ import java.util.concurrent.Executors;
  * Settings live in a panel, the viewer opens over the grid, notes are one tab of the gallery.
  */
 public final class MainActivity extends Activity implements Engine.Listener, Viewer.Host, MasonryView.Host {
-    private static final int REQ_PICK_IMAGE = 7, REQ_MEDIA = 8, REQ_IDLE = 9, REQ_VOICE = 10, REQ_NOTIFY = 11;
+    private static final int REQ_PICK_IMAGE = 7, REQ_MEDIA = 8, REQ_IDLE = 9, REQ_VOICE = 10, REQ_NOTIFY = 11, REQ_FOLDER = 12,
+            REQ_AUDIO = 13;
+    /** The rail's filters: everything, photos, videos, notes, documents, sound. */
+    public static final int F_ALL = 0, F_PHOTOS = 1, F_VIDEOS = 2, F_NOTES = 3, F_FILES = 4, F_AUDIO = 5;
     /** A new note (the app icon's shortcut; with EXTRA_VOICE dictated at once), a note shown (its reminder tapped). */
     static final String ACTION_NEW_NOTE = "io.github.teoplaydor.semsearch.NEW_NOTE",
             ACTION_OPEN_NOTE = "io.github.teoplaydor.semsearch.OPEN_NOTE", EXTRA_VOICE = "voice";
@@ -661,15 +664,38 @@ public final class MainActivity extends Activity implements Engine.Listener, Vie
     }
 
     private boolean photos() {
-        return filter == 0 || filter == 1;
+        return filter == F_ALL || filter == F_PHOTOS;
     }
 
     private boolean videos() {
-        return filter == 0 || filter == 2;
+        return filter == F_ALL || filter == F_VIDEOS;
     }
 
     private boolean notes() {
-        return filter == 0 || filter == 3;
+        return filter == F_ALL || filter == F_NOTES;
+    }
+
+    /** What the filter shows (IndexStore kind bits). */
+    private int kinds() {
+        switch (filter) {
+            case F_PHOTOS:
+                return IndexStore.PHOTOS;
+            case F_VIDEOS:
+                return IndexStore.VIDEOS;
+            case F_NOTES:
+                return IndexStore.NOTES;
+            case F_FILES:
+                return IndexStore.FILES;
+            case F_AUDIO:
+                return IndexStore.AUDIO;
+            default:
+                return IndexStore.ALL;
+        }
+    }
+
+    /** Notes, documents and sound are cards of text: two columns of them. */
+    private int columns() {
+        return filter == F_NOTES || filter == F_FILES || filter == F_AUDIO ? 2 : 3;
     }
 
     // ------------------------------------------------------------------ content
@@ -743,7 +769,7 @@ public final class MainActivity extends Activity implements Engine.Listener, Vie
         }
         IndexStore s = engine.store();
         List<IndexStore.Item> list = s == null ? new ArrayList<IndexStore.Item>()
-                : s.recent(filter != 2 && filter != 3, filter == 0 || filter == 2, filter == 3, RECENT_LIMIT);
+                : s.recent(filter == F_ALL ? IndexStore.MEDIA : kinds(), RECENT_LIMIT); // «Все» shows the gallery; search finds all
         setItems(list, animate);
         section.setVisibility(View.GONE); // the gallery speaks for itself; the line is for search results
         updateEmpty();
@@ -761,7 +787,7 @@ public final class MainActivity extends Activity implements Engine.Listener, Vie
 
     private void setItems(List<IndexStore.Item> list, boolean animate) {
         aspectsMissing = false;
-        gallery.setItems(list, filter == 3 ? 2 : 3, animate);
+        gallery.setItems(list, columns(), animate);
         if (aspectsMissing) {
             // new photos since the last MediaStore read: fetch their proportions (at most every few seconds)
             long wait = aspectsLoadedMs + 4000 - System.currentTimeMillis();
@@ -782,7 +808,7 @@ public final class MainActivity extends Activity implements Engine.Listener, Vie
                 // what MediaStore has no size for stays square; don't ask again for it
                 for (IndexStore.Item it : current) {
                     long k = Media.aspectKey(it.kind, it.mediaId);
-                    if (it.kind != IndexStore.KIND_NOTE && !m.containsKey(k)) m.put(k, 0f);
+                    if (IndexStore.picture(it.kind) && !m.containsKey(k)) m.put(k, 0f);
                 }
                 ui.post(new Runnable() {
                     @Override
@@ -818,7 +844,7 @@ public final class MainActivity extends Activity implements Engine.Listener, Vie
         searchLeft = false;
         searchShown = true;
         sectionText("Ищу…");
-        engine.search(q, photos(), videos(), notes(), new Engine.Callback<Engine.SearchResult>() {
+        engine.search(q, kinds(), new Engine.Callback<Engine.SearchResult>() {
             @Override
             public void done(Engine.SearchResult r, Exception e) {
                 if (!q.equals(query.getText().toString().trim())) return; // typed on: a newer search follows
@@ -846,7 +872,7 @@ public final class MainActivity extends Activity implements Engine.Listener, Vie
 
     private void runSimilar(IndexStore.Item item) {
         sectionText("Ищу похожие…");
-        engine.similar(item, photos(), videos(), notes(), new Engine.Callback<Engine.SearchResult>() {
+        engine.similar(item, kinds(), new Engine.Callback<Engine.SearchResult>() {
             @Override
             public void done(Engine.SearchResult r, Exception e) {
                 showResults(r, e, "Похожие");
@@ -1121,7 +1147,7 @@ public final class MainActivity extends Activity implements Engine.Listener, Vie
         return row;
     }
 
-    private static String plural(int n, String one, String few, String many) {
+    static String plural(int n, String one, String few, String many) {
         int m10 = n % 10, m100 = n % 100;
         if (m10 == 1 && m100 != 11) return one;
         if (m10 >= 2 && m10 <= 4 && (m100 < 12 || m100 > 14)) return few;
@@ -1264,7 +1290,7 @@ public final class MainActivity extends Activity implements Engine.Listener, Vie
             return;
         } else if (resultsLabel != null) {
             card(Icon.SEARCH, "Ничего не нашлось", "Попробуйте другими словами или уберите фильтр", null, null, null, null);
-        } else if (filter == 3) {
+        } else if (filter == F_NOTES) {
             card(Icon.NOTE, "Заметок пока нет", "Запишите что угодно — найдётся по смыслу, не по словам", "Новая заметка",
                     new Runnable() {
                         @Override
@@ -1272,6 +1298,19 @@ public final class MainActivity extends Activity implements Engine.Listener, Vie
                             noteEditor();
                         }
                     }, null, null);
+        } else if (filter == F_FILES) {
+            boolean none = engine.folders().isEmpty();
+            card(Icon.FILE, none ? "Документы — из папок, которые вы дадите" : engine.indexing ? "Читаю документы…" : "Документов пока нет",
+                    none ? "PDF, Word, Excel, PowerPoint, OpenDocument, текст, книги: найдутся по смыслу, не по словам в названии. "
+                            + "Приложение читает только выбранные папки" : "В выбранных папках нет документов, которые можно прочитать",
+                    none ? "Выбрать папку" : "Ещё папку", new Runnable() {
+                        @Override
+                        public void run() {
+                            pickFolder();
+                        }
+                    }, null, null);
+        } else if (filter == F_AUDIO) {
+            soundCard();
         } else if (st == Engine.State.LOADING) {
             card(Icon.SIMILAR, "Загружаю модель…", null, null, null, null, null);
         } else if (!engine.indexing) {
@@ -1291,6 +1330,77 @@ public final class MainActivity extends Activity implements Engine.Listener, Vie
             card(Icon.IMAGE, "Индексирую галерею", "Фото появятся здесь по мере обработки", null, null, null, null);
         }
         if (empty.getVisibility() != View.VISIBLE) Ui.fadeIn(empty, 220);
+    }
+
+    /** The sound filter with nothing to show: what is missing (the audio encoder, the permission) or that it is coming. */
+    private void soundCard() {
+        if (!engine.audioDownloaded()) {
+            card(Icon.AUDIO, "Поиск по звуку", "Записи диктофона, голосовые и музыка найдутся по тому, что в них звучит: "
+                    + "«собака лает», «разговор о ремонте». Нужна звуковая часть модели" + (audioMb > 0 ? String.format(Locale.ROOT,
+                    " (%.0f МБ)", audioMb) : "") + "; видео тогда ищутся и по звуку", "Скачать", new Runnable() {
+                @Override
+                public void run() {
+                    if (!engine.canDownloadAudio()) {
+                        toast(engine.hasModelFiles() || engine.state == Engine.State.DOWNLOADING
+                                ? "Подождите — модель скачивается или загружается" : "Сначала скачайте EmbeddingGemma 2 в настройках");
+                        return;
+                    }
+                    requestAudioAccess();
+                    engine.downloadAudio();
+                }
+            }, null, null);
+            if (audioMb == 0) {
+                audioMb = -1;
+                engine.audioSize(new Engine.Callback<Long>() {
+                    @Override
+                    public void done(Long n, Exception e) {
+                        if (n != null && n > 0) {
+                            audioMb = n / 1048576.0;
+                            if (filter == F_AUDIO) updateEmpty();
+                        }
+                    }
+                });
+            }
+        } else if (!AutoIndex.hasAudioAccess(this)) {
+            card(Icon.AUDIO, "Нужен доступ к аудио", "Чтобы найти записи и голосовые, приложению нужно их читать — "
+                    + "на телефоне, без интернета", "Разрешить", new Runnable() {
+                @Override
+                public void run() {
+                    requestAudioAccess();
+                }
+            }, null, null);
+        } else if (engine.indexing) {
+            card(Icon.AUDIO, "Слушаю записи…", "Звуки появятся здесь по мере обработки", null, null, null, null);
+        } else {
+            card(Icon.AUDIO, "Звуков пока нет", engine.audioError() != null ? "Звуковая часть не загрузилась: " + engine.audioError()
+                    : "Записей, голосовых и музыки на телефоне не нашлось", "Проиндексировать", new Runnable() {
+                @Override
+                public void run() {
+                    engine.startIndexFromPrefs(false);
+                }
+            }, null, null);
+        }
+    }
+
+    /** The sound part's size in MB (0: not asked yet, -1: asking). */
+    private double audioMb;
+
+    /** Android's folder picker: the folder given is read (and only it). */
+    void pickFolder() {
+        try {
+            Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE);
+            i.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION);
+            startActivityForResult(i, REQ_FOLDER);
+        } catch (Exception e) {
+            toast("Выбор папки на этом телефоне недоступен");
+        }
+    }
+
+    /** Asks for the sound files (Android 13+: audio; before: storage). */
+    void requestAudioAccess() {
+        if (AutoIndex.hasAudioAccess(this)) return;
+        requestPermissions(new String[]{Build.VERSION.SDK_INT >= 33 ? "android.permission.READ_MEDIA_AUDIO"
+                : Manifest.permission.READ_EXTERNAL_STORAGE}, REQ_AUDIO);
     }
 
     private void welcome() {
@@ -1316,7 +1426,9 @@ public final class MainActivity extends Activity implements Engine.Listener, Vie
         LinearLayout box = new LinearLayout(this);
         box.setOrientation(LinearLayout.VERTICAL);
         box.setGravity(Gravity.CENTER_HORIZONTAL);
-        box.setPadding(dp(32), 0, dp(32), dp(60));
+        // clear of the rail when it is shown (with its six filters it reaches the middle of the screen)
+        int side = dp(32), railPad = rail != null && rail.getVisibility() == View.VISIBLE ? dp(80) : side;
+        box.setPadding(railSide() == 1 ? railPad : side, 0, railSide() == 0 ? railPad : side, dp(60));
         ImageView ic = Ui.icon(this, icon, Ui.ACCENT, 72, 2.2f);
         ic.setBackground(Ui.round(this, Ui.ACCENT_SOFT, 36));
         box.addView(ic, new LinearLayout.LayoutParams(dp(72), dp(72)));
@@ -1421,7 +1533,8 @@ public final class MainActivity extends Activity implements Engine.Listener, Vie
         }
         // the gallery grows while indexing; refresh it now and then without jumping around
         IndexStore s = engine.store();
-        int indexed = s == null ? 0 : s.count(IndexStore.KIND_PHOTO) + s.count(IndexStore.KIND_VIDEO) + s.count(IndexStore.KIND_NOTE);
+        int indexed = s == null ? 0 : s.count(IndexStore.KIND_PHOTO) + s.count(IndexStore.KIND_VIDEO) + s.count(IndexStore.KIND_NOTE)
+                + s.count(IndexStore.KIND_AUDIO) + s.count(IndexStore.KIND_FILE);
         long now = System.currentTimeMillis();
         int hidden = s == null ? lastHidden : s.hiddenVersion();
         if (hidden != lastHidden) {
@@ -1496,6 +1609,14 @@ public final class MainActivity extends Activity implements Engine.Listener, Vie
             }
             AutoIndex.schedule(this);
             finishIdleSetup();
+            return;
+        }
+        if (code == REQ_AUDIO) {
+            if (AutoIndex.hasAudioAccess(this)) {
+                AutoIndex.schedule(this); // new recordings wake the background run too
+                if (engine.soundIndexing()) engine.startIndexFromPrefs(false);
+            }
+            updateEmpty();
             return;
         }
         if (code != REQ_MEDIA) return;
@@ -1745,7 +1866,7 @@ public final class MainActivity extends Activity implements Engine.Listener, Vie
     private void removeFromGrid(IndexStore.Item it) {
         List<IndexStore.Item> left = new ArrayList<IndexStore.Item>(gallery.items());
         if (left.remove(it)) {
-            gallery.setItems(left, filter == 3 ? 2 : 3, false);
+            gallery.setItems(left, columns(), false);
             updateEmpty();
         }
     }
@@ -1940,7 +2061,7 @@ public final class MainActivity extends Activity implements Engine.Listener, Vie
             i.setType("text/plain");
             i.putExtra(Intent.EXTRA_TEXT, it.body);
         } else {
-            i.setType(it.kind == IndexStore.KIND_VIDEO ? "video/*" : "image/*");
+            i.setType(mimeOf(it));
             i.putExtra(Intent.EXTRA_STREAM, Uri.parse(it.uri));
             i.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
         }
@@ -1952,9 +2073,49 @@ public final class MainActivity extends Activity implements Engine.Listener, Vie
     }
 
     @Override
+    public void pdfPage(final IndexStore.Item file, final int page, final Engine.Callback<Bitmap> cb) {
+        thumbPool.submit(new Runnable() {
+            @Override
+            public void run() {
+                final Bitmap b = Media.pdfPage(MainActivity.this, Uri.parse(file.uri), page, 1400);
+                ui.post(new Runnable() {
+                    @Override
+                    public void run() {
+                        cb.done(b, null);
+                    }
+                });
+            }
+        });
+    }
+
+    /** The type to hand a file to another app with: what its provider says, else by its kind. */
+    String mimeOf(IndexStore.Item it) {
+        String t = null;
+        try {
+            t = getContentResolver().getType(Uri.parse(it.uri));
+        } catch (Exception ignored) {
+            // a provider that does not say
+        }
+        if (t != null) return t;
+        switch (it.kind) {
+            case IndexStore.KIND_VIDEO:
+                return "video/*";
+            case IndexStore.KIND_AUDIO:
+                return "audio/*";
+            case IndexStore.KIND_FILE: {
+                String ext = it.title == null ? "" : android.webkit.MimeTypeMap.getFileExtensionFromUrl(it.title.replace(' ', '_'));
+                String m = android.webkit.MimeTypeMap.getSingleton().getMimeTypeFromExtension(ext.toLowerCase(Locale.ROOT));
+                return m != null ? m : "*/*";
+            }
+            default:
+                return "image/*";
+        }
+    }
+
+    @Override
     public void openWith(IndexStore.Item it) {
         Intent i = new Intent(Intent.ACTION_VIEW);
-        i.setDataAndType(Uri.parse(it.uri), it.kind == IndexStore.KIND_VIDEO ? "video/*" : "image/*");
+        i.setDataAndType(Uri.parse(it.uri), mimeOf(it));
         i.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
         try {
             startActivity(Intent.createChooser(i, "Открыть в…"));
@@ -1972,7 +2133,7 @@ public final class MainActivity extends Activity implements Engine.Listener, Vie
                 if (viewer != null) viewer.close();
                 List<IndexStore.Item> left = new ArrayList<IndexStore.Item>(gallery.items());
                 left.remove(it);
-                gallery.setItems(left, filter == 3 ? 2 : 3, false);
+                gallery.setItems(left, columns(), false);
                 updateEmpty();
             }
         });
@@ -2649,7 +2810,7 @@ public final class MainActivity extends Activity implements Engine.Listener, Vie
         gallery.setTopInset(on ? dp(62) : 0);
         if (!on) return;
         List<IndexStore.Item> chosen = gallery.chosenItems();
-        chooseCount.setText(chosen.isEmpty() ? "Выберите фото" : "Выбрано: " + chosen.size());
+        chooseCount.setText(chosen.isEmpty() ? "Выберите" : "Выбрано: " + chosen.size());
         // the documents among them (found out once per picture): a scan of them as one PDF on offer
         int photos = 0;
         boolean doc = false;
@@ -2691,7 +2852,7 @@ public final class MainActivity extends Activity implements Engine.Listener, Vie
     void shareChosen() {
         ArrayList<Uri> uris = new ArrayList<Uri>();
         StringBuilder text = new StringBuilder();
-        boolean images = false, videos = false;
+        boolean images = false, videos = false, other = false;
         for (IndexStore.Item it : gallery.chosenItems()) {
             if (it.kind == IndexStore.KIND_NOTE) {
                 if (it.body != null) text.append(text.length() > 0 ? "\n\n" : "").append(it.body);
@@ -2700,13 +2861,14 @@ public final class MainActivity extends Activity implements Engine.Listener, Vie
             uris.add(Uri.parse(it.uri));
             images |= it.kind == IndexStore.KIND_PHOTO;
             videos |= it.kind == IndexStore.KIND_VIDEO;
+            other |= !IndexStore.picture(it.kind); // documents and sounds
         }
         if (uris.isEmpty() && text.length() == 0) return;
         Intent i = new Intent(uris.size() > 1 ? Intent.ACTION_SEND_MULTIPLE : Intent.ACTION_SEND);
         if (uris.isEmpty()) {
             i.setType("text/plain");
         } else {
-            i.setType(images && videos ? "*/*" : videos ? "video/*" : "image/*");
+            i.setType(other || (images && videos) ? "*/*" : videos ? "video/*" : "image/*");
             if (uris.size() > 1) i.putParcelableArrayListExtra(Intent.EXTRA_STREAM, uris);
             else i.putExtra(Intent.EXTRA_STREAM, uris.get(0));
             i.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
@@ -2729,6 +2891,12 @@ public final class MainActivity extends Activity implements Engine.Listener, Vie
     protected void onActivityResult(int code, int result, Intent data) {
         super.onActivityResult(code, result, data);
         if (code == REQ_PICK_IMAGE && result == RESULT_OK && data != null && data.getData() != null) runImageSearch(data.getData());
+        if (code == REQ_FOLDER && result == RESULT_OK && data != null && data.getData() != null) {
+            engine.addFolder(data.getData());
+            toast("Папка «" + Folders.label(data.getData()) + "» добавлена — читаю документы");
+            if (filter != F_FILES) selectFilter(F_FILES);
+            else updateEmpty();
+        }
         if (code == REQ_VOICE) {
             Engine.Callback<String> cb = dictated;
             dictated = null;

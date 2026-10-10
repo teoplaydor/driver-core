@@ -65,9 +65,9 @@ EOF
 # abstract hooks to them); the tests against the Android 14 runtime for its newer APIs.
 ANDROID_JAR=${ANDROID_JAR:-/usr/lib/android-sdk/platforms/android-23/android.jar}
 "$J21/javac" -nowarn -encoding UTF-8 -cp "$ANDROID_JAR:${CP}" -d "$R/cls" \
-  $(find "$T/shim" -name '*.java') "$T/src/FakeMediaStore.java"
+  $(find "$T/shim" -name '*.java') "$T/src/FakeMediaStore.java" "$T/src/FakeDocs.java"
 "$J21/javac" -nowarn -encoding UTF-8 -cp "$R/cls:$AA:${CP}build/classes:build/deps/ort-classes" -d "$R/cls" \
-  $(find "$T/src" -name '*.java' ! -name FakeMediaStore.java)
+  $(find "$T/src" -name '*.java' ! -name FakeMediaStore.java ! -name FakeDocs.java)
 
 # The NPU process round trip with a real ONNX Runtime: the desktop build (no QNN in it) and stand-in QNN host
 # libraries, plus a small vision graph
@@ -86,10 +86,11 @@ fi
 
 rm -rf build/shots
 TESTS=("$@")
-[ ${#TESTS[@]} -gt 0 ] || TESTS=(UiShots AppFlowTest AppIndexingTest IndexStopTest PipelineTest ViewerTest HiddenTest PeopleAppTest NavTest ScanTest NotesTest OpenTimeoutTest AutoIndexTest IdleIndexTest SpeedupsTest)
+[ ${#TESTS[@]} -gt 0 ] || TESTS=(UiShots AppFlowTest AppIndexingTest IndexStopTest PipelineTest ViewerTest HiddenTest PeopleAppTest NavTest ScanTest NotesTest AudioFilesTest OpenTimeoutTest AutoIndexTest IdleIndexTest SpeedupsTest)
 # One JVM per class: Engine is an app-wide singleton.
 for t in "${TESTS[@]}"; do
   echo "-- $t"
-  "$J21/java" -Dfile.encoding=UTF-8 -Dstdout.encoding=UTF-8 --add-opens=java.base/java.io=ALL-UNNAMED -Drobolectric.offline=true -Drobolectric.dependency.dir="$R/deps" \
+  # file names in UTF-8, as on a phone (Cyrillic documents and recordings)
+  LC_ALL=C.UTF-8 "$J21/java" -Dfile.encoding=UTF-8 -Dstdout.encoding=UTF-8 --add-opens=java.base/java.io=ALL-UNNAMED -Drobolectric.offline=true -Drobolectric.dependency.dir="$R/deps" \
     -Dshot.dir=build/shots -Dnpu.fixture="$PWD/$N" -cp "$R/cls:${CP}build/classes:build/deps/ort-classes:$AA" org.junit.runner.JUnitCore "$t"
 done

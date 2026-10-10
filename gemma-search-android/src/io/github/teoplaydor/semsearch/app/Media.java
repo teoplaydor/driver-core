@@ -32,6 +32,9 @@ final class Media {
         int orientation;
         /** A screenshot or a scanned document: small text matters, worth the higher detail. */
         boolean textHeavy;
+        /** A file's type and size (documents, sound); a sound's length (ms), title, who and where. */
+        String mime, title, artist, folder;
+        long size = -1, duration;
     }
 
     /** Screenshots and scans by their folder or file name (Samsung, Xiaomi, Pixel, CamScanner, …). */
@@ -90,9 +93,53 @@ final class Media {
         return out;
     }
 
+    /**
+     * Recordings, voice messages and music MediaStore knows, newest first: not ringtones, notification or alarm sounds,
+     * at least a second long.
+     */
+    static List<Entry> recentAudio(ContentResolver cr, int limit) {
+        List<Entry> out = new ArrayList<Entry>();
+        Uri base = MediaStore.Audio.Media.EXTERNAL_CONTENT_URI;
+        String[] proj = {MediaStore.Audio.Media._ID, MediaStore.Audio.Media.DATE_ADDED, MediaStore.Audio.Media.DISPLAY_NAME,
+                MediaStore.Audio.Media.TITLE, MediaStore.Audio.Media.ARTIST, MediaStore.Audio.Media.DURATION,
+                MediaStore.Audio.Media.MIME_TYPE, "bucket_display_name"};
+        String where = MediaStore.Audio.Media.IS_RINGTONE + " = 0 AND " + MediaStore.Audio.Media.IS_NOTIFICATION + " = 0 AND "
+                + MediaStore.Audio.Media.IS_ALARM + " = 0";
+        Cursor c;
+        try {
+            c = cr.query(base, proj, where, null, MediaStore.Audio.Media.DATE_ADDED + " DESC");
+        } catch (Exception e) {
+            return out; // no permission for sound
+        }
+        if (c == null) return out;
+        try {
+            while (c.moveToNext() && out.size() < limit) {
+                long ms = c.isNull(5) ? 0 : c.getLong(5);
+                if (ms > 0 && ms < 1000) continue;
+                Entry e = new Entry();
+                e.kind = IndexStore.KIND_AUDIO;
+                e.id = c.getLong(0);
+                e.uri = ContentUris.withAppendedId(base, e.id);
+                e.date = c.getLong(1) * 1000L;
+                e.name = c.getString(2);
+                e.title = c.getString(3);
+                String artist = c.getString(4);
+                e.artist = artist == null || artist.equals("<unknown>") ? null : artist;
+                e.duration = ms;
+                e.mime = c.getString(6);
+                e.folder = c.isNull(7) ? null : c.getString(7);
+                out.add(e);
+            }
+        } finally {
+            c.close();
+        }
+        return out;
+    }
+
     /** Every MediaStore id of a kind (to notice deleted files), or null when the query fails. */
     static java.util.Set<Long> allIds(ContentResolver cr, int kind) {
-        Uri base = kind == IndexStore.KIND_VIDEO ? MediaStore.Video.Media.EXTERNAL_CONTENT_URI : MediaStore.Images.Media.EXTERNAL_CONTENT_URI;
+        Uri base = kind == IndexStore.KIND_VIDEO ? MediaStore.Video.Media.EXTERNAL_CONTENT_URI
+                : kind == IndexStore.KIND_AUDIO ? MediaStore.Audio.Media.EXTERNAL_CONTENT_URI : MediaStore.Images.Media.EXTERNAL_CONTENT_URI;
         Cursor c;
         try {
             c = cr.query(base, new String[]{MediaStore.MediaColumns._ID}, null, null, null);
@@ -107,6 +154,58 @@ final class Media {
             c.close();
         }
         return out;
+    }
+
+    /**
+     * A PDF's page as a picture (white paper, at most {@code maxSide} pixels on its longer side), or null when the phone
+     * cannot render it (a password, a damaged file).
+     */
+    static Bitmap pdfPage(Context c, Uri uri, int page, int maxSide) {
+        android.os.ParcelFileDescriptor fd = null;
+        android.graphics.pdf.PdfRenderer r = null;
+        try {
+            fd = c.getContentResolver().openFileDescriptor(uri, "r");
+            if (fd == null) return null;
+            r = new android.graphics.pdf.PdfRenderer(fd);
+            if (page >= r.getPageCount()) return null;
+            android.graphics.pdf.PdfRenderer.Page p = r.openPage(page);
+            try {
+                float scale = maxSide / (float) Math.max(1, Math.max(p.getWidth(), p.getHeight()));
+                int w = Math.max(1, Math.round(p.getWidth() * scale)), h = Math.max(1, Math.round(p.getHeight() * scale));
+                Bitmap b = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888);
+                b.eraseColor(0xFFFFFFFF);
+                p.render(b, null, null, android.graphics.pdf.PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY);
+                return b;
+            } finally {
+                p.close();
+            }
+        } catch (Throwable e) {
+            return null;
+        } finally {
+            if (r != null) r.close();
+            if (fd != null) {
+                try {
+                    fd.close();
+                } catch (java.io.IOException ignored) {
+                    // closed
+                }
+            }
+        }
+    }
+
+    /** How many pages a PDF has (0 when the phone cannot open it). */
+    static int pdfPages(Context c, Uri uri) {
+        try (android.os.ParcelFileDescriptor fd = c.getContentResolver().openFileDescriptor(uri, "r")) {
+            if (fd == null) return 0;
+            android.graphics.pdf.PdfRenderer r = new android.graphics.pdf.PdfRenderer(fd);
+            try {
+                return r.getPageCount();
+            } finally {
+                r.close();
+            }
+        } catch (Throwable e) {
+            return 0;
+        }
     }
 
     /** Key of a photo or video in {@link #aspects}. */
