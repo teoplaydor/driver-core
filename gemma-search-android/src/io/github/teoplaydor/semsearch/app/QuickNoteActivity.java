@@ -899,7 +899,12 @@ public final class QuickNoteActivity extends Activity {
             heard.setText(a.text);
             when.setVisibility(a.source != null ? View.VISIBLE : View.GONE);
             when.setCompoundDrawablesRelativeWithIntrinsicBounds(new Icon(Icon.ANSWER, Ui.ACCENT, Ui.dp(this, 1.6f)), null, null, null);
-            if (a.source != null) when.setText(sourceLabel(a.source));
+            if (a.source != null) {
+                // the whole note is the answer: no need to say it twice
+                boolean whole = a.source.kind == IndexStore.KIND_NOTE
+                        && io.github.teoplaydor.semsearch.core.NoteText.plain(a.source.body).trim().equals(a.text.trim());
+                when.setText(whole ? "Из заметки — «Открыть» покажет её" : sourceLabel(a.source));
+            }
         }
         View open = a != null && a.source != null ? button("Открыть", false, new Runnable() {
             @Override

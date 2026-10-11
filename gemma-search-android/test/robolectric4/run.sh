@@ -7,6 +7,8 @@
 #   NavTest         — «Назад» in the order things were opened: viewer, search, albums, settings
 #   QuickNoteTest   — a note by voice: listening at once, kept with its reminder, undone, asked when, a search, typed,
 #                     the widget, the tile, the «Голосовая заметка» icon
+#   AssistantTest   — questions answered from the notes, dates found, places, «Готово», the shade, the digest, the
+#                     calendar, a ticket found in a photo's text, the voice kept
 #   ScanTest        — a document photo offered as a scan for printing: the sheet cut out, black and white, saved;
 #                     a bent sheet flattened, its lines straightened by «Текст ровно»; pictures chosen with a long
 #                     press, the documents among them scanned into one PDF
@@ -88,7 +90,7 @@ fi
 
 rm -rf build/shots
 TESTS=("$@")
-[ ${#TESTS[@]} -gt 0 ] || TESTS=(UiShots AppFlowTest AppIndexingTest IndexStopTest PipelineTest ViewerTest HiddenTest PeopleAppTest NavTest ScanTest NotesTest QuickNoteTest AudioFilesTest OpenTimeoutTest AutoIndexTest IdleIndexTest SpeedupsTest)
+[ ${#TESTS[@]} -gt 0 ] || TESTS=(UiShots AppFlowTest AppIndexingTest IndexStopTest PipelineTest ViewerTest HiddenTest PeopleAppTest NavTest ScanTest NotesTest QuickNoteTest AssistantTest AudioFilesTest OpenTimeoutTest AutoIndexTest IdleIndexTest SpeedupsTest)
 # One JVM per class: Engine is an app-wide singleton.
 for t in "${TESTS[@]}"; do
   echo "-- $t"

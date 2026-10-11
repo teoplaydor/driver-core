@@ -131,7 +131,8 @@ final class Places {
         try {
             lm.addProximityAlert(p.lat, p.lon, p.radius, -1, pending(c, note.id));
             return true;
-        } catch (SecurityException | IllegalArgumentException e) {
+        } catch (RuntimeException e) {
+            // not allowed, or no location service
             return false;
         }
     }
@@ -141,7 +142,7 @@ final class Places {
         if (lm == null) return;
         try {
             lm.removeProximityAlert(pending(c, id));
-        } catch (SecurityException e) {
+        } catch (RuntimeException e) {
             // never set
         }
     }
