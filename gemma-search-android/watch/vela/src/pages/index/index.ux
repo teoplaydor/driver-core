@@ -426,9 +426,11 @@ export default {
     this.sampleN = 0
     this.firstRaw = null
     this.moved = false
+    this.lastSampleAt = Date.now()
     const r = function (v) { return Math.round(Number(v) || 0) }
     const onSample = function (ret) {
       if (!self.listening || !self.packer || !ret) return
+      self.lastSampleAt = Date.now()
       self.packer.sample(ret.x, ret.y, ret.z, Date.now())
       self.sampleN++
       if (!self.firstRaw) {
@@ -453,16 +455,20 @@ export default {
       })
     }
     sub()
-    // re-arm the sensor every 2 s, in case the stream stalls on one stale reading
-    const rearm = function () {
+    // revive the sensor only when it actually stalls (no sample for 1.5 s) — a healthy stream is never interrupted,
+    // so the writes to the phone are not disturbed
+    const guard = function () {
       if (!self.listening) return
-      try {
-        sensor.unsubscribeAccelerometer()
-      } catch (e) {}
-      sub()
-      self.reSub = setTimeout(rearm, 2000)
+      if (Date.now() - self.lastSampleAt > 1500) {
+        try {
+          sensor.unsubscribeAccelerometer()
+        } catch (e) {}
+        sub()
+        self.lastSampleAt = Date.now()
+      }
+      self.reSub = setTimeout(guard, 1000)
     }
-    this.reSub = setTimeout(rearm, 2000)
+    this.reSub = setTimeout(guard, 1000)
   },
 
   /** One write at a time; a slow link loses the oldest samples, not the newest. */
