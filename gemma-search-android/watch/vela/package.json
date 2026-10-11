@@ -1,6 +1,6 @@
 {
   "name": "semsearch-wrist-vela",
-  "version": "1.1.1",
+  "version": "1.2.0",
   "private": true,
   "description": "«Пульт кистью» for Xiaomi Vela watches (Xiaomi Watch S5): the raw accelerometer to the phone over Bluetooth LE",
   "scripts": {

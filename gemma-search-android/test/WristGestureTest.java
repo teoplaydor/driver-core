@@ -11,7 +11,8 @@ import java.util.Random;
  * left on either hand, at 25, 50, 12 and 5 Hz, in milli-g, raw counts or m/s²; quick turns (a quarter of a second)
  * sampled at any moment, back only roughly where they started; a watch with its own axes taught by one turn; what must
  * not count: raising the hand to look, walking, turning and staying, a small or a slow turn, a lost packet, half an
- * hour of everyday movement; and turns found on the watch and sent as TURN packets.
+ * hour of everyday movement; turns found on the watch and sent as TURN / SWING packets; and the arm held any way —
+ * flat, raised, lowered, hanging along the body (the compass) — with half an hour of everyday movement, arm hanging.
  * usage: WristGestureTest [DIR — where to write the streams for the watches' JavaScript finder]
  */
 public class WristGestureTest {
@@ -32,6 +33,19 @@ public class WristGestureTest {
         double noise = 0.02 * G;
         /** Where the samples fall within a sample period (0..1): the same motion sampled a little earlier or later. */
         double phase;
+        /**
+         * How the arm is held (the watch's rest orientation in the world: x along the forearm, z out of the dial); the
+         * motions' axes and offsets are in the watch's own rest frame. The world: x north, y west, z up.
+         */
+        double[][] base = {{1, 0, 0}, {0, 1, 0}, {0, 0, 1}};
+        /** The compass: the heading of the watch's y axis (radians, north 0, east π/2), with ±1.5° noise, per sample. */
+        final List<Double> heading = new ArrayList<Double>();
+
+        /** The arm held: the forearm pitched down by {@code pitch}° (negative: up), the wrist rolled by {@code roll}°. */
+        Sim posture(double pitch, double roll) {
+            base = mulM(rot(new double[]{0, 1, 0}, Math.toRadians(pitch)), rot(new double[]{1, 0, 0}, Math.toRadians(roll)));
+            return this;
+        }
 
         Sim(int rate) {
             this.rate = rate;
@@ -68,6 +82,23 @@ public class WristGestureTest {
             });
         }
 
+        /** Turning the whole body (around the vertical) by deg in s seconds, and staying turned. */
+        Sim yaw(final double deg, final double s) {
+            // the vertical, in the watch's rest frame
+            double[] up = mulT(base, new double[]{0, 0, 1});
+            final double a = Math.toRadians(deg);
+            move(up, new double[]{0, 0, 0.03}, s, new Motion() {
+                @Override
+                public double angle(double t) {
+                    double x = Math.sin(Math.PI * Math.min(t, s) / (2 * s));
+                    return a * x * x;
+                }
+            });
+            // the new way the body faces is the rest from now on
+            base = mulM(rot(new double[]{0, 0, 1}, a), base);
+            return this;
+        }
+
         /** Raising the hand: a bend at the elbow (25 cm back) around the world's y axis, and down again. */
         Sim raise(final double deg, final double s) {
             final double a = Math.toRadians(deg);
@@ -90,9 +121,11 @@ public class WristGestureTest {
             });
         }
 
-        Sim move(double[] axis, double[] p0, double s, Motion m) {
+        Sim move(double[] axis0, double[] p00, double s, Motion m) {
             int n = (int) Math.round(s * rate);
             double h = 1e-3;
+            // the axis and the offset in the world, by the way the arm is held
+            double[] axis = mul(base, axis0), p0 = mul(base, p00);
             for (int i = 0; i < n; i++) {
                 double t = (i + phase) / rate;
                 double th = m.angle(t);
@@ -102,10 +135,14 @@ public class WristGestureTest {
                 double[] acc = new double[3];
                 for (int k = 0; k < 3; k++) acc[k] = (p1[k] - 2 * p2[k] + p3[k]) / (h * h);
                 // the accelerometer: (acceleration − gravity) in the watch's own axes
+                double[][] whole = mulM(r, base);
                 double[] f = {acc[0], acc[1], acc[2] + G};
-                double[] w = mulT(r, f);
+                double[] w = mulT(whole, f);
                 for (int k = 0; k < 3; k++) w[k] += noise * rnd.nextGaussian();
                 out.add(w);
+                // the compass: where the watch's y axis points, seen from above
+                double[] y = mul(whole, new double[]{0, 1, 0});
+                heading.add(Math.atan2(-y[1], y[0]) + Math.toRadians(1.5) * rnd.nextGaussian());
             }
             return this;
         }
@@ -117,6 +154,12 @@ public class WristGestureTest {
                 {c + x * x * C, x * y * C - z * s, x * z * C + y * s},
                 {y * x * C + z * s, c + y * y * C, y * z * C - x * s},
                 {z * x * C - y * s, z * y * C + x * s, c + z * z * C}};
+    }
+
+    static double[][] mulM(double[][] a, double[][] b) {
+        double[][] o = new double[3][3];
+        for (int i = 0; i < 3; i++) for (int j = 0; j < 3; j++) o[i][j] = a[i][0] * b[0][j] + a[i][1] * b[1][j] + a[i][2] * b[2][j];
+        return o;
     }
 
     static double[] mul(double[][] r, double[] v) {
@@ -283,6 +326,19 @@ public class WristGestureTest {
                     stream(sb, "turns-" + rate + "hz-" + d + "s-" + (dir > 0 ? "right" : "left"), sim, rate, jit);
                     k++;
                 }
+        // the arm held otherwise, the compass 10 times a second
+        double[][] held = {{-50, 0}, {85, 0}, {90, 40}, {-80, 0}};
+        for (int i = 0; i < held.length; i++) {
+            Sim sim = new Sim(20);
+            sim.rnd.setSeed(300 + i);
+            sim.posture(held[i][0], held[i][1]);
+            sim.still(1.2);
+            flick(sim, 60, 0.4, 0.1, 0.025);
+            sim.still(0.8);
+            flick(sim, -55, 0.6, 0, 0.025);
+            sim.still(0.8).yaw(70, 1.5).still(0.8).raise(40, 1);
+            stream(sb, "held-" + (int) held[i][0] + "-" + (int) held[i][1] + "-compass", sim, 20, jit, 10);
+        }
         for (int rate : new int[]{5, 16, 25}) {
             Sim sim = new Sim(rate);
             Random q = new Random(rate);
@@ -301,12 +357,98 @@ public class WristGestureTest {
     }
 
     static void stream(StringBuilder sb, String name, Sim sim, int rate, Random jit) {
+        stream(sb, name, sim, rate, jit, 0);
+    }
+
+    /** «t x y z heading» lines (heading in radians, NaN — no compass; the compass updates compassHz times a second). */
+    static void stream(StringBuilder sb, String name, Sim sim, int rate, Random jit, double compassHz) {
         sb.append("# ").append(name).append('\n');
+        double h = Double.NaN, lastH = -1e9;
         for (int i = 0; i < sim.out.size(); i++) {
             double[] v = sim.out.get(i);
             double t = 1000.0 * i / rate + (i == 0 ? 0 : (jit.nextDouble() - 0.5) * 0.2 * 1000.0 / rate);
-            sb.append(String.format(java.util.Locale.ROOT, "%.1f %.4f %.4f %.4f%n", t, v[0], v[1], v[2]));
+            if (compassHz > 0 && t - lastH >= 1000 / compassHz - 1) {
+                h = sim.heading.get(i);
+                lastH = t;
+            }
+            sb.append(String.format(java.util.Locale.ROOT, "%.1f %.4f %.4f %.4f %s%n", t, v[0], v[1], v[2],
+                    Double.isNaN(h) ? "NaN" : String.format(java.util.Locale.ROOT, "%.5f", h)));
         }
+    }
+
+    /** Through the watch's own finder (with its compass at {@code compassHz} updates a second, 0 — none) and SWING packets. */
+    static List<Integer> onWatch(WristGesture phone, Sim sim, double compassHz) {
+        WristGesture.Finder f = new WristGesture.Finder();
+        List<Integer> got = new ArrayList<Integer>();
+        double h = Double.NaN, lastH = -1e9;
+        int seq = 0;
+        for (int i = 0; i < sim.out.size(); i++) {
+            double t = i * 1000.0 / sim.rate;
+            if (compassHz > 0 && t - lastH >= 1000 / compassHz - 1e-6) {
+                h = sim.heading.get(i);
+                lastH = t;
+            }
+            double[] v = sim.out.get(i);
+            if (f.sample(v[0], v[1], v[2], t, h)) {
+                int r = phone.packet(WristGesture.swingPacket(seq++, f.peak(), f.took(), f.rest(), f.peakUp(), f.headingChange()));
+                if (r != WristGesture.NONE) got.add(r);
+            }
+        }
+        return got;
+    }
+
+    /** Twists of 50–70° both ways in 0.35–0.7 s at 20 Hz with the arm held so: found by gravity alone, with the compass. */
+    static double[] postureHits(double pitch, double roll) {
+        int n = 0;
+        int[] ok = new int[2];
+        long seed = 1;
+        for (double d : new double[]{0.35, 0.5, 0.7})
+            for (double deg : new double[]{50, 70})
+                for (int ph = 0; ph < 3; ph++)
+                    for (int dir = -1; dir <= 1; dir += 2) {
+                        Sim sim = new Sim(20);
+                        sim.rnd.setSeed(seed++);
+                        sim.posture(pitch, roll);
+                        sim.phase = ph / 3.0;
+                        sim.still(1.2);
+                        flick(sim, dir * deg, d, 0.1, 0.025);
+                        sim.still(1);
+                        n++;
+                        for (int k = 0; k < 2; k++) {
+                            WristGesture phone = new WristGesture();
+                            phone.setRight(null, true);
+                            phone.packet(WristGesture.hello(WristGesture.VERSION_TURNS, 1, 20, 0, "vela"));
+                            List<Integer> got = onWatch(phone, sim, k == 0 ? 0 : 10);
+                            if (got.size() == 1 && got.get(0) == (dir > 0 ? R : L)) ok[k]++;
+                        }
+                    }
+        return new double[]{ok[0] / (double) n, ok[1] / (double) n};
+    }
+
+    /** Ten minutes of everyday movement with the arm along the body, found on the watch with its compass: false turns. */
+    static int everydayHanging(long seed) {
+        Random q = new Random(seed);
+        Sim sim = new Sim(20);
+        sim.rnd.setSeed(seed);
+        sim.posture(85, q.nextInt(60));
+        double total = 0;
+        while (total < 600) {
+            double s;
+            switch (q.nextInt(6)) {
+                case 0: s = 0.5 + 2.5 * q.nextDouble(); sim.still(s); break;
+                case 1: s = 3 + 5 * q.nextDouble(); sim.walk(s); break;
+                // turning the body
+                case 2: s = 0.8 + 1.5 * q.nextDouble(); sim.yaw((q.nextBoolean() ? 1 : -1) * (20 + 70 * q.nextDouble()), s); break;
+                case 3: s = 0.4 + 0.8 * q.nextDouble(); sim.turn(FOREARM, (q.nextBoolean() ? 1 : -1) * (8 + 14 * q.nextDouble()), s, true); break;
+                case 4: s = 2 + q.nextDouble(); sim.turn(FOREARM, (q.nextBoolean() ? 1 : -1) * (40 + 30 * q.nextDouble()), s, true); break;
+                default: s = 0.6 + q.nextDouble(); sim.raise(20 + 40 * q.nextDouble(), s); break;
+            }
+            total += s;
+        }
+        WristGesture phone = new WristGesture();
+        phone.setRight(null, true);
+        phone.packet(WristGesture.hello(WristGesture.VERSION_TURNS, 1, 20, 0, "vela"));
+        return onWatch(phone, sim, 10).size();
     }
 
     static final double[] FOREARM = {1, 0, 0};
@@ -446,6 +588,60 @@ public class WristGestureTest {
             }
         }
         check("found on the watch, sent as TURN: quick right, quick left", tg, R, L);
+
+        // however the arm is held: the twist is measured around the forearm (gravity), and with the forearm upright by the
+        // compass — found on the watch, sent as SWING packets
+        double[][] postures = {{0, 0}, {-45, 0}, {-60, 0}, {60, 0}, {0, 90}, {-45, 60}, {-70, 0}, {75, 0}, {85, 0}, {90, 0}, {85, 90}, {-90, 0}};
+        String[] pnames = {"forearm flat", "raised 45° (holding the phone)", "raised 60°", "lowered 60°", "flat, palm sideways",
+                "phone in hand, palm to the face", "raised 70°", "lowered 75°", "along the body", "hanging straight",
+                "along the body, palm to the thigh", "raised straight up"};
+        for (int p = 0; p < postures.length; p++) {
+            double[] r = postureHits(postures[p][0], postures[p][1]);
+            boolean upright = Math.abs(postures[p][0]) >= 70;
+            boolean ok = r[1] >= 0.9 && (upright || r[0] >= 0.9);
+            if (!ok) bad++;
+            System.out.println((ok ? "ok   " : "FAIL ") + String.format("%s: %.0f%% by gravity alone, %.0f%% with the compass", pnames[p],
+                    100 * r[0], 100 * r[1]) + (upright ? " (near upright: gravity alone barely sees a twist)" : ""));
+        }
+        int hanging = everydayHanging(1) + everydayHanging(2) + everydayHanging(3);
+        if (hanging > 3) bad++;
+        System.out.println((hanging <= 3 ? "ok   " : "FAIL ") + "everyday movement with the arm along the body, 30 min, with the compass: "
+                + hanging + " false turns (3 at most)");
+        // the direction taught with the arm hanging: by the compass
+        WristGesture tu = new WristGesture();
+        tu.setRight(null, false); // the wrong hand on purpose
+        tu.packet(WristGesture.hello(WristGesture.VERSION_TURNS, 9, 20, 0, "vela"));
+        tu.learn();
+        List<Integer> tl = onWatch(tu, new Sim(20).posture(85, 0).still(1.2).turn(FOREARM, 60, 0.5, true).still(0.8)
+                .turn(FOREARM, 60, 0.5, true).still(0.8).turn(FOREARM, -60, 0.5, true).still(1), 10);
+        check("taught with the arm along the body (by the compass): learnt, right, left", tl, WristGesture.LEARNED, R, L);
+        // a slightly tilted learnt axis is taken as the forearm's (the watch's x)
+        WristGesture sn = new WristGesture();
+        sn.setRight(new float[]{0.9f, 0.3f, -0.25f}, true);
+        sn.packet(WristGesture.hello(WristGesture.VERSION_TURNS, 9, 20, 0, "vela"));
+        List<Integer> sl = onWatch(sn, new Sim(20).posture(-50, 0).still(1.2).turn(FOREARM, 60, 0.5, true).still(1), 0);
+        check("a learnt axis a little off the forearm, arm raised 50°", sl, R);
+        // SWING packets: what the phone makes of them
+        WristGesture sw = new WristGesture();
+        sw.setRight(null, true);
+        sw.packet(WristGesture.hello(WristGesture.VERSION_TURNS, 9, 20, 0, "vela"));
+        float[] up = {0, 0, 1};
+        float c = (float) Math.cos(Math.toRadians(60)), sN = (float) Math.sin(Math.toRadians(60));
+        tg.clear();
+        // turned right by 60° around x: «up», seen from the watch, went the other way
+        tg.add(sw.packet(WristGesture.swingPacket(0, 60, 300, up, new float[]{0, sN, c}, Float.NaN)));
+        tg.add(sw.packet(WristGesture.swingPacket(1, 60, 300, up, new float[]{0, -sN, c}, Float.NaN)));
+        // hanging (x down): the compass went east 60° — turned right around x
+        tg.add(sw.packet(WristGesture.swingPacket(2, 60, 300, new float[]{-1, 0, 0}, new float[]{-1, 0.05f, 0}, 60)));
+        check("SWING packets: right, left by gravity; right by the compass", tg, R, L, R);
+        boolean whys = sw.packet(WristGesture.swingPacket(3, 30, 300, up, new float[]{0, 0.5f, 0.866f}, Float.NaN)) == WristGesture.NONE
+                && sw.why() == WristGesture.WHY_SMALL
+                && sw.packet(WristGesture.swingPacket(4, 60, 300, up, new float[]{0.866f, 0, 0.5f}, Float.NaN)) == WristGesture.NONE
+                && sw.why() == WristGesture.WHY_NOT_FOREARM
+                && sw.packet(WristGesture.swingPacket(5, 40, 300, new float[]{-1, 0, 0}, new float[]{-0.95f, 0.3f, 0}, Float.NaN)) == WristGesture.NONE
+                && sw.why() == WristGesture.WHY_UPRIGHT;
+        if (!whys) bad++;
+        System.out.println((whys ? "ok   " : "FAIL ") + "SWING packets: too small; the hand raised, not twisted; upright with no compass — each said why");
 
         if (args.length > 0) streams(args[0]);
 

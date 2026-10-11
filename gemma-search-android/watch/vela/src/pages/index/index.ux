@@ -11,8 +11,9 @@
 <script>
 /**
  * The watch's side of «tracks by a turn of the wrist»: finds the phone (SemSearch → Настройки → Часы) by its Bluetooth
- * LE service, connects, finds the turns in its own accelerometer and sends one short packet per turn (the phone's radio
- * and processor stay idle in between), vibrates on the phone's answer. The phone decides which way and what to press.
+ * LE service, connects, finds the turns in its own accelerometer (and compass: with the arm hanging only it sees a
+ * twist) and sends one short packet per turn (the phone's radio and processor stay idle in between), vibrates on the
+ * phone's answer. The phone decides which way and what to press.
  * Vela lets neither the sensor nor Bluetooth run in the background, so the page keeps the screen on while it works;
  * when the music stops the phone says «pause» and the sensor is switched off until it plays again.
  */
@@ -386,6 +387,7 @@ export default {
       },
       onTurn(t) {
         self.turn = Math.round(t.peak) + '° за ' + String(Math.round(t.took / 100) / 10).replace('.', ',') + ' с'
+          + (Number.isNaN(t.dh) ? '' : ' (компас)')
         self.showDiag()
       }
     })
@@ -398,9 +400,12 @@ export default {
   showDiag() {
     const n = this.n
     if (!n) return
-    this.diag = (this.turn ? 'поворот ' + this.turn + ' · ' : '') + 'датчик ' + n.s + ' (' + PACES[this.pace] + ') · повороты '
-      + n.p + ' · записи ' + n.w + ': ✓' + n.ok + ' ✗' + n.bad + (n.code !== '' ? ' (' + n.code + ')' : '') + ' ⏱' + n.to
-      + (this.ev ? ' · телефон: ' + this.ev : '')
+    const h = this.headingNow(Date.now())
+    const compass = this.compassCode ? 'компаса нет (' + this.compassCode + ')'
+      : Number.isNaN(h) ? (this.headingN ? 'компас молчит' : 'компас ждёт') : 'компас ' + Math.round(((h * 180) / Math.PI + 360) % 360) + '°'
+    this.diag = (this.turn ? 'поворот ' + this.turn + ' · ' : '') + 'датчик ' + n.s + ' (' + PACES[this.pace] + ') · ' + compass
+      + ' · повороты ' + n.p + ' · записи ' + n.w + ': ✓' + n.ok + ' ✗' + n.bad + (n.code !== '' ? ' (' + n.code + ')' : '')
+      + ' ⏱' + n.to + (this.ev ? ' · телефон: ' + this.ev : '')
   },
 
   lost() {
@@ -466,11 +471,15 @@ export default {
       try {
         sensor.unsubscribeAccelerometer()
       } catch (e) {}
+      try {
+        sensor.unsubscribeCompass()
+      } catch (e) {}
       return
     }
     const self = this
     this.state = 'слушаю повороты кисти' + (this.feedback === false ? ' (без отклика)' : '')
     this.subscribe()
+    this.compass()
     // revive the sensor only when it actually stalls (no sample for 1.5 s) — a healthy stream is never interrupted,
     // so the writes to the phone are not disturbed; a pace that gives nothing at all is given up for the next
     const guard = function () {
@@ -508,6 +517,40 @@ export default {
     })
   },
 
+  /**
+   * The compass: with the arm hanging along the body (the forearm upright) a twist turns the watch around gravity, which
+   * the accelerometer cannot see — but the heading turns by the twist. Its latest value goes with each sample.
+   */
+  compass() {
+    const self = this
+    this.heading = NaN
+    this.headingAt = 0
+    this.headingN = 0
+    this.compassCode = ''
+    try {
+      sensor.subscribeCompass({
+        callback(ret) {
+          if (!ret || typeof ret.direction !== 'number') return
+          self.headingN++
+          // accuracy −1: the sensor is gone; the rest (even «unreliable, reason unknown») still turns with the watch
+          if (ret.accuracy === -1) return
+          self.heading = ret.direction
+          self.headingAt = Date.now()
+        },
+        fail(data, code) {
+          self.compassCode = String(code)
+        }
+      })
+    } catch (e) {
+      this.compassCode = 'нет'
+    }
+  },
+
+  /** The heading to go with a sample: the latest, if it is fresh (radians), else NaN. */
+  headingNow(now) {
+    return now - this.headingAt <= 1000 ? this.heading : NaN
+  },
+
   /** The pace's values never changed (or none came): the next, slower pace, measured again with a new HELLO. */
   switchPace() {
     this.pace = Math.min(this.pace + 1, PACES.length - 1)
@@ -538,7 +581,7 @@ export default {
         return
       }
     }
-    this.packer.sample(ret.x, ret.y, ret.z, now)
+    this.packer.sample(ret.x, ret.y, ret.z, now, this.headingNow(now))
     if (now - (this.rawAt || 0) > 400) {
       this.rawAt = now
       // the raw values (one decimal), and whether any differed from the first — «✓» live, «стоит» static

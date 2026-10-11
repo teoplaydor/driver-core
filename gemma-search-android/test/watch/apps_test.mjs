@@ -150,7 +150,7 @@ async function zepp() {
   ok(!W.overlap, 'zepp: one write at a time')
   const sent = W.writes.filter((w) => w[0] === SAMPLES)
   ok(sent.length === 3 && sent[0][1].startsWith('0002') && Buffer.from(sent[0][1].slice(20), 'hex').toString() === 'zepp'
-    && sent.slice(1).every((w) => w[1].startsWith('20')),
+    && sent.slice(1).every((w) => w[1].startsWith('30')),
     'zepp: HELLO (the watch finds the turns) first, then one packet per turn: ' + (sent.length - 1) + ' — ' + W.text)
   ok(sent.every((w) => w[2] <= 20), 'zepp: every write fits 20 bytes')
   fs.writeFileSync(path.join(out, 'zepp_app.hex'), sent.map((w) => w[1]).join('\n') + '\n')
@@ -199,7 +199,8 @@ async function vela() {
             if (W.hangWrites) return  // the completion never comes: the watch's write watchdog must keep the stream going
             setImmediate(() => { W.outstanding = 0; o.success && o.success(); o.complete && o.complete() }) } }
           W.gatts.push(g); return g } }`,
-    '@system.sensor': `export default { subscribeAccelerometer(o) { W.acc = o }, unsubscribeAccelerometer() { W.acc = null } }`,
+    '@system.sensor': `export default { subscribeAccelerometer(o) { W.acc = o }, unsubscribeAccelerometer() { W.acc = null },
+      subscribeCompass(o) { W.compass = o }, unsubscribeCompass() { W.compass = null } }`,
     '@system.vibrator': `export default { vibrate(o) { W.buzz.push(o.mode) } }`,
     '@system.brightness': `export default { setKeepScreenOn(o) { W.keep = o.keepScreenOn } }`,
     '@system.storage': `const m = new Map(); W.storage = m; export default { get(o) { o.success(m.get(o.key) || '') }, set(o) { m.set(o.key, o.value) } }`
@@ -240,11 +241,11 @@ async function vela() {
   ok(W.acc && W.acc.interval === 'ui' && page.paceKnown, 'vela: «ui» gave live numbers — kept')
   const sent = W.writes.filter((w) => w[1] === SAMPLES)
   page.showDiag() // (the screen itself is refreshed at most every 0.4 s)
-  const d = page.diag.match(/^поворот \d+° за [\d,]+ с · датчик (\d+) \(ui\) · повороты (\d+) · записи (\d+): ✓(\d+) ✗(\d+) ⏱(\d+)/)
+  const d = page.diag.match(/^поворот \d+° за [\d,]+ с · датчик (\d+) \(ui\) · компас ждёт · повороты (\d+) · записи (\d+): ✓(\d+) ✗(\d+) ⏱(\d+)/)
   ok(d && +d[1] > 200 && +d[2] === sent.length - 1 && +d[3] === sent.length && +d[4] === sent.length && +d[5] === 0,
     'vela: the counters on the screen — the last turn, sensor, turns, writes and how they ended («' + page.diag + '»)')
   ok(sent.length === 3 && sent[0][2].startsWith('0002') && Buffer.from(sent[0][2].slice(20), 'hex').toString() === 'vela'
-    && sent.slice(1).every((w) => w[2].startsWith('20')),
+    && sent.slice(1).every((w) => w[2].startsWith('30')),
     'vela: HELLO (the watch finds the turns) first, then one packet per turn: ' + (sent.length - 1))
   ok(sent.every((w) => w[2].length <= 40 && w[0] === SERVICE && Array.isArray(w[3])), 'vela: every write fits 20 bytes, with its service and descriptors')
   fs.writeFileSync(path.join(out, 'vela_app.hex'), sent.map((w) => w[2]).join('\n') + '\n')
@@ -253,7 +254,7 @@ async function vela() {
   say(3)
   ok(W.buzz.join() === 'short,long', 'vela: «next» buzzes short, «learnt» long')
   say(4)
-  ok(W.acc === null && /не играет музыка/.test(page.state) && /телефон: пауза/.test(page.diag),
+  ok(W.acc === null && W.compass === null && /не играет музыка/.test(page.state) && /телефон: пауза/.test(page.diag),
     'vela: «pause» — the accelerometer off, and the screen says why («' + page.state + '»)')
   say(5)
   ok(W.acc !== null, 'vela: «stream» — on again')
@@ -376,10 +377,43 @@ async function vela() {
   }
   await advance(300)
   const s5w = W.writes.slice(w3).filter((w) => w[1] === SAMPLES)
-  ok(s5w.length === 3 && s5w[0][2].startsWith('0002') && s5w[1][2].startsWith('20') && s5w[2][2].startsWith('20')
+  ok(s5w.length === 3 && s5w[0][2].startsWith('0002') && s5w[1][2].startsWith('30') && s5w[2][2].startsWith('30')
     && /повороты 2/.test(p3.diag), 'vela (S5: whole m/s², samples in batches): HELLO and both turns — «' + p3.diag + '»')
   fs.writeFileSync(path.join(out, 'vela_s5_app.hex'), s5w.map((w) => w[2]).join('\n') + '\n')
   p3.onDestroy()
+
+  // the arm hanging along the body: the forearm (x) points down, gravity stays put in a twist, the compass turns —
+  // twisted right (east) and back, then left; the compass reports 10 times a second
+  const p4 = Object.create(def)
+  Object.assign(p4, JSON.parse(JSON.stringify(def.data)))
+  p4.onInit()
+  await flush(); await flush(); await flush(); await flush()
+  W.found([{ deviceId: '5A:11:22:33:44:55', rssi: -60, addressType: 'RANDOM', data: new Uint8Array([2, 1, 6, 17, 7, ...le]).buffer }])
+  W.gatts[W.gatts.length - 1].onBLEConnectionStateChange(2)
+  await flush(); await flush(); await flush()
+  ok(W.compass && typeof W.compass.callback === 'function', 'vela (arm hanging): the compass on with the accelerometer')
+  const w4 = W.writes.length
+  const h0 = 1.2
+  let hAt = -1e9
+  const twists = [[0, 2], [60, 0.5], [0, 1], [-60, 0.5], [0, 1]]
+  for (const [deg, sec] of twists) {
+    const n = Math.round(sec * 20)
+    for (let i = 0; i < n; i++) {
+      const th = (deg * Math.PI / 180) * Math.sin(Math.PI * i / n) ** 2
+      await advance(50)
+      if (clock - hAt >= 100) { W.compass && W.compass.callback({ direction: h0 + th + (rnd() - 0.5) * 0.02, accuracy: 2 }); hAt = clock }
+      W.acc && W.acc.callback({ x: -9.8 + (rnd() - 0.5) * 0.1, y: (rnd() - 0.5) * 0.1, z: (rnd() - 0.5) * 0.1 })
+      await flush()
+    }
+  }
+  await advance(300)
+  const hw = W.writes.slice(w4).filter((w) => w[1] === SAMPLES)
+  p4.showDiag()
+  ok(hw.length === 3 && hw[1][2].startsWith('30') && hw[2][2].startsWith('30') && /компас \d+°/.test(p4.diag) && /\(компас\)/.test(p4.diag),
+    'vela (arm hanging): both twists found by the compass — «' + p4.diag + '»')
+  fs.writeFileSync(path.join(out, 'vela_hanging_app.hex'), hw.map((w) => w[2]).join('\n') + '\n')
+  p4.onDestroy()
+  ok(W.compass === null, 'vela: the compass off when the page goes')
 }
 
 await zepp()

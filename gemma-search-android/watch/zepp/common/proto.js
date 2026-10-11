@@ -1,8 +1,9 @@
 // «Пульт кистью»: the watch's side of the protocol of the phone's WristGesture (SemSearch → Настройки → Часы).
 // The same file serves the Xiaomi Vela and the Zepp OS apps (and is checked against the phone's Java in the tests).
-// The watch finds the turn itself (createFinder — the phone's WristGesture.Finder, line for line) and sends one TURN
-// packet per turn; the phone decides what it means. Or it streams the raw samples (ACCEL, 3 a packet) and the phone
-// finds the turn. Little-endian, 20 bytes at most.
+// The watch finds the turn itself (createFinder — the phone's WristGesture.Finder, line for line) and sends one SWING
+// packet per turn (where «up» was at rest and at the far end, how far the compass went); the phone decides what it
+// means. Or it streams the raw samples (ACCEL, 3 a packet) and the phone finds the turn. Little-endian, 20 bytes at
+// most.
 
 export const SERVICE = 'a7b7e001-9ca3-4574-a1f0-3c9840e24d01'
 export const SAMPLES = 'a7b7e002-9ca3-4574-a1f0-3c9840e24d01'
@@ -52,6 +53,24 @@ export function accel(seq, xyz, n) {
   return b.buffer
 }
 
+/**
+ * SWING: how far (degrees), how long (ms), «up» at rest and at the far end (the watch's axes, unit length), how far the
+ * compass heading went (degrees; NaN — no compass). The phone works out the twist around the forearm from them.
+ */
+export function swingPacket(seq, peak, took, rest, far, dh) {
+  const b = new Uint8Array(18)
+  b[0] = 0x30
+  b[1] = seq & 0xff
+  b[2] = Math.max(0, Math.min(255, Math.round(peak)))
+  b[3] = Math.max(0, Math.min(255, Math.round(took / 10)))
+  for (let i = 0; i < 3; i++) {
+    put16(b, 4 + 2 * i, clamp16(rest[i] * 10000))
+    put16(b, 10 + 2 * i, clamp16(far[i] * 10000))
+  }
+  put16(b, 16, Number.isNaN(dh) ? -32768 : Math.max(-32767, clamp16(dh * 10)))
+  return b.buffer
+}
+
 /** TURN: how far (degrees), how long (ms), the axis it went around (the watch's axes, unit length). */
 export function turnPacket(seq, peak, took, axis) {
   const b = new Uint8Array(10)
@@ -67,8 +86,11 @@ export function turnPacket(seq, peak, took, axis) {
  * Finds turns in the accelerometer's samples by their real times — the phone's WristGesture.Finder (Java) line for
  * line, see there: the hand still for a moment (where it rests), then away by more than START_DEG and back near it
  * within MAX_MS; the swing that went furthest decides (a quick turn swings a little the other way at its start), and
- * the turn ends when no further swing follows within GRACE_MS. sample(x, y, z, t) gives { peak, took, axis } when a
- * turn has just ended, otherwise null. Any units.
+ * the turn ends when no further swing follows within GRACE_MS. With the forearm upright gravity barely moves in a
+ * twist, so the compass heading (passed with each sample, radians, NaN — none) counts as a swing too.
+ * sample(x, y, z, t, heading) gives { peak, took, axis, rest, far, dh } when a turn has just ended, otherwise null:
+ * «up» at rest and at the far end (the watch's axes), how far the heading went (degrees, NaN — it did not count).
+ * Any units.
  */
 export function createFinder() {
   const STILL_MS = 320
@@ -85,12 +107,15 @@ export function createFinder() {
   const CUT_HZ = 5
   const KNOCK_HI = 3.0
   const KNOCK_LO = 0.25
+  const UPRIGHT = 0.6
+  const FLAT_Y = 0.75
   const N = 64
   const ts = new Float64Array(N)
   const ux = new Float64Array(N)
   const uy = new Float64Array(N)
   const uz = new Float64Array(N)
   const mg = new Float64Array(N)
+  const hd = new Float64Array(N)
   const f = [0, 0, 0]
   const rest = [0, 0, 0]
   const peakU = [0, 0, 0]
@@ -107,7 +132,19 @@ export function createFinder() {
   let endT = 0
   let peak = 0
   let tilt = 0
+  let curH = NaN
+  let restH = NaN
+  let gravPeak = 0
+  let headPeak = 0
+  let headAt = 0
+  let headUsed = false
   const cosStill = Math.cos((STILL_DEG * Math.PI) / 180)
+
+  function wrapDeg(d) {
+    while (d > 180) d -= 360
+    while (d < -180) d += 360
+    return d
+  }
 
   function reset() {
     count = 0
@@ -115,8 +152,10 @@ export function createFinder() {
     haveRest = false
     lastStill = -Infinity
     state = 0
+    restH = NaN
   }
 
+  // still over the last STILL_MS (3 samples at least); with the forearm upright the compass has to be steady too
   function still(t) {
     let n = 0
     let sx = 0
@@ -144,6 +183,24 @@ export function createFinder() {
       if (ux[k] * sx + uy[k] * sy + uz[k] * sz < cosStill) return false
       if (Math.abs(mg[k] - mm) > STILL_MAG * mm) return false
     }
+    let h = NaN
+    if (!Number.isNaN(curH) && Math.abs(sx) >= UPRIGHT && Math.abs(sy) <= FLAT_Y) {
+      // the compass counts: steady too, its mean is where the watch faces
+      let hc = 0
+      let hs = 0
+      for (let i = 0; i < n; i++) {
+        const k = (at - 1 - i + N) % N
+        if (Number.isNaN(hd[k])) continue
+        hc += Math.cos(hd[k])
+        hs += Math.sin(hd[k])
+      }
+      h = Math.atan2(hs, hc)
+      for (let i = 0; i < n; i++) {
+        const k = (at - 1 - i + N) % N
+        if (!Number.isNaN(hd[k]) && Math.abs(wrapDeg(((hd[k] - h) * 180) / Math.PI)) > STILL_DEG) return false
+      }
+    }
+    restH = h
     rest[0] = sx
     rest[1] = sy
     rest[2] = sz
@@ -156,7 +213,8 @@ export function createFinder() {
     return true
   }
 
-  function sample(x, y, z, t) {
+  function sample(x, y, z, t, heading) {
+    curH = heading === undefined || heading === null ? NaN : Number(heading)
     let dt = primed ? t - lastT : 0
     if (primed && (dt < 0 || dt > 1000)) {
       // the clock went back or the samples stopped: start afresh (samples at the same time are still samples)
@@ -185,6 +243,7 @@ export function createFinder() {
     uy[k] = f[1] / m
     uz[k] = f[2] / m
     mg[k] = m
+    hd[k] = curH
     if (gSeen && (m > KNOCK_HI * g || m < KNOCK_LO * g)) {
       // a knock or a throw
       state = 0
@@ -192,31 +251,47 @@ export function createFinder() {
       return null
     }
     if (state === 0 && still(t)) {
-      // where the hand rests now
+      // where the hand rests now (and where the watch faces)
       lastStill = t
       haveRest = true
     }
     if (!haveRest) return null
     const c = rest[0] * ux[k] + rest[1] * uy[k] + rest[2] * uz[k]
-    const deg = (Math.acos(Math.max(-1, Math.min(1, c))) * 180) / Math.PI
+    const grav = (Math.acos(Math.max(-1, Math.min(1, c))) * 180) / Math.PI
+    const head = Number.isNaN(restH) || Number.isNaN(curH) ? NaN : wrapDeg(((curH - restH) * 180) / Math.PI)
+    const deg = Number.isNaN(head) ? grav : Math.max(grav, Math.abs(head))
     tilt = deg
     if (state === 0) {
       if (deg > START_DEG && t - lastStill <= FRESH_MS) {
         state = 1
         startT = lastStill
         peak = deg
+        gravPeak = grav
         peakU[0] = ux[k]
         peakU[1] = uy[k]
         peakU[2] = uz[k]
+        headUsed = !Number.isNaN(head)
+        headPeak = headUsed ? Math.abs(head) : 0
+        headAt = headUsed ? head : 0
       }
       return null
+    }
+    if (grav > gravPeak) {
+      // gravity's far end
+      gravPeak = grav
+      peakU[0] = ux[k]
+      peakU[1] = uy[k]
+      peakU[2] = uz[k]
+    }
+    if (!Number.isNaN(head) && Math.abs(head) > headPeak) {
+      // the compass's far end
+      headPeak = Math.abs(head)
+      headAt = head
+      headUsed = true
     }
     if (deg > peak) {
       // further than before: a bigger swing (after the run-up, or still on the way)
       peak = deg
-      peakU[0] = ux[k]
-      peakU[1] = uy[k]
-      peakU[2] = uz[k]
       state = 1
     }
     if (state === 1) {
@@ -248,15 +323,15 @@ export function createFinder() {
     const cy = rest[2] * peakU[0] - rest[0] * peakU[2]
     const cz = rest[0] * peakU[1] - rest[1] * peakU[0]
     const n = Math.sqrt(cx * cx + cy * cy + cz * cz)
-    if (n < 1e-6) return null
     // the watch turned around this axis (gravity, seen from the watch, turned the other way)
-    return { peak, took, axis: [-cx / n, -cy / n, -cz / n] }
+    const axis = n < 1e-6 ? [0, 0, 0] : [-cx / n, -cy / n, -cz / n]
+    return { peak, took, axis, rest: rest.slice(), far: peakU.slice(), dh: headUsed ? headAt : NaN }
   }
 
   return {
     sample,
     reset,
-    /** How far from where the hand last rested (degrees), for the screen. */
+    /** How far from where the hand last rested (degrees, gravity or compass), for the screen. */
     get tilt() {
       return haveRest ? tilt : 0
     },
@@ -303,8 +378,8 @@ export function advertises(data, uuid) {
  * Takes the accelerometer as the watch gives it and makes packets: the first second measures how often samples come
  * (the platforms only promise «about 20 ms») and their units (m/s² are sent in hundredths, cm/s² and milli-g as they
  * are), then HELLO goes out with the measured rate. With opts.turns the watch finds the turns itself (createFinder,
- * every sample at its own time) and sends one TURN packet per turn (opts.onTurn hears it too); otherwise pairs are
- * averaged down to about 25 a second and sent, 3 samples a packet.
+ * every sample at its own time, the compass heading with it if the watch has one) and sends one SWING packet per turn
+ * (opts.onTurn hears it too); otherwise pairs are averaged down to about 25 a second and sent, 3 samples a packet.
  */
 export function createPacker(opts) {
   const target = opts.target || 25
@@ -352,8 +427,8 @@ export function createPacker(opts) {
     },
     /** The turn finder (with opts.turns), for the screen: finder.tilt. */
     finder,
-    /** One sample; now in ms. */
-    sample(x, y, z, now) {
+    /** One sample; now in ms; the compass heading then (radians, north 0, east π/2; omitted — none). */
+    sample(x, y, z, now, heading) {
       if (!scale) {
         const m = Math.sqrt(x * x + y * y + z * z)
         if (m === 0) return
@@ -373,9 +448,9 @@ export function createPacker(opts) {
         if (!finder) return
       }
       if (finder) {
-        const turn = finder.sample(x, y, z, retime(now))
+        const turn = finder.sample(x, y, z, retime(now), heading)
         if (turn) {
-          if (ready) opts.send(turnPacket(seq++, turn.peak, turn.took, turn.axis))
+          if (ready) opts.send(swingPacket(seq++, turn.peak, turn.took, turn.rest, turn.far, turn.dh))
           if (opts.onTurn) opts.onTurn(turn)
         }
         return

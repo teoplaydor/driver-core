@@ -71,6 +71,8 @@ fs.writeFileSync(path.join(out, 'fixed.hex'), [
   hex(P.accel(7, [1000, -1000, 32767, -32768, 0, 981, 40000, -40000, 1], 3)),
   hex(P.hello(0x0badcafe, 16, 981, 'vela', P.VERSION_TURNS)),
   hex(P.turnPacket(9, 61.6, 344, [0.6, -0.8, 0])),
+  hex(P.swingPacket(10, 58.4, 356, [0, 0.6, 0.8], [-0.1, -0.2, 0.97], 61.25)),
+  hex(P.swingPacket(11, 33, 300, [-1, 0, 0], [-0.95, 0.31, 0], NaN)),
 ].join('\n') + '\n')
 
 // the turn finder over the Java test's streams: what it finds, for WristJsTest to compare with the Java finder
@@ -86,9 +88,12 @@ if (fs.existsSync(inFile)) {
       continue
     }
     if (!l.trim() || !f) continue
-    const [t, x, y, z] = l.trim().split(' ').map(Number)
-    const r = f.sample(x, y, z, t)
-    if (r) found.push([name, r.peak.toFixed(3), r.took.toFixed(1), r.axis.map((v) => v.toFixed(5)).join(' ')].join(' '))
+    const [t, x, y, z, h] = l.trim().split(' ').map(Number)
+    const r = f.sample(x, y, z, t, h)
+    if (r) {
+      found.push([name, r.peak.toFixed(3), r.took.toFixed(1), Number.isNaN(r.dh) ? 'NaN' : r.dh.toFixed(3),
+        r.rest.concat(r.far).map((v) => v.toFixed(5)).join(' ')].join(' '))
+    }
   }
   fs.writeFileSync(path.join(out, 'finder_js.txt'), found.join('\n') + '\n')
   console.log('finder: ' + found.length + ' turns in the Java test\'s streams')

@@ -62,8 +62,11 @@ public class WristJsTest {
         ok(Arrays.equals(fixed.get(2), WristGesture.hello(WristGesture.VERSION_TURNS, 0x0badcafe, 16, 981, "vela")),
                 "HELLO v2: the same bytes as the phone's");
         ok(Arrays.equals(fixed.get(3), WristGesture.turnPacket(9, 61.6f, 344, new float[]{0.6f, -0.8f, 0})), "TURN: the same bytes");
+        ok(Arrays.equals(fixed.get(4), WristGesture.swingPacket(10, 58.4f, 356, new float[]{0, 0.6f, 0.8f}, new float[]{-0.1f, -0.2f, 0.97f}, 61.25f))
+                && Arrays.equals(fixed.get(5), WristGesture.swingPacket(11, 33, 300, new float[]{-1, 0, 0}, new float[]{-0.95f, 0.31f, 0}, Float.NaN)),
+                "SWING: the same bytes (with the compass and without)");
         // (the protocol module alone, and the apps' pages themselves)
-        for (String file : new String[]{"vela_turns", "zepp_turns", "vela_s5_turns", "vela_app", "vela_s5_app", "zepp_app"}) {
+        for (String file : new String[]{"vela_turns", "zepp_turns", "vela_s5_turns", "vela_app", "vela_s5_app", "vela_hanging_app", "zepp_app"}) {
             List<byte[]> ps = read(a[0] + "/" + file + ".hex");
             WristGesture d = new WristGesture();
             d.setRight(null, true);
@@ -91,9 +94,11 @@ public class WristJsTest {
                 }
                 if (l.trim().isEmpty() || f == null) continue;
                 String[] v = l.trim().split(" ");
-                if (f.sample(Double.parseDouble(v[1]), Double.parseDouble(v[2]), Double.parseDouble(v[3]), Double.parseDouble(v[0]))) {
-                    float[] ax = f.axis();
-                    java.add(name + " " + f.peak() + " " + f.took() + " " + ax[0] + " " + ax[1] + " " + ax[2]);
+                double h = v.length > 4 && !v[4].equals("NaN") ? Double.parseDouble(v[4]) : Double.NaN;
+                if (f.sample(Double.parseDouble(v[1]), Double.parseDouble(v[2]), Double.parseDouble(v[3]), Double.parseDouble(v[0]), h)) {
+                    float[] r = f.rest(), u = f.peakUp();
+                    java.add(name + " " + f.peak() + " " + f.took() + " " + f.headingChange() + " " + r[0] + " " + r[1] + " " + r[2]
+                            + " " + u[0] + " " + u[1] + " " + u[2]);
                 }
             }
             List<String> jsl = new ArrayList<String>();
@@ -103,7 +108,10 @@ public class WristJsTest {
             for (int i = 0; same && i < java.size(); i++) {
                 String[] x = java.get(i).split(" "), y = jsl.get(i).split(" ");
                 same = x[0].equals(y[0]);
-                for (int k = 1; same && k < 6; k++) same = Math.abs(Double.parseDouble(x[k]) - Double.parseDouble(y[k])) <= (k == 2 ? 0.2 : k == 1 ? 0.01 : 1e-4);
+                for (int k = 1; same && k < 10; k++) {
+                    double xv = Double.parseDouble(x[k]), yv = Double.parseDouble(y[k]);
+                    same = Double.isNaN(xv) ? Double.isNaN(yv) : Math.abs(xv - yv) <= (k == 2 ? 0.2 : k <= 3 ? 0.01 : 1e-4);
+                }
                 if (!same) first = "\n     java: " + java.get(i) + "\n     js:   " + jsl.get(i);
             }
             ok(same, "the watches' finder and the phone's: the same " + java.size() + " turns (JavaScript " + jsl.size() + ")" + first);

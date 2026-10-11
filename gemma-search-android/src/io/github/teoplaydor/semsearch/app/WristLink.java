@@ -608,9 +608,20 @@ public final class WristLink {
                     if (k.d.turns() != k.turnsShown) {
                         k.turnsShown = k.d.turns();
                         float peak = k.d.lastPeak();
-                        setStatus(name(k) + " · поворот " + Math.round(peak) + "° за " + seconds(k.d.lastTook()) + " с — "
-                                + (peak < k.d.turn ? "мало, нужно " + Math.round(k.d.turn) + "° (или «Насколько поворачивать»)"
-                                : "не вокруг предплечья (если путает стороны — «Направление»)"));
+                        String why;
+                        switch (k.d.why()) {
+                            case WristGesture.WHY_SMALL:
+                                why = "мало, нужно " + Math.round(k.d.turn) + "° (или «Насколько поворачивать»)";
+                                break;
+                            case WristGesture.WHY_UPRIGHT:
+                                why = "рука вертикально: такой поворот виден только по компасу часов, а он не ответил";
+                                break;
+                            default:
+                                why = "рука поднималась или опускалась — это не поворот кисти";
+                                break;
+                        }
+                        setStatus(name(k) + " · поворот " + Math.round(peak) + "° за " + seconds(k.d.lastTook()) + " с"
+                                + (k.d.lastByCompass() ? " (компас)" : "") + " — " + why);
                     }
                 }
                 return;
@@ -639,7 +650,7 @@ public final class WristLink {
             }
             press(c, right ? KeyEvent.KEYCODE_MEDIA_NEXT : KeyEvent.KEYCODE_MEDIA_PREVIOUS);
             remember((right ? "вправо → следующий трек" : "влево → предыдущий трек") + " (" + Math.round(k.d.lastPeak()) + "° за "
-                    + seconds(k.d.lastTook()) + " с)");
+                    + seconds(k.d.lastTook()) + " с" + (k.d.lastByCompass() ? ", по компасу" : "") + ")");
             answer(k, right ? WristGesture.EV_NEXT : WristGesture.EV_PREVIOUS);
         }
 

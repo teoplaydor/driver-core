@@ -44,9 +44,10 @@ import io.github.teoplaydor.semsearch.core.WristGesture;
 
 /**
  * The watch's side of «tracks by a turn of the wrist»: finds the phone by its Bluetooth LE service, connects, says
- * HELLO and, while the phone says music is playing, listens to the accelerometer (25 samples a second) and finds the
- * turns itself (the phone's own {@link WristGesture.Finder}): one short packet per turn goes to the phone, which decides
- * which way it was and answers with a byte, the watch vibrates. The phone's radio and processor stay idle in between.
+ * HELLO and, while the phone says music is playing, listens to the accelerometer (25 samples a second) and the heading
+ * (the rotation vector: with the arm hanging only it sees a twist) and finds the turns itself (the phone's own
+ * {@link WristGesture.Finder}): one short packet per turn goes to the phone, which decides which way it was and answers
+ * with a byte, the watch vibrates. The phone's radio and processor stay idle in between.
  * When the music stops the phone says «pause» and the sensor is off (the processor may sleep); when the connection
  * drops, the phone is looked for again.
  */
@@ -78,6 +79,10 @@ public final class StreamService extends Service implements SensorEventListener 
     private final WristGesture.Finder finder = new WristGesture.Finder();
     private long lastNs;
     private double sampleMs;
+    /** The heading of the watch's y axis (radians, north 0, east π/2) from the rotation vector, and when (ns); NaN — none. */
+    private double heading = Double.NaN;
+    private long headingNs;
+    private final float[] rot = new float[9];
     private SensorManager sensors;
     private PowerManager.WakeLock wake;
     private int watchId;
@@ -407,6 +412,10 @@ public final class StreamService extends Service implements SensorEventListener 
         wake.acquire(4 * 3_600_000L);
         // 25 a second; the sensor may gather them for up to 0.1 s and hand them over together
         sensors.registerListener(this, acc, 1_000_000 / RATE, 100_000);
+        // the heading (gyroscope and compass together): with the arm hanging only it sees a twist
+        heading = Double.NaN;
+        Sensor rv = sensors.getDefaultSensor(Sensor.TYPE_ROTATION_VECTOR);
+        if (rv != null) sensors.registerListener(this, rv, 1_000_000 / RATE, 100_000);
         setStatus("подключено · повороты кисти слушаются");
     }
 
@@ -421,12 +430,20 @@ public final class StreamService extends Service implements SensorEventListener 
     @Override
     public void onSensorChanged(SensorEvent e) {
         if (!streaming) return;
+        if (e.sensor != null && e.sensor.getType() == Sensor.TYPE_ROTATION_VECTOR) {
+            // the watch's y axis in the world (east, north, up): the second column
+            SensorManager.getRotationMatrixFromVector(rot, e.values);
+            heading = Math.atan2(rot[1], rot[4]);
+            headingNs = e.timestamp;
+            return;
+        }
         // the sensor's own time of the sample (batched samples come together but keep their times); without one, the
         // nominal pace
         sampleMs += e.timestamp > lastNs && lastNs > 0 ? (e.timestamp - lastNs) / 1e6 : 1000.0 / RATE;
         lastNs = e.timestamp;
-        if (finder.sample(e.values[0], e.values[1], e.values[2], sampleMs)) {
-            send(WristGesture.turnPacket(seq++ & 0xff, finder.peak(), finder.took(), finder.axis()));
+        double h = !Double.isNaN(heading) && Math.abs(e.timestamp - headingNs) < 1_000_000_000L ? heading : Double.NaN;
+        if (finder.sample(e.values[0], e.values[1], e.values[2], sampleMs, h)) {
+            send(WristGesture.swingPacket(seq++ & 0xff, finder.peak(), finder.took(), finder.rest(), finder.peakUp(), finder.headingChange()));
         }
     }
 
