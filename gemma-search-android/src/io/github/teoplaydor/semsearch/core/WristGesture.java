@@ -76,6 +76,7 @@ public final class WristGesture {
     private final float[] ref = new float[3];
     private boolean refSet;
     private float diagTilt;
+    private int rawX, rawY, rawZ;
     private float g; // the size of gravity in the watch's units, learnt when the hand is still
     private boolean gSeen;
     private float[] ring = new float[0];
@@ -126,6 +127,11 @@ public final class WristGesture {
     /** For the screen: how far the watch is tilted from its resting posture right now, in degrees. */
     public float tilt() {
         return diagTilt;
+    }
+
+    /** For the screen: the last raw sample received (x, y, z in the watch's own units), to see if it moves at all. */
+    public int[] lastRaw() {
+        return new int[]{rawX, rawY, rawZ};
     }
 
     public long samples() {
@@ -280,6 +286,9 @@ public final class WristGesture {
 
     /** One accelerometer sample in the watch's units, at the watch's rate. */
     public int sample(float x, float y, float z) {
+        rawX = Math.round(x);
+        rawY = Math.round(y);
+        rawZ = Math.round(z);
         double t = samples * 1000.0 / rate;
         samples++;
         // a light low-pass (≈5 Hz): the jitter of the sensor and of the hand go, a turn stays

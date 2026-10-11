@@ -424,7 +424,14 @@ export default {
     sensor.subscribeAccelerometer({
       interval: 'game',
       callback(ret) {
-        if (self.listening && self.packer) self.packer.sample(ret.x, ret.y, ret.z, Date.now())
+        if (!self.listening || !self.packer) return
+        self.packer.sample(ret.x, ret.y, ret.z, Date.now())
+        // show the raw sensor values on the watch now and then, so it is clear whether the sensor delivers live data
+        const now = Date.now()
+        if (now - (self.rawAt || 0) > 400) {
+          self.rawAt = now
+          self.state = 'x' + Math.round(ret.x) + ' y' + Math.round(ret.y) + ' z' + Math.round(ret.z)
+        }
       },
       fail(data, code) {
         self.state = 'нет доступа к акселерометру (' + code + ')'

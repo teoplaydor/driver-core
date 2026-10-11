@@ -580,8 +580,10 @@ public final class WristLink {
                     long now = System.currentTimeMillis();
                     if (now - k.shownAt > 900) {
                         k.shownAt = now;
+                        int[] raw = k.d.lastRaw();
                         String learnt = learnt(c) ? "" : " · направление не задано";
-                        setStatus(k.d.platform() + " · " + k.d.rate() + " Гц · наклон " + Math.round(k.maxTilt) + "°" + learnt);
+                        setStatus(k.d.platform() + " · " + k.d.rate() + " Гц · (" + raw[0] + "," + raw[1] + "," + raw[2] + ") · наклон "
+                                + Math.round(k.maxTilt) + "°" + learnt);
                         k.maxTilt = k.d.tilt();
                     }
                 }
