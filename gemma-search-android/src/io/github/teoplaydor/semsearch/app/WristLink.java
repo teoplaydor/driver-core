@@ -329,9 +329,9 @@ public final class WristLink {
                 events.setValue(new byte[]{0});
                 s.addCharacteristic(samples);
                 s.addCharacteristic(events);
-                gatt.addService(s);
                 adv = ad.getBluetoothLeAdvertiser();
-                advertise(true);
+                gatt.addService(s);
+                advertise(true); // and again when the service is registered (onServiceAdded), which is idempotent
                 return true;
             } catch (SecurityException e) {
                 setStatus("нет разрешения «Устройства поблизости»");
@@ -430,10 +430,20 @@ public final class WristLink {
 
         private final BluetoothGattServerCallback callback = new BluetoothGattServerCallback() {
             @Override
+            public void onServiceAdded(int status, BluetoothGattService service) {
+                // the service is registered now: safe for a watch to discover it, so start announcing
+                synchronized (Server.this) {
+                    if (!trustedConnected()) advertise(true);
+                }
+            }
+
+            @Override
             public void onConnectionStateChange(BluetoothDevice dev, int st, int state) {
                 synchronized (Server.this) {
                     if (state == BluetoothProfile.STATE_CONNECTED) {
                         if (!conns.containsKey(dev.getAddress())) conns.put(dev.getAddress(), new Conn(dev));
+                        // a watch connected: stop announcing (the radio is freer for the watch's service discovery)
+                        advertise(false);
                         // the link reached the phone: the watch's HELLO comes next
                         if (!trustedConnected()) setStatus("часы подключаются…");
                     } else if (state == BluetoothProfile.STATE_DISCONNECTED) {

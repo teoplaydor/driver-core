@@ -105,6 +105,8 @@ public class WristTest {
         BluetoothDevice watch = ad.getRemoteDevice("C0:FF:EE:00:00:01");
         sg.notifyConnection(watch);
         assertEquals("the link reached the phone", "часы подключаются…", WristLink.status());
+        // a watch connected: advertising stops at once, so the radio is freer for its service discovery
+        assertEquals("advertising stops on connect", 0, Shadows.shadowOf(ad.getBluetoothLeAdvertiser()).getAdvertisementRequestCount());
         // samples before a HELLO: not listened to
         AudioManager am = (AudioManager) app.getSystemService(Context.AUDIO_SERVICE);
         Shadows.shadowOf(am).setIsMusicActive(true);
@@ -114,7 +116,7 @@ public class WristTest {
         // HELLO: this watch is remembered; it subscribes to the answers
         sg.notifyOnCharacteristicWriteRequest(watch, 1, samples, false, true, 0, WristGesture.hello(0x0badcafe, 25, 1000, "vela"));
         assertTrue(WristLink.status(), WristLink.status().contains("vela") && WristLink.status().contains("25 Гц"));
-        assertEquals("found: advertising stops", 0, Shadows.shadowOf(ad.getBluetoothLeAdvertiser()).getAdvertisementRequestCount());
+        assertEquals("still not advertising", 0, Shadows.shadowOf(ad.getBluetoothLeAdvertiser()).getAdvertisementRequestCount());
         Context c = app;
         BluetoothGattDescriptor cccd = events.getDescriptor(UUID.fromString("00002902-0000-1000-8000-00805f9b34fb"));
         // (Robolectric has no descriptor-write helper: the callback is called as the stack would)

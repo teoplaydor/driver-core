@@ -27,6 +27,9 @@ import {
 /** How long a connection may take before it is let go and the phone looked for again. */
 const CONNECT_MS = 15000
 
+/** How long each step after connecting (service discovery, enabling answers) may take before a retry. */
+const STEP_MS = 8000
+
 /** Shapes of the search's parameters, most documented first (see startScan). */
 const SCAN_VARIANTS = [
   () => ({ filters: [{ deviceId: '', name: '', serviceUuid: SERVICE }], options: { interval: 0, dutyMode: 1 } }),
@@ -234,12 +237,14 @@ export default {
     const g = ble.createGattClientDevice(found.deviceId, found.addressType)
     this.gatt = g
     this.up = false
+    this.linkedOk = false
     this.tries = (this.tries || 0) + 1
     this.state = 'подключаюсь…' + (this.tries > 1 ? ' (попытка ' + this.tries + ')' : '')
     const up = function () {
       if (g !== self.gatt || self.up) return
       self.up = true
       self.tries = 0
+      self.step('подключено, узнаю сервисы…')
       self.discover()
     }
     g.onBLEConnectionStateChange = function (state) {
@@ -266,12 +271,12 @@ export default {
   },
 
   /** The link did not come up: let go, look again; after a few tries, say what usually helps. */
-  failed() {
+  failed(reason) {
     this.drop()
     if (!this.on) return
     this.state = this.tries >= 3
       ? 'телефон найден, но не подключается. Часы уже связаны с ним через Mi Fitness — закройте Mi Fitness и нажмите «Старт»'
-      : 'не подключилось — ищу снова'
+      : (reason || 'не подключилось') + ' — ищу снова'
     if (this.tries >= 3) {
       this.tries = 0
       this.on = false
@@ -282,36 +287,53 @@ export default {
     this.later(() => this.scan(), 2000)
   },
 
+  /** Show a step of the connection and give it a time limit: if it does not answer, let go and try again. */
+  step(text) {
+    this.state = text
+    if (this.stepTimer) clearTimeout(this.stepTimer)
+    const self = this
+    const g = this.gatt
+    this.stepTimer = setTimeout(() => {
+      this.stepTimer = 0
+      if (g === self.gatt && !self.linkedOk) self.failed(text + ' — не отвечает')
+    }, STEP_MS)
+  },
+
   discover() {
     const self = this
     const g = this.gatt
     g.getServices({
       success(services) {
+        if (g !== self.gatt) return
         let ok = false
         for (let i = 0; services && i < services.length; i++) {
           if (String(services[i].serviceUuid).toLowerCase() === SERVICE) ok = true
         }
         if (!ok) {
-          self.state = 'это не тот телефон'
-          self.lost()
+          self.state = 'это не тот телефон — ищу дальше'
+          self.failed()
           return
         }
+        self.step('включаю ответы…')
         g.setNotifyCharacteristicChanged({
           characteristic: characteristic(EVENTS, new ArrayBuffer(0), { read: true, notify: true }),
           enable: true,
           complete() {
-            self.linked()
+            if (g === self.gatt) self.linked()
           }
         })
       },
       fail() {
-        self.lost()
+        if (g === self.gatt) self.failed()
       }
     })
   },
 
   linked() {
     const self = this
+    this.linkedOk = true
+    if (this.stepTimer) clearTimeout(this.stepTimer)
+    this.stepTimer = 0
     this.state = 'подключено'
     this.packer = createPacker({
       id: this.id,
@@ -331,6 +353,9 @@ export default {
   },
 
   drop() {
+    if (this.stepTimer) clearTimeout(this.stepTimer)
+    this.stepTimer = 0
+    this.linkedOk = false
     this.listen(false)
     this.queue = []
     this.writing = false

@@ -189,7 +189,7 @@ async function vela() {
           stopBLEScan() { W.scanning = false }, subscribeBLEDeviceFind(o) { W.found = o.callback; return 3 }, unsubscribeBLEDeviceFind() {}, close() {} }; return s },
         createGattClientDevice(id, type) { const g = { id, type,
           connect(o) { W.connecting = g }, disconnect() {}, close() { W.closed++; return true },
-          getServices(o) { setImmediate(() => o.success([{ serviceUuid: '00001800-0000-1000-8000-00805f9b34fb' }, { serviceUuid: '${SERVICE.toUpperCase()}', isPrimary: true }])) },
+          getServices(o) { if (W.hangDiscovery) return; setImmediate(() => o.success([{ serviceUuid: '00001800-0000-1000-8000-00805f9b34fb' }, { serviceUuid: '${SERVICE.toUpperCase()}', isPrimary: true }])) },
           setNotifyCharacteristicChanged(o) { W.notifies.push(o); setImmediate(() => o.complete && o.complete()) },
           writeCharacteristicValue(o) {
             if (W.outstanding) W.overlap = true
@@ -254,6 +254,19 @@ async function vela() {
   await advance(2100)
   await flush(); await flush()
   ok(W.scans === scans + 1 && W.scanning && W.starts.length === starts + 1, 'vela: looking for the phone again, at once with the shape that worked')
+  // the link comes up but service discovery never answers (the user's symptom if it gets past connecting): the step
+  // watchdog lets go after 8 s and tries again, and the screen shows which step stalled
+  W.hangDiscovery = true
+  W.found([{ deviceId: '5A:11:22:33:44:55', rssi: -60, addressType: 'RANDOM', data: new Uint8Array([2, 1, 6, 17, 7, ...le]).buffer }])
+  W.gatts[W.gatts.length - 1].onBLEConnectionStateChange(2)
+  await flush(); await flush()
+  ok(/узнаю сервисы/.test(page.state), 'vela: connected — now discovering services («' + page.state + '»)')
+  await advance(8100)
+  ok(/узнаю сервисы.*не отвеча/.test(page.state), 'vela: discovery did not answer in 8 s — says so, lets go')
+  await advance(2100); await flush(); await flush()
+  W.hangDiscovery = false
+  page.tries = 0
+
   // the phone found but the link never comes up (the watch's connect has no limit of its own): let go after 15 s and
   // look again; after three tries — stop and say what usually helps
   for (let t = 1; t <= 3; t++) {
