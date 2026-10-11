@@ -24,6 +24,33 @@ import {
   advertises, createPacker
 } from '../../common/proto.js'
 
+/** Shapes of the search's parameters, most documented first (see startScan). */
+const SCAN_VARIANTS = [
+  () => ({ filters: [{ deviceId: '', name: '', serviceUuid: SERVICE }], options: { interval: 0, dutyMode: 1 } }),
+  () => ({ filters: [{ deviceId: '', name: '', serviceUuid: SERVICE }], options: { dutyMode: 1 } }),
+  () => ({ filters: [{ deviceId: '', name: '', serviceUuid: SERVICE }] }),
+  () => ({ filters: [{ serviceUuid: SERVICE }] }),
+  () => ({ filters: [] }),
+  () => ({ filters: [{ deviceId: '', name: '', serviceUuid: '' }] })
+]
+
+/** A characteristic as Vela's interface describes it: every field given (descriptors and properties too). */
+function characteristic(uuid, value, props) {
+  return {
+    serviceUuid: SERVICE,
+    characteristicUuid: uuid,
+    characteristicValue: value,
+    descriptors: [],
+    properties: {
+      read: !!props.read,
+      write: !!props.write,
+      writeNoResponse: !!props.writeNoResponse,
+      notify: !!props.notify,
+      indicate: false
+    }
+  }
+}
+
 export default {
   data: {
     on: false,
@@ -41,6 +68,14 @@ export default {
     this.packer = null
     this.timer = 0
     const self = this
+    this.variant = 0
+    storage.get({
+      key: 'wrist_scan',
+      success(v) {
+        const n = parseInt(v, 10)
+        if (n >= 0 && n < SCAN_VARIANTS.length) self.variant = n
+      }
+    })
     storage.get({
       key: 'wrist_id',
       success(v) {
@@ -90,31 +125,84 @@ export default {
   scan() {
     if (!this.on || this.gatt) return
     const self = this
+    this.seen = 0
+    this.seenAt = 0
     this.state = 'ищу телефон…'
     this.scanner = ble.createScanner()
     this.findId = this.scanner.subscribeBLEDeviceFind({
       callback(results) {
         if (self.gatt || !results) return
         for (let i = 0; i < results.length; i++) {
+          self.seen++
           if (advertises(results[i].data, SERVICE)) {
             self.stopScan()
             self.connect(results[i])
             return
           }
         }
+        // what the search sees, at most once a second: devices around, but not the phone — the phone is not announcing
+        const now = Date.now()
+        if (now - self.seenAt > 1000) {
+          self.seenAt = now
+          self.state = 'ищу телефон… рядом устройств: ' + self.seen
+        }
       },
-      fail(data, code) {
-        self.state = 'поиск не удался (' + code + ')'
+      fail() {
+        self.state = 'поиск прервался — повторю'
+        self.stopScan()
+        self.later(() => self.scan(), 5000)
       }
     })
-    this.scanner.startBLEScan({
-      filters: [{ serviceUuid: SERVICE }],
-      options: { dutyMode: 2 },
-      fail(data, code) {
-        self.state = code === 10001 ? 'Bluetooth выключен' : 'поиск не удался (' + code + ')'
+    this.startScan(this.variant || 0, 0)
+  },
+
+  /**
+   * The search started with the parameters the watch accepts. Vela's documented ones are not what every firmware takes
+   * (code 202: «wrong arguments»), so a few shapes are tried in turn, and the one that works is kept for next time.
+   */
+  startScan(v, tried) {
+    const self = this
+    const scanner = this.scanner
+    if (!scanner) return
+    let params
+    try {
+      params = SCAN_VARIANTS[v]()
+    } catch (e) {
+      params = SCAN_VARIANTS[0]()
+    }
+    params.success = function () {
+      if (scanner !== self.scanner) return
+      if (self.variant !== v) {
+        self.variant = v
+        storage.set({ key: 'wrist_scan', value: String(v) })
+      }
+      // nothing at all for a while (the watch's own filter may hide even the phone): the next shape
+      self.later(() => {
+        if (self.scanner === scanner && !self.gatt && self.seen === 0) {
+          self.stopScan()
+          self.variant = (v + 1) % SCAN_VARIANTS.length
+          self.scan()
+        }
+      }, 12000)
+    }
+    params.fail = function (data, code) {
+      if (scanner !== self.scanner) return
+      if (code === 10001) {
+        self.state = 'Bluetooth выключен'
+        self.stopScan()
         self.later(() => self.scan(), 10000)
+        return
       }
-    })
+      if (tried + 1 < SCAN_VARIANTS.length) {
+        self.startScan((v + 1) % SCAN_VARIANTS.length, tried + 1)
+        return
+      }
+      self.state = 'поиск не удался (' + code + '), повторю'
+      self.stopScan()
+      self.later(() => self.scan(), 10000)
+    }
+    this.state = 'ищу телефон…' + (tried ? ' (' + (v + 1) + ')' : '')
+    scanner.startBLEScan(params)
   },
 
   stopScan() {
@@ -175,7 +263,7 @@ export default {
           return
         }
         g.setNotifyCharacteristicChanged({
-          characteristic: { serviceUuid: SERVICE, characteristicUuid: EVENTS, characteristicValue: new ArrayBuffer(0), descriptors: [] },
+          characteristic: characteristic(EVENTS, new ArrayBuffer(0), { read: true, notify: true }),
           enable: true,
           complete() {
             self.linked()
@@ -277,7 +365,7 @@ export default {
     const buf = this.queue.shift()
     this.writing = true
     g.writeCharacteristicValue({
-      characteristic: { serviceUuid: SERVICE, characteristicUuid: SAMPLES, characteristicValue: buf, descriptors: [] },
+      characteristic: characteristic(SAMPLES, buf, { write: true, writeNoResponse: true }),
       complete() {
         if (g !== self.gatt) return
         self.writing = false

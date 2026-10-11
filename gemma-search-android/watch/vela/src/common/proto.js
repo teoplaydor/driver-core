@@ -47,11 +47,20 @@ export function accel(seq, xyz, n) {
   return b.buffer
 }
 
-/** Does an advertisement (raw bytes) carry this 128-bit service? Unknown (no bytes): yes — the scan filtered already. */
+/**
+ * Does an advertisement (raw bytes: an ArrayBuffer, a typed array or an array of numbers) carry this 128-bit service?
+ * Without the bytes: no (some watches pass every device around whatever the scan's filter says).
+ */
 export function advertises(data, uuid) {
-  if (!data) return true
-  const a = new Uint8Array(data)
-  if (a.length === 0) return true
+  if (!data) return false
+  let a
+  if (data instanceof ArrayBuffer) a = new Uint8Array(data)
+  else if (data.buffer instanceof ArrayBuffer) a = new Uint8Array(data.buffer, data.byteOffset || 0, data.byteLength)
+  else if (data.length !== undefined) {
+    a = new Uint8Array(data.length)
+    for (let i = 0; i < data.length; i++) a[i] = data[i] & 0xff
+  } else return false
+  if (a.length === 0) return false
   const hex = uuid.replace(/-/g, '').toLowerCase()
   const want = []
   for (let i = 15; i >= 0; i--) want.push(parseInt(hex.substr(2 * i, 2), 16)) // little-endian in the air

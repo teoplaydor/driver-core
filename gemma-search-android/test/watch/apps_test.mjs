@@ -178,10 +178,14 @@ async function zepp() {
 // ================================================================ Xiaomi Vela
 
 async function vela() {
-  Object.assign(W, { writes: [], notifies: [], scans: 0, scanning: false, gatts: [], buzz: [], acc: null, outstanding: 0, overlap: false, keep: null, closed: 0 })
+  // this firmware takes no «options» and wants every filter field (code 202 — wrong arguments — otherwise)
+  Object.assign(W, { writes: [], notifies: [], scans: 0, scanning: false, gatts: [], buzz: [], acc: null, outstanding: 0, overlap: false, keep: null, closed: 0,
+    starts: [], rejectScan: (o) => (o.options || !o.filters.length || o.filters.some((f) => !('deviceId' in f && 'name' in f)) ? 202 : 0) })
   const mod = await load(path.join(watchDir, 'vela/src/pages/index/index.ux'), {
     '@system.bluetooth.ble': `export default {
-        createScanner() { const s = { startBLEScan(o) { W.scans++; W.scanning = true; W.filters = o.filters; W.duty = o.options && o.options.dutyMode },
+        createScanner() { const s = { startBLEScan(o) { W.starts.push(o); const code = W.rejectScan ? W.rejectScan(o) : 0
+            if (code) { setImmediate(() => o.fail && o.fail(null, code)); return }
+            W.scans++; W.scanning = true; W.filters = o.filters; W.duty = o.options && o.options.dutyMode; setImmediate(() => o.success && o.success()) },
           stopBLEScan() { W.scanning = false }, subscribeBLEDeviceFind(o) { W.found = o.callback; return 3 }, unsubscribeBLEDeviceFind() {}, close() {} }; return s },
         createGattClientDevice(id, type) { const g = { id, type,
           connect(o) { W.connecting = g }, disconnect() {}, close() { W.closed++; return true },
@@ -196,24 +200,31 @@ async function vela() {
     '@system.sensor': `export default { subscribeAccelerometer(o) { W.acc = o }, unsubscribeAccelerometer() { W.acc = null } }`,
     '@system.vibrator': `export default { vibrate(o) { W.buzz.push(o.mode) } }`,
     '@system.brightness': `export default { setKeepScreenOn(o) { W.keep = o.keepScreenOn } }`,
-    '@system.storage': `const m = new Map(); export default { get(o) { o.success(m.get(o.key) || '') }, set(o) { m.set(o.key, o.value) } }`
+    '@system.storage': `const m = new Map(); W.storage = m; export default { get(o) { o.success(m.get(o.key) || '') }, set(o) { m.set(o.key, o.value) } }`
   }, '../../common/proto.js')
   const def = mod.default
   const page = Object.create(def)
   Object.assign(page, JSON.parse(JSON.stringify(def.data)))
   page.onInit()
+  await flush(); await flush(); await flush(); await flush()
   ok(W.scanning && W.keep === true && W.filters[0].serviceUuid === SERVICE, 'vela: opened — scanning for the phone\'s service, the screen kept on')
+  ok(W.starts.length === 3 && !W.starts[2].options && W.storage.get('wrist_scan') === '2',
+    'vela: the parameters the firmware refused (202) — the next shape tried, the one taken kept (' + W.starts.length + ' tries)')
   // an advertisement without our service is passed by; the phone's (with the service in its bytes) taken
   const le = Buffer.from(SERVICE.replace(/-/g, ''), 'hex').reverse()
   W.found([{ deviceId: '11:22:33:44:55:66', rssi: -70, addressType: 'PUBLIC', data: new Uint8Array([2, 1, 6, 3, 3, 0xe0, 0xff]).buffer }])
-  ok(W.gatts.length === 0, 'vela: another device is passed by')
+  clock += 1100 // the count on the screen changes at most once a second
+  W.found([{ deviceId: '11:22:33:44:55:67', rssi: -80, addressType: 'RANDOM' }])
+  ok(W.gatts.length === 0 && /рядом устройств: 2/.test(page.state), 'vela: other devices (and one without its bytes) passed by — «' + page.state + '»')
   W.found([{ deviceId: '5A:11:22:33:44:55', rssi: -60, addressType: 'RANDOM', data: new Uint8Array([2, 1, 6, 17, 7, ...le]).buffer }])
   const g = W.gatts[0]
   ok(g && g.id === '5A:11:22:33:44:55' && g.type === 'RANDOM' && !W.scanning, 'vela: the phone found (random address kept), scan stopped')
   g.onBLEConnectionStateChange(2)
   await flush(); await flush(); await flush()
-  ok(W.notifies.length === 1 && W.notifies[0].enable === true && W.notifies[0].characteristic.characteristicUuid === EVENTS
-    && Array.isArray(W.notifies[0].characteristic.descriptors), 'vela: services found, the phone\'s answers switched on')
+  const nc = W.notifies[0] && W.notifies[0].characteristic
+  ok(W.notifies.length === 1 && W.notifies[0].enable === true && nc.characteristicUuid === EVENTS && nc.serviceUuid === SERVICE
+    && Array.isArray(nc.descriptors) && nc.properties && nc.properties.notify === true,
+    'vela: services found, the phone\'s answers switched on (every field of the characteristic given)')
   ok(W.acc && W.acc.interval === 'game', 'vela: the accelerometer on, «game» rate')
   // the wrist, about 50 a second in m/s², a little uneven
   for (const [x, y, z] of wrist([[0, 2], [70, 0.6], [0, 1], [-70, 0.6], [0, 1]], 50, 1)) {
@@ -239,8 +250,10 @@ async function vela() {
   const scans = W.scans
   g.onBLEConnectionStateChange(0)
   ok(W.acc === null && W.closed >= 1, 'vela: the link dropped — sensor off, connection closed')
+  const starts = W.starts.length
   await advance(2100)
-  ok(W.scans === scans + 1 && W.scanning, 'vela: looking for the phone again')
+  await flush(); await flush()
+  ok(W.scans === scans + 1 && W.scanning && W.starts.length === starts + 1, 'vela: looking for the phone again, at once with the shape that worked')
   page.toggle()
   ok(W.keep === false && page.on === false, 'vela: «Стоп» — off, the screen may sleep')
   page.onDestroy()
