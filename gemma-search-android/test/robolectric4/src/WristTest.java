@@ -152,7 +152,7 @@ public class WristTest {
         BluetoothDevice other = ad.getRemoteDevice("C0:FF:EE:00:00:02");
         sg.notifyConnection(other);
         sg.notifyOnCharacteristicWriteRequest(other, 3, samples, false, false, 0, WristGesture.hello(0x12345678, 25, 1000, "zepp"));
-        assertTrue(WristLink.status(), WristLink.status().contains("не приняты"));
+        assertTrue(WristLink.status(), WristLink.status().contains("уже подключены"));
         assertTrue("its connection cancelled", sg.isConnectionCancelled(other));
         server.lastEvent = -1;
         send(sg, other, samples, stream(25, 0, 1, 70, 0.6, 0, 1));

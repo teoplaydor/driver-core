@@ -533,13 +533,13 @@ public final class WristLink {
                     if (!k.d.hasHello()) return;
                     int known = watch(c);
                     String name = k.d.platform().isEmpty() ? "часы" : k.d.platform();
-                    if (known == 0) {
-                        prefs(c).edit().putInt(PREF_WATCH, k.d.watchId()).putString(PREF_WATCH_NAME, name).apply();
-                        known = k.d.watchId();
-                    }
-                    k.trusted = known == k.d.watchId();
-                    if (!k.trusted) {
-                        setStatus("другие часы (" + name + ") не приняты — «Забыть часы», чтобы сменить");
+                    // accept the watch that connects: when none is remembered, when it is the remembered one, or when the
+                    // remembered one is not currently streaming (so a re-installed watch with a new id is welcomed, not
+                    // turned away). Only a different watch while one is actively connected is refused.
+                    boolean accept = known == 0 || known == k.d.watchId() || !trustedConnected();
+                    if (!accept) {
+                        k.trusted = false;
+                        setStatus("другие часы (" + name + ") уже подключены — «Забыть часы», чтобы сменить");
                         try {
                             gatt.cancelConnection(dev);
                         } catch (RuntimeException e) {
@@ -548,6 +548,12 @@ public final class WristLink {
                         conns.remove(dev.getAddress());
                         return;
                     }
+                    if (known != k.d.watchId()) {
+                        prefs(c).edit().putInt(PREF_WATCH, k.d.watchId()).putString(PREF_WATCH_NAME, name).apply();
+                    } else {
+                        prefs(c).edit().putString(PREF_WATCH_NAME, name).apply();
+                    }
+                    k.trusted = true;
                     setStatus(name + " · " + k.d.rate() + " Гц");
                     advertise(false); // found: nothing more to announce
                     listening(k);
