@@ -2,6 +2,7 @@
   <div class="page">
     <text class="title">Пульт кистью</text>
     <text class="state">{{ state }}</text>
+    <text class="diag">{{ diag }}</text>
     <text class="hint">Вправо — дальше, влево — назад</text>
     <input type="button" class="button" value="{{ on ? 'Стоп' : 'Старт' }}" onclick="toggle" />
   </div>
@@ -36,6 +37,13 @@ const NOTIFY_MS = 4000
 /** A write's completion may not arrive; move on after this long so the sample stream keeps flowing. */
 const WRITE_MS = 150
 
+/**
+ * The accelerometer's pace: «ui» (~16 a second) first; on the S5 «game» gave one value over and over, so a pace whose
+ * values never change at all in PROBE_MS is given up for «normal» (~5 a second), which the S5 does deliver live.
+ */
+const PACES = ['ui', 'normal']
+const PROBE_MS = 2500
+
 /** Shapes of the search's parameters, most documented first (see startScan). */
 const SCAN_VARIANTS = [
   () => ({ filters: [{ deviceId: '', name: '', serviceUuid: SERVICE }], options: { interval: 0, dutyMode: 1 } }),
@@ -66,7 +74,8 @@ function characteristic(uuid, value, props) {
 export default {
   data: {
     on: false,
-    state: 'выключено'
+    state: 'выключено',
+    diag: ''
   },
 
   onInit() {
@@ -79,6 +88,9 @@ export default {
     this.listening = false
     this.packer = null
     this.timer = 0
+    this.pace = 0
+    this.paceKnown = false
+    this.writeId = 0
     const self = this
     this.variant = 0
     storage.get({
@@ -352,6 +364,16 @@ export default {
     if (this.stepTimer) clearTimeout(this.stepTimer)
     this.stepTimer = 0
     this.state = this.feedback === false ? 'подключено (без вибро-отклика)' : 'подключено'
+    // what happens to the samples on the way, on the screen: from the sensor, packed, written, and how the writes ended
+    this.n = { s: 0, p: 0, w: 0, ok: 0, bad: 0, to: 0, code: '' }
+    this.ev = ''
+    this.newPacker()
+    this.listen(true)
+  },
+
+  /** A fresh packer: it measures the pace again and says HELLO with it (after a change of pace too). */
+  newPacker() {
+    const self = this
     this.packer = createPacker({
       id: this.id,
       platform: 'vela',
@@ -359,7 +381,15 @@ export default {
         self.send(buf)
       }
     })
-    this.listen(true)
+  },
+
+  /** The counters line: sensor · packets · writes (✓ done, ✗ failed, ⏱ no answer in time) · pace · the phone's last word. */
+  showDiag() {
+    const n = this.n
+    if (!n) return
+    this.diag = 'датчик ' + n.s + ' · пакеты ' + n.p + ' · записи ' + n.w + ': ✓' + n.ok + ' ✗' + n.bad
+      + (n.code !== '' ? ' (' + n.code + ')' : '') + ' ⏱' + n.to + ' · ' + PACES[this.pace]
+      + (this.ev ? ' · телефон: ' + this.ev : '')
   },
 
   lost() {
@@ -394,18 +424,24 @@ export default {
   /** One byte from the phone. */
   heard(ev) {
     if (ev === EV_PAUSE) {
+      this.ev = 'пауза'
       this.listen(false)
-      this.state = 'музыка не играет'
+      this.state = 'на телефоне не играет музыка — жду'
     } else if (ev === EV_STREAM) {
+      this.ev = 'играет'
       if (this.packer) this.packer.restart()
       this.listen(true)
     } else if (ev === EV_NEXT || ev === EV_PREVIOUS) {
+      this.ev = ev === EV_NEXT ? 'вперёд' : 'назад'
       vibrator.vibrate({ mode: 'short' })
     } else if (ev === EV_LEARNED) {
+      this.ev = 'выучено'
       vibrator.vibrate({ mode: 'long' })
     } else if (ev === EV_IGNORED) {
       // a turn while nothing plays: nothing to feel
+      this.ev = 'поворот без музыки'
     }
+    this.showDiag()
   },
 
   // ---------------------------------------------------------------- the samples
@@ -423,56 +459,89 @@ export default {
     }
     const self = this
     this.state = 'слушаю повороты кисти' + (this.feedback === false ? ' (без отклика)' : '')
-    this.sampleN = 0
-    this.firstRaw = null
-    this.moved = false
-    this.lastSampleAt = Date.now()
-    const r = function (v) { return Math.round(Number(v) || 0) }
-    const onSample = function (ret) {
-      if (!self.listening || !self.packer || !ret) return
-      self.lastSampleAt = Date.now()
-      self.packer.sample(ret.x, ret.y, ret.z, Date.now())
-      self.sampleN++
-      if (!self.firstRaw) {
-        self.firstRaw = [ret.x, ret.y, ret.z]
-      } else if (Math.abs(ret.x - self.firstRaw[0]) + Math.abs(ret.y - self.firstRaw[1]) + Math.abs(ret.z - self.firstRaw[2]) > 0.2) {
-        self.moved = true
-      }
-      const now = Date.now()
-      if (now - (self.rawAt || 0) > 400) {
-        self.rawAt = now
-        // the raw values, how many came, and whether any differed from the first — «✓» live, «стоит» static
-        self.state = 'x' + r(ret.x) + ' y' + r(ret.y) + ' z' + r(ret.z) + ' · ' + self.sampleN + (self.moved ? ' ✓' : ' стоит')
-      }
-    }
-    const sub = function () {
-      sensor.subscribeAccelerometer({
-        interval: 'normal',
-        callback: onSample,
-        fail(data, code) {
-          self.state = 'акселерометр: ошибка ' + code
-        }
-      })
-    }
-    sub()
+    this.subscribe()
     // revive the sensor only when it actually stalls (no sample for 1.5 s) — a healthy stream is never interrupted,
-    // so the writes to the phone are not disturbed
+    // so the writes to the phone are not disturbed; a pace that gives nothing at all is given up for the next
     const guard = function () {
       if (!self.listening) return
-      if (Date.now() - self.lastSampleAt > 1500) {
+      const now = Date.now()
+      if (!self.paceKnown && self.paceN === 0 && now - self.subAt >= PROBE_MS && self.pace < PACES.length - 1) {
+        self.switchPace()
+      } else if (now - self.lastSampleAt > 1500) {
         try {
           sensor.unsubscribeAccelerometer()
         } catch (e) {}
-        sub()
-        self.lastSampleAt = Date.now()
+        self.subscribe()
       }
       self.reSub = setTimeout(guard, 1000)
     }
     this.reSub = setTimeout(guard, 1000)
   },
 
+  /** The accelerometer on at the current pace. */
+  subscribe() {
+    const self = this
+    this.firstRaw = null
+    this.moved = false
+    this.paceN = 0
+    this.subAt = Date.now()
+    this.lastSampleAt = Date.now()
+    sensor.subscribeAccelerometer({
+      interval: PACES[this.pace],
+      callback(ret) {
+        self.sampled(ret)
+      },
+      fail(data, code) {
+        self.state = 'акселерометр: ошибка ' + code
+      }
+    })
+  },
+
+  /** The pace's values never changed (or none came): the next, slower pace, measured again with a new HELLO. */
+  switchPace() {
+    this.pace = Math.min(this.pace + 1, PACES.length - 1)
+    try {
+      sensor.unsubscribeAccelerometer()
+    } catch (e) {}
+    this.newPacker()
+    this.subscribe()
+  },
+
+  sampled(ret) {
+    if (!this.listening || !this.packer || !ret) return
+    const now = Date.now()
+    this.lastSampleAt = now
+    this.paceN++
+    if (this.n) this.n.s++
+    if (!this.firstRaw) {
+      this.firstRaw = [ret.x, ret.y, ret.z]
+    } else if (ret.x !== this.firstRaw[0] || ret.y !== this.firstRaw[1] || ret.z !== this.firstRaw[2]) {
+      this.moved = true
+    }
+    if (!this.paceKnown && now - this.subAt >= PROBE_MS) {
+      // a real sensor never gives exactly the same numbers for seconds; the S5's «game» did
+      if (this.moved || this.pace === PACES.length - 1) {
+        this.paceKnown = true
+      } else {
+        this.switchPace()
+        return
+      }
+    }
+    this.packer.sample(ret.x, ret.y, ret.z, now)
+    if (now - (this.rawAt || 0) > 400) {
+      this.rawAt = now
+      // the raw values (one decimal), and whether any differed from the first — «✓» live, «стоит» static
+      const f1 = function (v) {
+        return String(Math.round((Number(v) || 0) * 10) / 10)
+      }
+      this.state = 'x' + f1(ret.x) + ' y' + f1(ret.y) + ' z' + f1(ret.z) + (this.moved ? ' ✓' : ' стоит')
+      this.showDiag()
+    }
+  },
+
   /** One write at a time; a slow link loses the oldest samples, not the newest. */
   send(buf) {
+    if (this.n && new Uint8Array(buf)[0] !== 0) this.n.p++
     this.queue.push(buf)
     while (this.queue.length > 20) this.queue.splice(1, 1) // the HELLO in front stays
     this.pump()
@@ -483,22 +552,50 @@ export default {
     const self = this
     const g = this.gatt
     const buf = this.queue.shift()
+    const id = ++this.writeId
+    const n = this.n
     this.writing = true
+    if (n) n.w++
     // the write's completion comes as a separate event on Vela and may not arrive; don't let that stall the stream —
-    // clear on completion, or after a short time, whichever comes first
-    const done = function () {
-      if (g !== self.gatt || !self.writing) return
+    // the next write goes on completion, or after a short time, whichever comes first (a late completion of an
+    // earlier write is counted but does not release a newer one)
+    const next = function () {
+      if (g !== self.gatt || id !== self.writeId || !self.writing) return
       self.writing = false
       if (self.writeTimer) clearTimeout(self.writeTimer)
       self.writeTimer = 0
       self.pump()
     }
+    let settled = false
+    const settle = function (bad, code) {
+      if (settled) return
+      settled = true
+      if (n && bad) {
+        n.bad++
+        n.code = code === undefined ? '?' : code
+      } else if (n) {
+        n.ok++
+      }
+      next()
+    }
     g.writeCharacteristicValue({
       characteristic: characteristic(SAMPLES, buf, { write: true, writeNoResponse: true }),
-      success: done,
-      complete: done
+      success() {
+        settle(false)
+      },
+      fail(data, code) {
+        settle(true, code)
+      },
+      complete() {
+        settle(false)
+      }
     })
-    this.writeTimer = setTimeout(done, WRITE_MS)
+    if (id === this.writeId && this.writing) {
+      this.writeTimer = setTimeout(() => {
+        if (!settled && n) n.to++
+        next()
+      }, WRITE_MS)
+    }
   }
 }
 </script>
@@ -522,6 +619,13 @@ export default {
   width: 380px;
   font-size: 28px;
   color: #8da6c0;
+  text-align: center;
+}
+.diag {
+  margin-top: 8px;
+  width: 400px;
+  font-size: 22px;
+  color: #6f7d8c;
   text-align: center;
 }
 .hint {

@@ -255,6 +255,8 @@ public final class WristLink {
             long packets;
             float maxTilt;
             long shownAt;
+            /** Sample packets that came without (or after a refused) HELLO. */
+            long unheard;
 
             Conn(BluetoothDevice dev) {
                 this.dev = dev;
@@ -292,6 +294,13 @@ public final class WristLink {
             k.told = playing;
             if (playing == 1) k.d.restart();
             answer(k, playing == 1 ? WristGesture.EV_STREAM : WristGesture.EV_PAUSE);
+            // said on the screen too: a paused watch sends nothing, and without this the line just stops changing
+            setStatus(name(k) + " · " + k.d.rate() + " Гц · " + (playing == 1 ? "музыка играет — поверните кисть"
+                    : "пауза: на телефоне не играет музыка"));
+        }
+
+        private static String name(Conn k) {
+            return k.d.platform().isEmpty() ? "часы" : k.d.platform();
         }
 
         /** A trusted watch now listens: tell it at once, then keep looking. */
@@ -527,12 +536,22 @@ public final class WristLink {
             synchronized (this) {
                 k = conn(dev);
                 boolean hello = ((p[0] & 0xff) >>> 4) == WristGesture.KIND_HELLO;
-                if (!hello && !k.trusted) return; // samples before a HELLO, or from a watch turned away
+                if (!hello && !k.trusted) {
+                    // samples before a HELLO, or from a watch turned away: not listened to, but counted on the screen
+                    // while no watch is listened to (so «nothing arrives» and «arrives unannounced» look different)
+                    k.unheard++;
+                    long now = System.currentTimeMillis();
+                    if (!trustedConnected() && now - k.shownAt > 900) {
+                        k.shownAt = now;
+                        setStatus("часы шлют отсчёты без приветствия (" + k.unheard + ") — «Стоп» и «Старт» на часах");
+                    }
+                    return;
+                }
                 r = k.d.packet(p);
                 if (hello) {
                     if (!k.d.hasHello()) return;
                     int known = watch(c);
-                    String name = k.d.platform().isEmpty() ? "часы" : k.d.platform();
+                    String name = name(k);
                     // accept the watch that connects: when none is remembered, when it is the remembered one, or when the
                     // remembered one is not currently streaming (so a re-installed watch with a new id is welcomed, not
                     // turned away). Only a different watch while one is actively connected is refused.
@@ -554,7 +573,8 @@ public final class WristLink {
                         prefs(c).edit().putString(PREF_WATCH_NAME, name).apply();
                     }
                     k.trusted = true;
-                    setStatus(name + " · " + k.d.rate() + " Гц");
+                    k.told = -1; // a new HELLO (the watch reconnected or changed its pace): told again
+                    setStatus(name + " · " + k.d.rate() + " Гц · жду отсчёты");
                     advertise(false); // found: nothing more to announce
                     listening(k);
                     return;
@@ -582,8 +602,8 @@ public final class WristLink {
                         k.shownAt = now;
                         int[] raw = k.d.lastRaw();
                         String learnt = learnt(c) ? "" : " · направление не задано";
-                        setStatus(k.d.platform() + " · " + k.d.rate() + " Гц · (" + raw[0] + "," + raw[1] + "," + raw[2] + ") · наклон "
-                                + Math.round(k.maxTilt) + "°" + learnt);
+                        setStatus(name(k) + " · " + k.d.rate() + " Гц · пакетов " + k.packets + " · (" + raw[0] + "," + raw[1] + ","
+                                + raw[2] + ") · наклон " + Math.round(k.maxTilt) + "°" + learnt);
                         k.maxTilt = k.d.tilt();
                     }
                 }

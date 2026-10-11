@@ -112,16 +112,19 @@ public class WristTest {
         Shadows.shadowOf(am).setIsMusicActive(true);
         send(sg, watch, samples, stream(25, 0, 1, 70, 0.6, 0, 1));
         assertEquals("nothing before HELLO", -1, server.lastEvent);
+        assertTrue("counted on the screen: " + WristLink.status(), WristLink.status().contains("без приветствия"));
 
         // HELLO: this watch is remembered; it subscribes to the answers
         sg.notifyOnCharacteristicWriteRequest(watch, 1, samples, false, true, 0, WristGesture.hello(0x0badcafe, 25, 1000, "vela"));
-        assertTrue(WristLink.status(), WristLink.status().contains("vela") && WristLink.status().contains("25 Гц"));
+        assertTrue(WristLink.status(), WristLink.status().contains("vela") && WristLink.status().contains("25 Гц")
+                && WristLink.status().contains("жду отсчёты"));
         assertEquals("still not advertising", 0, Shadows.shadowOf(ad.getBluetoothLeAdvertiser()).getAdvertisementRequestCount());
         Context c = app;
         BluetoothGattDescriptor cccd = events.getDescriptor(UUID.fromString("00002902-0000-1000-8000-00805f9b34fb"));
         // (Robolectric has no descriptor-write helper: the callback is called as the stack would)
         sg.getGattServerCallback().onDescriptorWriteRequest(watch, 2, cccd, false, true, 0, BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE);
         assertEquals("music plays: stream", WristGesture.EV_STREAM, server.lastEvent);
+        assertTrue(WristLink.status(), WristLink.status().contains("музыка играет"));
 
         // a turn right while music plays: «next»
         send(sg, watch, samples, stream(25, 0, 1, 70, 0.6, 0, 1));
@@ -139,6 +142,7 @@ public class WristTest {
         // the music stopped: the watch is told to pause (and to stream again when it plays)
         ShadowLooper.idleMainLooper(2100, java.util.concurrent.TimeUnit.MILLISECONDS);
         assertEquals("pause", WristGesture.EV_PAUSE, server.lastEvent);
+        assertTrue("the screen says why the watch went quiet: " + WristLink.status(), WristLink.status().contains("пауза"));
         ShadowLooper.idleMainLooper(2100, java.util.concurrent.TimeUnit.MILLISECONDS);
         assertEquals("told once", WristGesture.EV_PAUSE, server.lastEvent);
         Shadows.shadowOf(am).setIsMusicActive(true);

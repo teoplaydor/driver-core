@@ -227,7 +227,7 @@ async function vela() {
     && Array.isArray(nc.descriptors) && nc.properties && nc.properties.notify === true,
     'vela: services found, the phone\'s answers switched on (every field of the characteristic given)')
   ok(page.state === 'слушаю повороты кисти', 'vela: subscribed — «' + page.state + '»')
-  ok(W.acc && (W.acc.interval === 'normal' || W.acc.interval === 'game'), 'vela: the accelerometer on')
+  ok(W.acc && W.acc.interval === 'ui', 'vela: the accelerometer on, «ui» pace first')
   // the wrist, about 50 a second in m/s², a little uneven
   for (const [x, y, z] of wrist([[0, 2], [70, 0.6], [0, 1], [-70, 0.6], [0, 1]], 50, 1)) {
     clock += 20 + Math.round((rnd() - 0.5) * 6)
@@ -236,7 +236,12 @@ async function vela() {
   }
   await flush()
   ok(!W.overlap, 'vela: one write at a time')
+  ok(W.acc && W.acc.interval === 'ui' && page.paceKnown, 'vela: «ui» gave live numbers — kept')
   const sent = W.writes.filter((w) => w[1] === SAMPLES)
+  page.showDiag() // (the screen itself is refreshed at most every 0.4 s)
+  const d = page.diag.match(/датчик (\d+) · пакеты (\d+) · записи (\d+): ✓(\d+) ✗(\d+) ⏱(\d+) · ui/)
+  ok(d && +d[1] > 200 && +d[2] === sent.length - 1 && +d[3] === sent.length && +d[4] === sent.length && +d[5] === 0,
+    'vela: the counters on the screen — sensor, packets, writes and how they ended («' + page.diag + '»)')
   ok(sent.length > 20 && sent[0][2].startsWith('0001') && Buffer.from(sent[0][2].slice(20), 'hex').toString() === 'vela',
     'vela: HELLO first, then ' + (sent.length - 1) + ' sample packets')
   ok(sent.every((w) => w[2].length <= 40 && w[0] === SERVICE && Array.isArray(w[3])), 'vela: every write fits 20 bytes, with its service and descriptors')
@@ -246,7 +251,8 @@ async function vela() {
   say(3)
   ok(W.buzz.join() === 'short,long', 'vela: «next» buzzes short, «learnt» long')
   say(4)
-  ok(W.acc === null, 'vela: «pause» — the accelerometer off')
+  ok(W.acc === null && /не играет музыка/.test(page.state) && /телефон: пауза/.test(page.diag),
+    'vela: «pause» — the accelerometer off, and the screen says why («' + page.state + '»)')
   say(5)
   ok(W.acc !== null, 'vela: «stream» — on again')
   const scans = W.scans
@@ -316,6 +322,34 @@ async function vela() {
   page.toggle()
   ok(W.keep === false && page.on === false, 'vela: «Стоп» — off, the screen may sleep')
   page.onDestroy()
+
+  // the S5's «game» pace gave one value over and over: a pace whose numbers never change for 2.5 s is given up for the
+  // next, slower one, measured again and announced with a new HELLO (the phone then knows the new rate)
+  const p2 = Object.create(def)
+  Object.assign(p2, JSON.parse(JSON.stringify(def.data)))
+  p2.onInit()
+  await flush(); await flush(); await flush(); await flush()
+  W.found([{ deviceId: '5A:11:22:33:44:55', rssi: -60, addressType: 'RANDOM', data: new Uint8Array([2, 1, 6, 17, 7, ...le]).buffer }])
+  W.gatts[W.gatts.length - 1].onBLEConnectionStateChange(2)
+  await flush(); await flush(); await flush()
+  ok(W.acc && W.acc.interval === 'ui', 'vela (static sensor): «ui» first')
+  const w1 = W.writes.length
+  const t1 = clock
+  while (clock - t1 < 6000) {
+    const ui = W.acc && W.acc.interval === 'ui'
+    clock += ui ? 60 : 200
+    // the same numbers at «ui»; live ones at «normal»
+    W.acc && W.acc.callback(ui ? { x: 1, y: 6, z: 7 } : { x: 1 + rnd() / 10, y: 6, z: 7 })
+    await flush()
+    await advance(0)
+  }
+  ok(W.acc && W.acc.interval === 'normal' && p2.paceKnown, 'vela (static sensor): «ui» gave one value over and over — «normal» now')
+  const hellos = W.writes.slice(w1).filter((w) => w[1] === SAMPLES && w[2].startsWith('0001'))
+  ok(hellos.length === 2 && hellos[0][2].slice(12, 16) === '1100' && hellos[1][2].slice(12, 16) === '0500',
+    'vela (static sensor): HELLO at ~17 a second, then again at 5 (' + hellos.map((h) => h[2].slice(12, 16)).join(', ') + ')')
+  p2.showDiag()
+  ok(/· normal/.test(p2.diag) && /пакеты [1-9]/.test(p2.diag), 'vela (static sensor): streaming at «normal» — «' + p2.diag + '»')
+  p2.onDestroy()
 }
 
 await zepp()

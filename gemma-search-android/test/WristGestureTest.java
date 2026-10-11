@@ -227,6 +227,9 @@ public class WristGestureTest {
                 new Sim(50).still(1).turn(FOREARM, 70, 0.6, true).still(1).turn(FOREARM, -70, 0.6, true).still(1), ANDROID, 4096, 15, -1), R, L);
         check("12 Hz, m/s²", run(watch(12, 0, "vela", true),
                 new Sim(12).still(1.5).turn(FOREARM, 75, 0.7, true).still(1.5), ANDROID, 0, 3, -1), R);
+        // 5 Hz: the Xiaomi Watch S5's «normal» pace (its faster «game» gave one value over and over) — a deliberate turn
+        check("5 Hz, m/s², right then left", run(watch(5, 0, "vela", true),
+                new Sim(5).still(2).turn(FOREARM, 75, 0.8, true).still(2).turn(FOREARM, -75, 0.8, true).still(2), ANDROID, 0, 3, -1), R, L);
 
         // sensitivity: a 28° turn is not enough by default, enough when sensitive (the watch's own acceleration as it
         // stops at the far end adds a few degrees to what it sees)
