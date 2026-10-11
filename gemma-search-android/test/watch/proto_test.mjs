@@ -48,11 +48,19 @@ for (const [name, dt, jitter, unit] of [['vela', 20, 6, 1], ['zepp', 40, 4, 100]
   console.log(name + ': ' + lines.length + ' packets, hello ' + lines[0])
 }
 
-// the same wrist, the turns found on the watch: HELLO v2, then one TURN packet per turn
-for (const [name, dt, jitter, unit] of [['vela', 60, 12, 1], ['zepp', 40, 4, 100]]) {
+// the same wrist, the turns found on the watch: HELLO v2, then one TURN packet per turn. «vela_s5» is the Xiaomi Watch
+// S5 as it is: whole m/s², and the samples handed over a few at a time, all with the same Date.now()
+for (const [name, dt, jitter, unit, burst, whole] of [['vela', 60, 12, 1, 1, false], ['zepp', 40, 4, 100, 1, false],
+  ['vela_s5', 50, 0, 1, 3, true]]) {
   const lines = []
-  const pk = P.createPacker({ id: 0x0badcafe, platform: name, turns: true, send: (b) => lines.push(hex(b)) })
-  for (const [x, y, z, t] of wrist(segs, dt, jitter, unit)) pk.sample(x, y, z, t)
+  const pk = P.createPacker({ id: 0x0badcafe, platform: name.slice(0, 4), turns: true, send: (b) => lines.push(hex(b)) })
+  const ss = wrist(segs, dt, jitter, unit)
+  for (let i = 0; i < ss.length; i++) {
+    const [x, y, z] = ss[i]
+    const t = ss[Math.min(ss.length - 1, Math.floor(i / burst) * burst + burst - 1)][3] // the time the batch came
+    if (whole) pk.sample(Math.round(x), Math.round(y), Math.round(z), t)
+    else pk.sample(x, y, z, t)
+  }
   fs.writeFileSync(path.join(out, name + '_turns.hex'), lines.join('\n') + '\n')
   console.log(name + ' (turns found on the watch): ' + lines.length + ' packets — ' + lines.join(' '))
 }

@@ -63,7 +63,7 @@ public class WristJsTest {
                 "HELLO v2: the same bytes as the phone's");
         ok(Arrays.equals(fixed.get(3), WristGesture.turnPacket(9, 61.6f, 344, new float[]{0.6f, -0.8f, 0})), "TURN: the same bytes");
         // (the protocol module alone, and the apps' pages themselves)
-        for (String file : new String[]{"vela_turns", "zepp_turns", "vela_app", "zepp_app"}) {
+        for (String file : new String[]{"vela_turns", "zepp_turns", "vela_s5_turns", "vela_app", "vela_s5_app", "zepp_app"}) {
             List<byte[]> ps = read(a[0] + "/" + file + ".hex");
             WristGesture d = new WristGesture();
             d.setRight(null, true);

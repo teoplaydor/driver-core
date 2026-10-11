@@ -158,8 +158,8 @@ export function createFinder() {
 
   function sample(x, y, z, t) {
     let dt = primed ? t - lastT : 0
-    if (primed && (dt <= 0 || dt > 1000)) {
-      // the clock went back or the samples stopped: start afresh
+    if (primed && (dt < 0 || dt > 1000)) {
+      // the clock went back or the samples stopped: start afresh (samples at the same time are still samples)
       reset()
       dt = 0
     }
@@ -310,6 +310,31 @@ export function createPacker(opts) {
   const target = opts.target || 25
   const perPacket = opts.perPacket || 3
   const finder = opts.turns ? createFinder() : null
+  // the samples' times for the finder: a watch may hand several over at once, all with the same Date.now() (the
+  // Xiaomi Watch S5 does), so they are spread back over the pace measured — never later than now, never far behind it
+  let tFirst = -1
+  let tN = 0
+  let step = 0
+  let fedT = -Infinity
+  function retime(now) {
+    if (tFirst < 0) {
+      tFirst = now
+      tN = 0
+    }
+    tN++
+    if (tN >= 5 && now > tFirst) step = (now - tFirst) / (tN - 1)
+    if (!step) {
+      fedT = Math.max(now, fedT + 1)
+      return fedT
+    }
+    let t = fedT + step
+    if (t > now) t = now
+    const lag = Math.max(300, 4 * step)
+    if (t < now - lag) t = now - lag
+    if (t <= fedT) t = fedT + step / 4
+    fedT = t
+    return t
+  }
   let t0 = -1
   let count = 0
   let factor = 1
@@ -348,7 +373,7 @@ export function createPacker(opts) {
         if (!finder) return
       }
       if (finder) {
-        const turn = finder.sample(x, y, z, now)
+        const turn = finder.sample(x, y, z, retime(now))
         if (turn) {
           if (ready) opts.send(turnPacket(seq++, turn.peak, turn.took, turn.axis))
           if (opts.onTurn) opts.onTurn(turn)
@@ -371,6 +396,7 @@ export function createPacker(opts) {
     /** After a pause: what was gathered before is dropped (the rate and units stay). */
     restart() {
       if (finder) finder.reset()
+      tFirst = -1 // after a pause: measured again (the pace known so far is kept meanwhile)
       sx = sy = sz = 0
       sn = 0
       buf = []

@@ -396,8 +396,8 @@ public final class WristGesture {
         /** One sample at time t (ms); true when a turn has just ended. */
         public boolean sample(double x, double y, double z, double t) {
             double dt = primed ? t - lastT : 0;
-            if (primed && (dt <= 0 || dt > 1000)) {
-                // the clock went back or the samples stopped: start afresh
+            if (primed && (dt < 0 || dt > 1000)) {
+                // the clock went back or the samples stopped: start afresh (samples at the same time are still samples)
                 reset();
                 dt = 0;
             }

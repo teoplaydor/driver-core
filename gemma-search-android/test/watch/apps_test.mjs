@@ -356,6 +356,30 @@ async function vela() {
   p2.showDiag()
   ok(/\(normal\)/.test(p2.diag) && /записи [1-9]/.test(p2.diag), 'vela (static sensor): listening at «normal» — «' + p2.diag + '»')
   p2.onDestroy()
+
+  // the Xiaomi Watch S5 as it is: whole m/s², and the samples handed over three at a time with the same Date.now() —
+  // the turns are still found (once they were not: «повороты 0»)
+  const p3 = Object.create(def)
+  Object.assign(p3, JSON.parse(JSON.stringify(def.data)))
+  p3.onInit()
+  await flush(); await flush(); await flush(); await flush()
+  W.found([{ deviceId: '5A:11:22:33:44:55', rssi: -60, addressType: 'RANDOM', data: new Uint8Array([2, 1, 6, 17, 7, ...le]).buffer }])
+  W.gatts[W.gatts.length - 1].onBLEConnectionStateChange(2)
+  await flush(); await flush(); await flush()
+  const w3 = W.writes.length
+  const s5 = wrist([[0, 2], [65, 0.4], [0, 1], [-65, 0.4], [0, 1]], 20, 1)
+  for (let i = 0; i < s5.length; i++) {
+    if (i % 3 === 0) await advance(150) // a batch every 150 ms…
+    const [x, y, z] = s5[i]
+    W.acc && W.acc.callback({ x: Math.round(x), y: Math.round(y), z: Math.round(z) }) // …of three, at the same moment
+    await flush()
+  }
+  await advance(300)
+  const s5w = W.writes.slice(w3).filter((w) => w[1] === SAMPLES)
+  ok(s5w.length === 3 && s5w[0][2].startsWith('0002') && s5w[1][2].startsWith('20') && s5w[2][2].startsWith('20')
+    && /повороты 2/.test(p3.diag), 'vela (S5: whole m/s², samples in batches): HELLO and both turns — «' + p3.diag + '»')
+  fs.writeFileSync(path.join(out, 'vela_s5_app.hex'), s5w.map((w) => w[2]).join('\n') + '\n')
+  p3.onDestroy()
 }
 
 await zepp()
