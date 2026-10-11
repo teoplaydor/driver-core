@@ -57,8 +57,8 @@ public final class MainActivity extends Activity implements Engine.Listener, Vie
             ACTION_OPEN_NOTE = "io.github.teoplaydor.semsearch.OPEN_NOTE", EXTRA_VOICE = "voice";
     /** A note opened in its editor (with ACTION_OPEN_NOTE); a search asked for by voice (the quick note's «найди…»). */
     static final String EXTRA_EDIT = "edit", ACTION_SEARCH = "io.github.teoplaydor.semsearch.SEARCH", EXTRA_QUERY = "query";
-    /** The notes shown (the morning digest tapped). */
-    static final String ACTION_NOTES = "io.github.teoplaydor.semsearch.NOTES";
+    /** The notes shown (the morning digest tapped); an item shown by its id (an answer's source). */
+    static final String ACTION_NOTES = "io.github.teoplaydor.semsearch.NOTES", ACTION_OPEN_ITEM = "io.github.teoplaydor.semsearch.OPEN_ITEM";
     private static final int RECENT_LIMIT = 3000;
 
     /** Test hook: thumbnails for items that have no MediaStore entry (screenshots on Robolectric). */
@@ -79,6 +79,9 @@ public final class MainActivity extends Activity implements Engine.Listener, Vie
     private int filter;
     private ProgressLine progress;
     private TextView status, section;
+    /** A question's answer from the notes, over the results (tap: where it is from). */
+    private TextView answerLine;
+    private IndexStore.Item answerSource;
     private MasonryView gallery;
     private FrameLayout empty;
     private Viewer viewer;
@@ -278,6 +281,14 @@ public final class MainActivity extends Activity implements Engine.Listener, Vie
             }
             return;
         }
+        if (ACTION_OPEN_ITEM.equals(intent.getAction())) {
+            setIntent(new Intent());
+            if (noteEditor != null) noteEditor.done();
+            noteToOpen = intent.getLongExtra(Reminders.EXTRA_NOTE, -1);
+            noteToEdit = false;
+            openPendingNote();
+            return;
+        }
         if (ACTION_OPEN_NOTE.equals(intent.getAction())) {
             setIntent(new Intent());
             if (noteEditor != null) noteEditor.done();
@@ -394,6 +405,25 @@ public final class MainActivity extends Activity implements Engine.Listener, Vie
                 else showMoreResults();
             }
         });
+        answerLine = Ui.text(this, "", 14.5f, Ui.TEXT, Ui.MEDIUM);
+        answerLine.setMaxLines(6);
+        answerLine.setEllipsize(TextUtils.TruncateAt.END);
+        answerLine.setVisibility(View.GONE);
+        answerLine.setCompoundDrawablePadding(dp(8));
+        answerLine.setCompoundDrawablesRelativeWithIntrinsicBounds(new Icon(Icon.ANSWER, Ui.ACCENT, dp(1.5f)), null, null, null);
+        answerLine.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                if (answerSource == null) return;
+                if (viewer != null) viewer.close();
+                viewer = new Viewer(MainActivity.this, MainActivity.this,
+                        new ArrayList<IndexStore.Item>(java.util.Collections.singletonList(answerSource)), 0);
+                viewer.open(root);
+            }
+        });
+        LinearLayout.LayoutParams al = new LinearLayout.LayoutParams(-2, -2);
+        al.bottomMargin = dp(6);
+        info.addView(answerLine, al);
         info.addView(section, new LinearLayout.LayoutParams(-2, -2)); // wrap: the bubble follows the text
         status = Ui.text(this, "", 12.5f, Ui.TEXT2, Ui.REGULAR);
         status.setVisibility(View.GONE);
@@ -791,6 +821,7 @@ public final class MainActivity extends Activity implements Engine.Listener, Vie
     }
 
     private void showRecent(boolean animate) {
+        showAnswer(null);
         resultsLabel = null;
         shownAlbum = null;
         searchShown = false;
@@ -878,6 +909,15 @@ public final class MainActivity extends Activity implements Engine.Listener, Vie
         searchLeft = false;
         searchShown = true;
         sectionText("Ищу…");
+        // a question («какой код домофона?»): its answer from the notes over the results
+        final String asked = Spoken.parse(q, System.currentTimeMillis(), java.util.TimeZone.getDefault()).question;
+        if (asked == null) showAnswer(null);
+        else engine.answer(asked, new Engine.Callback<Engine.Answer>() {
+            @Override
+            public void done(Engine.Answer a, Exception e) {
+                if (q.equals(query.getText().toString().trim())) showAnswer(a);
+            }
+        });
         engine.search(q, kinds(), new Engine.Callback<Engine.SearchResult>() {
             @Override
             public void done(Engine.SearchResult r, Exception e) {
@@ -917,6 +957,25 @@ public final class MainActivity extends Activity implements Engine.Listener, Vie
     /** The less sure results of the last search, added on a tap on the line above the grid. */
     private List<IndexStore.Item> moreResults;
     private List<IndexStore.Item> shownResults;
+
+    /** The answer line shown (null, or nothing found: hidden). */
+    private void showAnswer(Engine.Answer a) {
+        if (answerLine == null) return;
+        if (a == null || a.text == null) {
+            answerSource = null;
+            answerLine.setVisibility(View.GONE);
+            return;
+        }
+        answerSource = a.source;
+        String from = a.source == null ? "" : "\n" + QuickNoteActivity.sourceLabel(a.source) + (a.generated ? " · Gemma" : "");
+        android.text.SpannableString t = new android.text.SpannableString(a.text + from);
+        if (!from.isEmpty()) {
+            t.setSpan(new android.text.style.ForegroundColorSpan(Ui.TEXT2), a.text.length(), t.length(), 0);
+            t.setSpan(new android.text.style.RelativeSizeSpan(0.85f), a.text.length(), t.length(), 0);
+        }
+        answerLine.setText(t);
+        if (answerLine.getVisibility() != View.VISIBLE) Ui.fadeIn(answerLine, 180);
+    }
 
     private void showResults(Engine.SearchResult r, Exception e, String label) {
         if (e != null) {
@@ -1636,6 +1695,17 @@ public final class MainActivity extends Activity implements Engine.Listener, Vie
 
     @Override
     public void onRequestPermissionsResult(int code, String[] perms, int[] res) {
+        if (code == REQ_LOCATION || code == REQ_LOCATION + 1) {
+            Places.restore(this);
+            Runnable then = afterLocation;
+            afterLocation = null;
+            if (code == REQ_LOCATION && then != null) {
+                if (Places.canLocate(this)) then.run();
+                else toast("Без геолокации напоминания у мест не работают");
+            }
+            if (settings != null) settings.onEngineChanged();
+            return;
+        }
         if (code == REQ_IDLE) {
             if (!AutoIndex.hasMediaAccess(this)) {
                 toast("Без доступа к галерее индексировать нечего");
@@ -2014,7 +2084,7 @@ public final class MainActivity extends Activity implements Engine.Listener, Vie
     }
 
     /** Android 13+: notifications are asked for (a reminder is one). */
-    private void askNotifications() {
+    void askNotifications() {
         if (Build.VERSION.SDK_INT >= 33 && checkSelfPermission("android.permission.POST_NOTIFICATIONS") != PackageManager.PERMISSION_GRANTED) {
             requestPermissions(new String[]{"android.permission.POST_NOTIFICATIONS"}, REQ_NOTIFY);
         }
@@ -2320,6 +2390,122 @@ public final class MainActivity extends Activity implements Engine.Listener, Vie
         engine.setPinned(note, pinned);
         toast(pinned ? "Закреплена — первой среди заметок" : "Откреплена");
         if (resultsLabel == null) showRecent(false);
+    }
+
+    private static final int REQ_LOCATION = 21;
+    private Runnable afterLocation;
+
+    /** Location allowed (asked first if needed), then {@code then}. */
+    void withLocation(Runnable then) {
+        if (Places.canLocate(this)) {
+            then.run();
+            return;
+        }
+        afterLocation = then;
+        requestPermissions(new String[]{android.Manifest.permission.ACCESS_FINE_LOCATION, android.Manifest.permission.ACCESS_COARSE_LOCATION},
+                REQ_LOCATION);
+    }
+
+    /** Where the phone is now kept as a place: its name chosen (Дом, Работа, Магазин, Дача, or typed). */
+    void addPlaceHere(final Runnable done) {
+        final String[] names = {"Дом", "Работа", "Магазин", "Дача", "Другое…"};
+        sheet = Sheet.choose(root, "Это место — как его назвать?", names, null, -1, new Sheet.Choice() {
+            @Override
+            public void chosen(int i) {
+                if (i < names.length - 1) {
+                    savePlaceHere(names[i], done);
+                    return;
+                }
+                final android.widget.EditText name = new android.widget.EditText(MainActivity.this);
+                name.setHint("Например: Спортзал");
+                new android.app.AlertDialog.Builder(MainActivity.this, android.app.AlertDialog.THEME_DEVICE_DEFAULT_DARK)
+                        .setTitle("Название места").setView(name)
+                        .setPositiveButton("Сохранить", new android.content.DialogInterface.OnClickListener() {
+                            @Override
+                            public void onClick(android.content.DialogInterface d, int w) {
+                                String n = name.getText().toString().trim();
+                                if (!n.isEmpty()) savePlaceHere(n, done);
+                            }
+                        }).setNegativeButton("Отмена", null).show();
+            }
+        });
+    }
+
+    private void savePlaceHere(final String name, final Runnable done) {
+        withLocation(new Runnable() {
+            @Override
+            public void run() {
+                toast("Определяю место…");
+                Places.here(MainActivity.this, new Engine.Callback<android.location.Location>() {
+                    @Override
+                    public void done(android.location.Location l, Exception e) {
+                        if (l == null) {
+                            toast("Место не определилось — включите геолокацию");
+                            return;
+                        }
+                        Places.add(MainActivity.this, name, l.getLatitude(), l.getLongitude());
+                        toast("Место «" + io.github.teoplaydor.semsearch.core.Spoken.placeName(name) + "» сохранено");
+                        if (!Places.inBackground(MainActivity.this)) {
+                            sheet = Sheet.confirm(root, "Напоминать и при закрытом приложении?", "Для этого Android просит разрешить "
+                                    + "геолокацию «Всегда» — приложение только узнаёт, что вы пришли в сохранённое место; координаты никуда "
+                                    + "не отправляются.", "Разрешить", new Runnable() {
+                                @Override
+                                public void run() {
+                                    requestPermissions(new String[]{"android.permission.ACCESS_BACKGROUND_LOCATION"}, REQ_LOCATION + 1);
+                                }
+                            });
+                        }
+                        if (done != null) done.run();
+                    }
+                });
+            }
+        });
+    }
+
+    /** The place a note reminds at: one of those kept, a new one here, or none. */
+    @Override
+    public void choosePlace(final IndexStore.Item note) {
+        final List<Places.Place> ps = Places.list(this);
+        final List<String> labels = new ArrayList<String>();
+        for (Places.Place p : ps) labels.add(p.name);
+        labels.add("Уходя из «" + (ps.isEmpty() ? "Дом" : ps.get(0).name) + "»");
+        labels.add("Новое место — где я сейчас");
+        if (note.place != null) labels.add("Без места");
+        sheet = Sheet.choose(root, note.place != null ? (note.leaving ? "Уходя: " : "У места: ") + note.place : "Напомнить у места",
+                labels.toArray(new String[0]), null, -1, new Sheet.Choice() {
+                    @Override
+                    public void chosen(int i) {
+                        if (i < ps.size()) {
+                            setPlace(note, ps.get(i).name, false);
+                        } else if (i == ps.size()) {
+                            setPlace(note, ps.isEmpty() ? "Дом" : ps.get(0).name, true);
+                        } else if (i == ps.size() + 1) {
+                            addPlaceHere(new Runnable() {
+                                @Override
+                                public void run() {
+                                    List<Places.Place> now = Places.list(MainActivity.this);
+                                    if (!now.isEmpty()) setPlace(note, now.get(now.size() - 1).name, false);
+                                }
+                            });
+                        } else {
+                            engine.setPlace(note, null, false);
+                            toast("Место убрано");
+                            if (viewer != null) viewer.refreshNote();
+                        }
+                    }
+                });
+    }
+
+    private void setPlace(final IndexStore.Item note, final String place, final boolean leaving) {
+        withLocation(new Runnable() {
+            @Override
+            public void run() {
+                engine.setPlace(note, place, leaving);
+                askNotifications();
+                toast((leaving ? "Напомнит, когда уйдёте: " : "Напомнит у места: ") + place);
+                if (viewer != null) viewer.refreshNote();
+            }
+        });
     }
 
     @Override

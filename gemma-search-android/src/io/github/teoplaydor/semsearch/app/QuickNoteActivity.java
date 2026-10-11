@@ -50,7 +50,7 @@ public final class QuickNoteActivity extends Activity {
     static final String ACTION = "io.github.teoplaydor.semsearch.QUICK_NOTE";
     /** Start with the keyboard rather than the microphone. */
     static final String EXTRA_TYPE = "type";
-    private static final int REQ_MIC = 1, REQ_VOICE = 2, REQ_NOTIFY = 3;
+    private static final int REQ_MIC = 1, REQ_VOICE = 2, REQ_NOTIFY = 3, REQ_PLACE = 4, REQ_LOCATION = 5;
     private static final long CLOSE_AFTER_MS = 5000;
 
     private final Handler ui = new Handler(Looper.getMainLooper());
@@ -558,6 +558,10 @@ public final class QuickNoteActivity extends Activity {
             openApp(i);
             return;
         }
+        if (r.question != null) {
+            ask(r.question);
+            return;
+        }
         if (r.text.trim().isEmpty()) {
             hint("Ничего не расслышал — нажмите на микрофон и скажите ещё раз");
             return;
@@ -566,7 +570,23 @@ public final class QuickNoteActivity extends Activity {
         heard.setTextColor(Ui.TEXT);
         heard.setText(r.text);
         setButtons();
-        Engine.get(this).addNote(r.text, null, false, r.remindAt, r.repeat, new Engine.Callback<IndexStore.Item>() {
+        if (r.beforeEvent != null) {
+            // «за день до дня рождения Оли»: its date from the notes, else asked
+            Engine.get(this).findEventDate(r.beforeEvent, new Engine.Callback<Long>() {
+                @Override
+                public void done(Long date, Exception e) {
+                    long at = date != null && date > 0 ? Math.max(date - r.beforeMs, System.currentTimeMillis() + 60_000L) : 0;
+                    save(r, at, at > 0 ? null : r.beforeEvent);
+                }
+            });
+            return;
+        }
+        save(r, r.remindAt, null);
+    }
+
+    /** The note kept: with its reminder at {@code at}, its place; {@code dateOf}: the event whose date is to be asked. */
+    private void save(final Spoken.Result r, long at, final String dateOf) {
+        Engine.get(this).addNote(r.text, null, false, at, r.repeat, new Engine.Callback<IndexStore.Item>() {
             @Override
             public void done(IndexStore.Item it, Exception e) {
                 if (e != null || it == null) {
@@ -580,10 +600,17 @@ public final class QuickNoteActivity extends Activity {
                     return;
                 }
                 saved = it;
-                showSaved(r.wantsReminder && r.remindAt == 0);
+                if (r.place != null) Engine.get(QuickNoteActivity.this).setPlace(it, r.place, r.leaving);
+                pendingDate = dateOf;
+                pendingBefore = r.beforeMs;
+                showSaved(r.wantsReminder && it.remind == 0 && r.place == null && dateOf == null);
             }
         });
     }
+
+    /** The event whose date is asked («дня рождения Оли»), and how long before it to remind. */
+    private String pendingDate;
+    private long pendingBefore;
 
     /** «Сохранено»: the note, its reminder; «Отменить», «Изменить», «Ещё»; closed by itself soon unless asked when. */
     private void showSaved(boolean ask) {
@@ -613,7 +640,19 @@ public final class QuickNoteActivity extends Activity {
             askWhen("Когда напомнить?");
             return;
         }
-        if (saved.remind > 0 && needsNotificationPermission()) {
+        if (pendingDate != null) {
+            askDate();
+            return;
+        }
+        if (saved.place != null && Places.find(this, saved.place) == null) {
+            askPlace();
+            return;
+        }
+        if (saved.place != null && (!Places.canLocate(this) || !Places.inBackground(this))) {
+            askLocation();
+            return;
+        }
+        if ((saved.remind > 0 || saved.place != null) && needsNotificationPermission()) {
             requestPermissions(new String[]{"android.permission.POST_NOTIFICATIONS"}, REQ_NOTIFY);
             return;
         }
@@ -622,14 +661,236 @@ public final class QuickNoteActivity extends Activity {
 
     private void showWhen() {
         chips.removeAllViews();
-        if (saved == null || saved.remind <= 0) {
+        if (saved == null || saved.remind <= 0 && saved.place == null) {
             when.setVisibility(View.GONE);
             return;
         }
         when.setVisibility(View.VISIBLE);
-        when.setCompoundDrawablesRelativeWithIntrinsicBounds(new Icon(Icon.BELL, Ui.ACCENT, Ui.dp(this, 1.6f)), null, null, null);
-        when.setText("Напомнит " + NoteEditor.when(saved.remind)
-                + (saved.repeat != Spoken.ONCE ? ", " + Spoken.repeatLabel(saved.repeat) : ""));
+        if (saved.remind > 0) {
+            when.setCompoundDrawablesRelativeWithIntrinsicBounds(new Icon(Icon.BELL, Ui.ACCENT, Ui.dp(this, 1.6f)), null, null, null);
+            when.setText("Напомнит " + NoteEditor.when(saved.remind)
+                    + (saved.repeat != Spoken.ONCE ? ", " + Spoken.repeatLabel(saved.repeat) : ""));
+            // the time to the calendar too
+            TextView cal = chip("В календарь");
+            cal.setCompoundDrawablesRelativeWithIntrinsicBounds(new Icon(Icon.CALENDAR, Ui.TEXT2, Ui.dp(this, 1.5f)), null, null, null);
+            cal.setCompoundDrawablePadding(Ui.dp(this, 6));
+            cal.setOnClickListener(new View.OnClickListener() {
+                @Override
+                public void onClick(View v) {
+                    Calendars.add(QuickNoteActivity.this, saved);
+                }
+            });
+        } else {
+            when.setCompoundDrawablesRelativeWithIntrinsicBounds(new Icon(Icon.PLACE, Ui.ACCENT, Ui.dp(this, 1.6f)), null, null, null);
+            when.setText((saved.leaving ? "Напомнит, когда уйдёте: " : "Напомнит у места: ") + saved.place);
+        }
+    }
+
+    /** A chip in the row under the note (its action set by the caller). */
+    private TextView chip(String text) {
+        TextView chip = Ui.text(this, text, 14, Ui.TEXT, Ui.MEDIUM);
+        chip.setGravity(Gravity.CENTER);
+        chip.setBackground(Ui.round(this, Ui.SURFACE3, 18));
+        chip.setPadding(Ui.dp(this, 14), 0, Ui.dp(this, 14), 0);
+        Ui.pressable(chip);
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-2, Ui.dp(this, 38));
+        if (chips.getChildCount() > 0) lp.leftMargin = Ui.dp(this, 8);
+        chips.addView(chip, lp);
+        return chip;
+    }
+
+    // ------------------------------------------------------------------ a place, a date, an answer
+
+    /** «Когда буду в магазине…» and «Магазин» is not known yet: here, now? */
+    private void askPlace() {
+        ui.removeCallbacks(closeLater);
+        label.setText("Где это — «" + saved.place + "»?");
+        when.setVisibility(View.VISIBLE);
+        when.setCompoundDrawablesRelativeWithIntrinsicBounds(new Icon(Icon.PLACE, Ui.ACCENT, Ui.dp(this, 1.6f)), null, null, null);
+        when.setText("Сохраню место, и напоминание сработает там");
+        chips.removeAllViews();
+        chip("Я сейчас здесь").setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                hereIsPlace();
+            }
+        });
+        chip("Позже, в настройках").setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                chips.removeAllViews();
+                when.setText("Место «" + saved.place + "» — в Настройках → Места");
+                ui.postDelayed(closeLater, CLOSE_AFTER_MS);
+            }
+        });
+    }
+
+    private void hereIsPlace() {
+        if (!Places.canLocate(this)) {
+            requestPermissions(new String[]{android.Manifest.permission.ACCESS_FINE_LOCATION,
+                    android.Manifest.permission.ACCESS_COARSE_LOCATION}, REQ_PLACE);
+            return;
+        }
+        when.setText("Определяю место…");
+        chips.removeAllViews();
+        final String name = saved.place;
+        Places.here(this, new Engine.Callback<android.location.Location>() {
+            @Override
+            public void done(android.location.Location l, Exception e) {
+                if (l == null) {
+                    when.setText("Место не определилось — включите геолокацию и попробуйте в Настройках → Места");
+                    return;
+                }
+                Places.add(QuickNoteActivity.this, name, l.getLatitude(), l.getLongitude());
+                showWhen();
+                if (!Places.inBackground(QuickNoteActivity.this)) askLocation();
+                else ui.postDelayed(closeLater, CLOSE_AFTER_MS);
+            }
+        });
+    }
+
+    /** A place reminder needs the location «all the time» (Android 10+), else it rings only with the app open. */
+    private void askLocation() {
+        ui.removeCallbacks(closeLater);
+        chips.removeAllViews();
+        if (!Places.canLocate(this)) {
+            chip("Разрешить геолокацию").setOnClickListener(new View.OnClickListener() {
+                @Override
+                public void onClick(View v) {
+                    requestPermissions(new String[]{android.Manifest.permission.ACCESS_FINE_LOCATION,
+                            android.Manifest.permission.ACCESS_COARSE_LOCATION}, REQ_LOCATION);
+                }
+            });
+            return;
+        }
+        when.setText(when.getText() + "\nЧтобы сработало и при закрытом приложении, разрешите геолокацию «Всегда»");
+        chip("Разрешить «Всегда»").setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                requestPermissions(new String[]{"android.permission.ACCESS_BACKGROUND_LOCATION"}, REQ_LOCATION);
+            }
+        });
+    }
+
+    /** «За день до дня рождения Оли» and no note says when: the date chosen. */
+    private void askDate() {
+        ui.removeCallbacks(closeLater);
+        label.setText("Когда " + pendingDate + "?");
+        when.setVisibility(View.VISIBLE);
+        when.setCompoundDrawablesRelativeWithIntrinsicBounds(new Icon(Icon.CALENDAR, Ui.ACCENT, Ui.dp(this, 1.6f)), null, null, null);
+        when.setText("В заметках даты нет — выберите, и напомню " + new io.github.teoplaydor.semsearch.core.PhotoEvent("", "", 0,
+                pendingBefore).beforeLabel());
+        chips.removeAllViews();
+        chip("Выбрать дату").setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                pickDate();
+            }
+        });
+        chip("Не надо").setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                pendingDate = null;
+                showWhen();
+                ui.postDelayed(closeLater, CLOSE_AFTER_MS);
+            }
+        });
+    }
+
+    private void pickDate() {
+        final Calendar c = Calendar.getInstance();
+        android.app.DatePickerDialog d = new android.app.DatePickerDialog(this, android.app.AlertDialog.THEME_DEVICE_DEFAULT_DARK,
+                new android.app.DatePickerDialog.OnDateSetListener() {
+                    @Override
+                    public void onDateSet(android.widget.DatePicker v, int y, int m, int day) {
+                        c.set(y, m, day, 9, 0, 0);
+                        c.set(Calendar.MILLISECOND, 0);
+                        dated(c.getTimeInMillis());
+                    }
+                }, c.get(Calendar.YEAR), c.get(Calendar.MONTH), c.get(Calendar.DAY_OF_MONTH));
+        d.getDatePicker().setMinDate(System.currentTimeMillis() - 1000);
+        d.show();
+    }
+
+    /** The event's date known: the reminder before it, the date written into the note (found by the next question). */
+    void dated(long date) {
+        if (saved == null || pendingDate == null) return;
+        long at = Math.max(date - pendingBefore, System.currentTimeMillis() + 60_000L);
+        String day = io.github.teoplaydor.semsearch.core.PhotoEvent.dayMonth(date, TimeZone.getDefault(), false);
+        String[] lines = saved.body.split("\n", 2);
+        String body = lines[0] + " (" + day + ")" + (lines.length > 1 ? "\n" + lines[1] : "");
+        Engine.get(this).updateNote(saved, body, null);
+        saved.body = body;
+        heard.setText(body);
+        Engine.get(this).setReminder(saved, at, saved.repeat);
+        pendingDate = null;
+        showWhen();
+        if (needsNotificationPermission()) {
+            requestPermissions(new String[]{"android.permission.POST_NOTIFICATIONS"}, REQ_NOTIFY);
+            return;
+        }
+        ui.postDelayed(closeLater, CLOSE_AFTER_MS);
+    }
+
+    /** A question to the notes: the answer found, where it is from. */
+    void ask(String question) {
+        label.setText("Ищу в заметках…");
+        heard.setTextColor(Ui.TEXT2);
+        heard.setText(question);
+        setButtons();
+        Engine.get(this).answer(question, new Engine.Callback<Engine.Answer>() {
+            @Override
+            public void done(Engine.Answer a, Exception e) {
+                showAnswer(a);
+            }
+        });
+    }
+
+    /** The answer shown; its source opened by «Открыть». */
+    Engine.Answer answer;
+
+    private void showAnswer(final Engine.Answer a) {
+        answer = a;
+        heard.setMinLines(1);
+        heard.setTextColor(Ui.TEXT);
+        chips.removeAllViews();
+        if (a == null || a.text == null) {
+            label.setText(a != null ? a.question : "Вопрос");
+            heard.setText("В заметках этого нет");
+            when.setVisibility(View.GONE);
+        } else {
+            label.setText(a.generated ? "Ответ Gemma по заметкам" : "Ответ из заметок");
+            heard.setText(a.text);
+            when.setVisibility(a.source != null ? View.VISIBLE : View.GONE);
+            when.setCompoundDrawablesRelativeWithIntrinsicBounds(new Icon(Icon.ANSWER, Ui.ACCENT, Ui.dp(this, 1.6f)), null, null, null);
+            if (a.source != null) when.setText(sourceLabel(a.source));
+        }
+        View open = a != null && a.source != null ? button("Открыть", false, new Runnable() {
+            @Override
+            public void run() {
+                openSource(a.source);
+            }
+        }) : null;
+        setButtons(open, null, button("Ещё вопрос", true, new Runnable() {
+            @Override
+            public void run() {
+                listen();
+            }
+        }));
+        ui.postDelayed(closeLater, 3 * CLOSE_AFTER_MS);
+    }
+
+    static String sourceLabel(IndexStore.Item it) {
+        if (it.kind == IndexStore.KIND_NOTE) return "Из заметки «" + io.github.teoplaydor.semsearch.core.NoteText.title(it.body, 40) + "»";
+        if (it.kind == IndexStore.KIND_PHOTO) return "Текст на фото";
+        return "Из документа «" + (it.title == null ? "без названия" : it.title) + "»";
+    }
+
+    private void openSource(IndexStore.Item it) {
+        Intent i = new Intent(this, MainActivity.class).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP);
+        if (it.kind == IndexStore.KIND_NOTE) i.setAction(MainActivity.ACTION_OPEN_NOTE).putExtra(Reminders.EXTRA_NOTE, it.id);
+        else i.setAction(MainActivity.ACTION_OPEN_ITEM).putExtra(Reminders.EXTRA_NOTE, it.id);
+        openApp(i);
     }
 
     /** «Напомни…» without a time, or the time tapped: a few times to choose from. */
@@ -648,20 +909,12 @@ public final class QuickNoteActivity extends Activity {
     }
 
     private void addChip(String text, final long t) {
-        TextView chip = Ui.text(this, text, 14, Ui.TEXT, Ui.MEDIUM);
-        chip.setGravity(Gravity.CENTER);
-        chip.setBackground(Ui.round(this, Ui.SURFACE3, 18));
-        chip.setPadding(Ui.dp(this, 14), 0, Ui.dp(this, 14), 0);
-        Ui.pressable(chip);
-        chip.setOnClickListener(new View.OnClickListener() {
+        chip(text).setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {
                 chosen(t);
             }
         });
-        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-2, Ui.dp(this, 38));
-        if (chips.getChildCount() > 0) lp.leftMargin = Ui.dp(this, 8);
-        chips.addView(chip, lp);
     }
 
     private void chosen(long t) {
@@ -733,6 +986,17 @@ public final class QuickNoteActivity extends Activity {
             else recognizerActivity(); // the phone's own dialog needs no access of ours
         } else if (req == REQ_NOTIFY) {
             if (!ok) when.setText(when.getText() + " — уведомления выключены, напоминание не появится");
+            ui.postDelayed(closeLater, CLOSE_AFTER_MS);
+        } else if (req == REQ_PLACE) {
+            if (ok) hereIsPlace();
+            else when.setText("Без геолокации место не сохранить");
+        } else if (req == REQ_LOCATION) {
+            Places.restore(this);
+            showWhen();
+            if (Places.canLocate(this) && !Places.inBackground(this) && perms.length > 0 && !perms[0].endsWith("BACKGROUND_LOCATION")) {
+                askLocation();
+                return;
+            }
             ui.postDelayed(closeLater, CLOSE_AFTER_MS);
         }
     }

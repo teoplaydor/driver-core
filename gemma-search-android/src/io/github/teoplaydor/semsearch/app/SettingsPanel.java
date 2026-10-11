@@ -43,6 +43,15 @@ final class SettingsPanel extends FrameLayout implements Engine.Listener {
     private TextView unrestrictedValue;
     private TextView assistantValue;
     private Toggle voiceIconToggle;
+    private Toggle shadeToggle, digestToggle;
+    private TextView digestValue;
+    private LinearLayout placesBox;
+    private String placesShown;
+    private TextView placesNote;
+    private TextView chatValue, chatNote, chatButton, chatDelete;
+    private Toggle chatToggle;
+    private View chatToggleRow;
+    private ProgressLine chatProgress;
 
     SettingsPanel(MainActivity activity) {
         super(activity);
@@ -83,6 +92,8 @@ final class SettingsPanel extends FrameLayout implements Engine.Listener {
 
         buildModel();
         buildQuick();
+        buildPlaces();
+        buildChat();
         buildIndex();
         buildSoundAndFiles();
         buildSpeed();
@@ -881,6 +892,171 @@ final class SettingsPanel extends FrameLayout implements Engine.Listener {
                 if (!QuickNotes.askForWidget(c)) a.toast("Долгое нажатие на главном экране → «Виджеты» → «Смысловой поиск»");
             }
         });
+        shadeToggle = new Toggle(c, QuickNotes.shadeOn(c));
+        shadeToggle.setListener(new Toggle.Listener() {
+            @Override
+            public void changed(boolean on) {
+                if (on) a.askNotifications();
+                QuickNotes.setShade(c, on);
+            }
+        });
+        toggleRow(card, "Заметка из шторки и с часов", "тихое уведомление «Быстрая заметка»: ответьте на него текстом — или голосом "
+                + "на часах (Wear OS, Galaxy Watch), — и ответ станет заметкой или напоминанием; вопрос получит ответ", shadeToggle);
+        digestToggle = new Toggle(c, Digest.on(c));
+        digestToggle.setListener(new Toggle.Listener() {
+            @Override
+            public void changed(boolean on) {
+                if (on) a.askNotifications();
+                Digest.set(c, on, Digest.at(c));
+                showQuick();
+            }
+        });
+        toggleRow(card, "Утренняя сводка", "одно уведомление в начале дня: напоминания на сегодня, что осталось в списках, что ждёт у "
+                + "мест, билеты и записи с фото", digestToggle);
+        digestValue = row(card, "Время сводки", null, new Runnable() {
+            @Override
+            public void run() {
+                int at = Digest.at(c);
+                new android.app.TimePickerDialog(a, android.app.AlertDialog.THEME_DEVICE_DEFAULT_DARK,
+                        new android.app.TimePickerDialog.OnTimeSetListener() {
+                            @Override
+                            public void onTimeSet(android.widget.TimePicker v, int h, int m) {
+                                Digest.set(c, true, h * 60 + m);
+                                showQuick();
+                            }
+                        }, at / 60, at % 60, true).show();
+            }
+        });
+    }
+
+    private void buildPlaces() {
+        Context c = getContext();
+        LinearLayout card = section("Места");
+        placesNote = Ui.text(c, "", 13, Ui.TEXT2, Ui.REGULAR);
+        placesNote.setPadding(Ui.dp(c, 18), Ui.dp(c, 12), Ui.dp(c, 18), Ui.dp(c, 4));
+        card.addView(placesNote);
+        placesBox = new LinearLayout(c);
+        placesBox.setOrientation(LinearLayout.VERTICAL);
+        card.addView(placesBox);
+        action(card, "Сохранить место, где я сейчас", false, new Runnable() {
+            @Override
+            public void run() {
+                a.addPlaceHere(new Runnable() {
+                    @Override
+                    public void run() {
+                        showPlaces();
+                    }
+                });
+            }
+        });
+    }
+
+    /** The places' rows (each with ✕), rebuilt when they changed. */
+    private void showPlaces() {
+        if (placesBox == null) return;
+        final Context c = getContext();
+        List<Places.Place> ps = Places.list(c);
+        boolean bg = Places.inBackground(c), loc = Places.canLocate(c);
+        placesNote.setText("«Когда буду дома — полить цветы», «когда выйду из дома — взять ключи»: напоминание у места. "
+                + (ps.isEmpty() ? "Мест пока нет." : !loc ? "Геолокация не разрешена — напоминания у мест не сработают."
+                : !bg ? "Разрешите геолокацию «Всегда», чтобы срабатывало и при закрытом приложении." : ""));
+        String key = ps.size() + ":";
+        for (Places.Place p : ps) key += p.name + ",";
+        if (key.equals(placesShown)) return;
+        placesShown = key;
+        placesBox.removeAllViews();
+        for (final Places.Place p : ps) {
+            LinearLayout r = new LinearLayout(c);
+            r.setGravity(Gravity.CENTER_VERTICAL);
+            r.setPadding(Ui.dp(c, 18), Ui.dp(c, 6), Ui.dp(c, 8), Ui.dp(c, 6));
+            r.addView(Ui.icon(c, Icon.PLACE, Ui.TEXT2, 22), new LinearLayout.LayoutParams(Ui.dp(c, 22), Ui.dp(c, 22)));
+            TextView t = Ui.text(c, p.name, 14, Ui.TEXT, Ui.REGULAR);
+            t.setPadding(Ui.dp(c, 10), 0, 0, 0);
+            r.addView(t, new LinearLayout.LayoutParams(0, -2, 1));
+            ImageView x = Ui.icon(c, Icon.CLOSE, Ui.TEXT3, 36);
+            x.setContentDescription("Убрать место " + p.name);
+            x.setOnClickListener(new OnClickListener() {
+                @Override
+                public void onClick(View v) {
+                    Places.remove(c, p.name);
+                    showPlaces();
+                }
+            });
+            Ui.pressable(x);
+            r.addView(x, new LinearLayout.LayoutParams(Ui.dp(c, 36), Ui.dp(c, 36)));
+            placesBox.addView(r);
+        }
+    }
+
+    private void buildChat() {
+        final Context c = getContext();
+        LinearLayout card = section("Ответы своими словами");
+        chatValue = row(card, "Gemma 4 E2B", "вопрос к заметкам («какой код домофона у Саши?») находит ответ и без неё — строкой из "
+                + "заметок; Gemma отвечает своими словами по найденному. Работает на телефоне, ~2,6 ГБ", null);
+        chatNote = note(card);
+        chatProgress = progress(card);
+        chatButton = action(card, "Скачать Gemma 4 E2B (≈2,6 ГБ)", true, new Runnable() {
+            @Override
+            public void run() {
+                final Chat ch = e.chat();
+                if (ch.downloading) {
+                    ch.stopDownload();
+                    return;
+                }
+                ch.download(new Runnable() {
+                    @Override
+                    public void run() {
+                        e.notifyChanged();
+                    }
+                });
+                onEngineChanged();
+            }
+        });
+        chatToggle = new Toggle(c, e.chat().on());
+        chatToggle.setListener(new Toggle.Listener() {
+            @Override
+            public void changed(boolean on) {
+                e.chat().setOn(on);
+                onEngineChanged();
+            }
+        });
+        chatToggleRow = toggleRow(card, "Отвечать с Gemma", "выключено — ответы строками из заметок, быстро и на любом телефоне",
+                chatToggle);
+        chatDelete = quiet(card, "Удалить Gemma", Ui.TEXT2, new Runnable() {
+            @Override
+            public void run() {
+                Sheet.confirm(root(), "Удалить Gemma 4 E2B?", "Ответы останутся — строками из заметок.", "Удалить", new Runnable() {
+                    @Override
+                    public void run() {
+                        e.chat().delete();
+                        onEngineChanged();
+                    }
+                });
+            }
+        });
+    }
+
+    private void showChat() {
+        if (chatValue == null) return;
+        Chat ch = e.chat();
+        boolean inst = ch.installed();
+        double gb = Chat.memoryGb(getContext());
+        chatValue.setText(ch.downloading ? "загрузка" : inst ? (ch.on() ? "включена" : ch.broken() ? "упала" : "выключена") : "не скачана");
+        chatValue.setTextColor(inst && ch.on() ? Ui.ACCENT : Ui.TEXT2);
+        String note = ch.error != null ? "Не скачалась: " + ch.error
+                : ch.broken() ? "Gemma упала при загрузке на этом телефоне — включите снова, чтобы попробовать ещё раз."
+                : !inst && gb > 0 && gb < 5.5 ? String.format(java.util.Locale.ROOT, "В телефоне %.0f ГБ памяти — Gemma может не поместиться "
+                + "рядом с остальным; ответы строками из заметок работают и так.", gb) : "";
+        chatNote.setText(note);
+        chatNote.setVisibility(note.isEmpty() ? GONE : VISIBLE);
+        chatProgress.setVisibility(ch.downloading ? VISIBLE : GONE);
+        if (ch.downloading && ch.dlTotal > 0) chatProgress.setProgress(ch.dlDone / (float) ch.dlTotal);
+        chatButton.setVisibility(inst ? GONE : VISIBLE);
+        chatButton.setText(ch.downloading ? (ch.dlTotal > 0 ? String.format(java.util.Locale.ROOT, "Остановить · %d%%",
+                100 * ch.dlDone / Math.max(1, ch.dlTotal)) : "Остановить") : "Скачать Gemma 4 E2B (≈2,6 ГБ)");
+        chatToggleRow.setVisibility(inst ? VISIBLE : GONE);
+        if (chatToggle.isOn() != ch.on()) chatToggle.setOn(ch.on(), false);
+        chatDelete.setVisibility(inst ? VISIBLE : GONE);
     }
 
     private void showQuick() {
@@ -890,6 +1066,11 @@ final class SettingsPanel extends FrameLayout implements Engine.Listener {
         assistantValue.setTextColor(Boolean.TRUE.equals(on) ? Ui.TEXT2 : Ui.ACCENT);
         boolean icon = QuickNotes.iconShown(getContext());
         if (voiceIconToggle.isOn() != icon) voiceIconToggle.setOn(icon, false);
+        int at = Digest.at(getContext());
+        digestValue.setText(String.format(java.util.Locale.ROOT, "%d:%02d", at / 60, at % 60));
+        rowOf(digestValue).setVisibility(Digest.on(getContext()) ? VISIBLE : GONE);
+        showPlaces();
+        showChat();
     }
 
     @Override

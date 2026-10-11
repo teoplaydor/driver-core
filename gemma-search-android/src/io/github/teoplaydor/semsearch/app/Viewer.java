@@ -122,6 +122,9 @@ final class Viewer extends FrameLayout {
         /** The note, with its time, to the phone's calendar. */
         void toCalendar(IndexStore.Item note);
 
+        /** The place the note reminds at chosen (or taken away). */
+        void choosePlace(IndexStore.Item note);
+
         /** A PDF's page as a picture (null when it cannot be drawn), off the main thread. */
         void pdfPage(IndexStore.Item file, int page, Engine.Callback<Bitmap> cb);
     }
@@ -430,6 +433,12 @@ final class Viewer extends FrameLayout {
                     host.remind(it);
                 }
             });
+            action(Icon.PLACE, it.place != null ? (it.leaving ? "Уходя" : it.place) : "У места", new Runnable() {
+                @Override
+                public void run() {
+                    host.choosePlace(it);
+                }
+            });
             if (it.remind > 0) {
                 action(Icon.CALENDAR, "В календарь", new Runnable() {
                     @Override
@@ -493,6 +502,7 @@ final class Viewer extends FrameLayout {
         if (it.remind > 0) b.append(" · напомнит ").append(NoteEditor.when(it.remind));
         if (it.remind > 0 && it.repeat != io.github.teoplaydor.semsearch.core.Spoken.ONCE)
             b.append(", ").append(io.github.teoplaydor.semsearch.core.Spoken.repeatLabel(it.repeat));
+        if (it.place != null) b.append(it.leaving ? " · уходя: " : " · у места: ").append(it.place);
         if (it.edited > 0) b.append(" · изменена ").append(DateFormat.getDateInstance(DateFormat.MEDIUM).format(new Date(it.edited)));
         return b.toString();
     }
