@@ -300,6 +300,111 @@ JNIEXPORT jobjectArray JNICALL JNI_METHOD(nativeComputeEmbeddingBatch)(
   return result_array;
 }
 
+// ------------------------------------------------------------------ generation: engine, session, content
+// The JNI glue as in v0.18.0 litertlm.cc (argument reading, SamplerConfig getters, the boxed Boolean), the engine a
+// fake that answers with what it was given, so the test sees the settings and the prompt as the library would.
+
+struct FakeSession {
+  std::string sampler;
+};
+
+JNIEXPORT jlong JNICALL JNI_METHOD(nativeCreateEngine)(
+    JNIEnv* env, jclass thiz, jstring model_path, jstring backend,
+    jstring vision_backend, jstring audio_backend, jint max_num_tokens,
+    jint max_num_images, jstring cache_dir, jboolean enable_benchmark,
+    jobject enable_speculative_decoding, jstring main_npu_native_library_dir,
+    jstring vision_npu_native_library_dir, jstring audio_npu_native_library_dir,
+    jint main_backend_num_threads, jint audio_backend_num_threads,
+    jint max_vision_tokens_per_image, jint activation_data_type) {
+  const char* model_path_chars = env->GetStringUTFChars(model_path, nullptr);
+  std::string model_path_str(model_path_chars);
+  env->ReleaseStringUTFChars(model_path, model_path_chars);
+
+  FILE* f = fopen(model_path_str.c_str(), "rb");
+  if (f == nullptr) {
+    ThrowLiteRtLmJniException(env, "Model file not found: " + model_path_str);
+    return 0;
+  }
+  fclose(f);
+  g_last_call = "engine path=" + model_path_str + " backend=" + JStr(env, backend) + " vision=" + JStr(env, vision_backend) +
+                " audio=" + JStr(env, audio_backend) + " tokens=" + std::to_string(max_num_tokens) +
+                " images=" + std::to_string(max_num_images) + " cache=" + JStr(env, cache_dir) +
+                " benchmark=" + (enable_benchmark ? "true" : "false") +
+                " speculative=" + Opt(GetOptionalBoolean(env, enable_speculative_decoding)) +
+                " npu=" + JStr(env, main_npu_native_library_dir) + "|" + JStr(env, vision_npu_native_library_dir) + "|" +
+                JStr(env, audio_npu_native_library_dir) + " threads=" + std::to_string(main_backend_num_threads) + "/" +
+                std::to_string(audio_backend_num_threads) + " vision_tokens=" + std::to_string(max_vision_tokens_per_image) +
+                " activation=" + std::to_string(activation_data_type);
+  return reinterpret_cast<jlong>(new FakeEngine{JStr(env, backend)});
+}
+
+JNIEXPORT void JNICALL JNI_METHOD(nativeDeleteEngine)(JNIEnv* env, jclass thiz, jlong engine_pointer) {
+  delete reinterpret_cast<FakeEngine*>(engine_pointer);
+  g_last_call = "delete engine";
+}
+
+JNIEXPORT jlong JNICALL JNI_METHOD(nativeCreateSession)(
+    JNIEnv* env, jclass thiz, jlong engine_pointer, jobject sampler_config_obj,
+    jstring lora_path_str, jstring audio_lora_path_str,
+    jobject enable_speculative_decoding) {
+  std::string sampler = "default";
+  if (sampler_config_obj != nullptr) {
+    // CreateSamplerParamsFromJni (v0.18.0): the getters by name and signature
+    jclass sampler_config_cls = env->GetObjectClass(sampler_config_obj);
+    jmethodID get_top_k_mid = env->GetMethodID(sampler_config_cls, "getTopK", "()I");
+    jmethodID get_top_p_mid = env->GetMethodID(sampler_config_cls, "getTopP", "()D");
+    jmethodID get_temperature_mid = env->GetMethodID(sampler_config_cls, "getTemperature", "()D");
+    jmethodID get_seed_mid = env->GetMethodID(sampler_config_cls, "getSeed", "()I");
+    if (!get_top_k_mid || !get_top_p_mid || !get_temperature_mid || !get_seed_mid) return 0;
+    char buf[160];
+    snprintf(buf, sizeof buf, "top_p k=%d p=%.2f t=%.2f seed=%d", env->CallIntMethod(sampler_config_obj, get_top_k_mid),
+             env->CallDoubleMethod(sampler_config_obj, get_top_p_mid),
+             env->CallDoubleMethod(sampler_config_obj, get_temperature_mid),
+             env->CallIntMethod(sampler_config_obj, get_seed_mid));
+    sampler = buf;
+    env->DeleteLocalRef(sampler_config_cls);
+  }
+  if (engine_pointer == 0) {
+    ThrowLiteRtLmJniException(env, "Failed to create session: engine is null");
+    return 0;
+  }
+  g_last_call = "session sampler=" + sampler + " lora=" + JStr(env, lora_path_str) + " audio_lora=" +
+                JStr(env, audio_lora_path_str) + " speculative=" + Opt(GetOptionalBoolean(env, enable_speculative_decoding));
+  return reinterpret_cast<jlong>(new FakeSession{sampler});
+}
+
+JNIEXPORT void JNICALL JNI_METHOD(nativeDeleteSession)(JNIEnv* env, jclass thiz, jlong session_pointer) {
+  delete reinterpret_cast<FakeSession*>(session_pointer);
+  g_last_call += " | session deleted";
+}
+
+JNIEXPORT jstring JNICALL JNI_METHOD(nativeGenerateContent)(
+    JNIEnv* env, jclass thiz, jlong session_pointer, jobjectArray input_data) {
+  std::vector<InputData> contents = GetNativeInputData(env, input_data);
+  if (env->ExceptionCheck()) {
+    return nullptr;
+  }
+  auto* session = reinterpret_cast<FakeSession*>(session_pointer);
+  g_last_call = "generate [" + (session ? session->sampler : std::string("?")) + "] " + Describe(contents);
+  if (TooLong(contents)) {
+    ThrowLiteRtLmJniException(env, "Failed to generate content: INVALID_ARGUMENT: Maximum kv-cache size reached.");
+    return nullptr;
+  }
+  // the fake answer: the first numbered line of the prompt, with turn markers around it as a model might leave them
+  std::string text = contents.empty() ? "" : contents[0].data, line;
+  size_t p = text.find("\n1. ");
+  if (p != std::string::npos) {
+    size_t e = text.find('\n', p + 1);
+    line = text.substr(p + 4, e == std::string::npos ? std::string::npos : e - p - 4);
+  }
+  std::string answer = "Ответ: " + line + "<end_of_turn>";
+  return env->NewStringUTF(answer.c_str());
+}
+
+JNIEXPORT void JNICALL JNI_METHOD(nativeCancelProcess)(JNIEnv* env, jclass thiz, jlong session_pointer) {
+  g_last_call = "cancel";
+}
+
 // Test-only: what the fake engine was last asked.
 JNIEXPORT jstring JNICALL Java_LiteRtJniTest_lastCall(JNIEnv* env, jclass) {
   return env->NewStringUTF(g_last_call.c_str());

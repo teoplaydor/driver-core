@@ -85,6 +85,15 @@ public final class NoteText {
     }
 
     /** What the note says, for its meaning: the boxes left out, blank lines dropped. */
+    /** The note done: its first line ticked («☑ »), unless it is a box already (a list is ticked item by item). */
+    public static String markDone(String body) {
+        if (body == null || body.isEmpty()) return body;
+        String[] ls = lines(body);
+        if (box(ls[0]) != 0) return body;
+        for (String l : ls) if (box(l) != 0) return body;
+        return DONE + body;
+    }
+
     public static String plain(String body) {
         StringBuilder b = new StringBuilder();
         for (String l : lines(body)) {

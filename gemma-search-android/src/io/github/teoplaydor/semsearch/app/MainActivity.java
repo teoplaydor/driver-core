@@ -57,6 +57,8 @@ public final class MainActivity extends Activity implements Engine.Listener, Vie
             ACTION_OPEN_NOTE = "io.github.teoplaydor.semsearch.OPEN_NOTE", EXTRA_VOICE = "voice";
     /** A note opened in its editor (with ACTION_OPEN_NOTE); a search asked for by voice (the quick note's «найди…»). */
     static final String EXTRA_EDIT = "edit", ACTION_SEARCH = "io.github.teoplaydor.semsearch.SEARCH", EXTRA_QUERY = "query";
+    /** The notes shown (the morning digest tapped). */
+    static final String ACTION_NOTES = "io.github.teoplaydor.semsearch.NOTES";
     private static final int RECENT_LIMIT = 3000;
 
     /** Test hook: thumbnails for items that have no MediaStore entry (screenshots on Robolectric). */
@@ -282,6 +284,13 @@ public final class MainActivity extends Activity implements Engine.Listener, Vie
             noteToOpen = intent.getLongExtra(Reminders.EXTRA_NOTE, -1);
             noteToEdit = intent.getBooleanExtra(EXTRA_EDIT, false);
             openPendingNote();
+            return;
+        }
+        if (ACTION_NOTES.equals(intent.getAction())) {
+            setIntent(new Intent());
+            if (noteEditor != null) noteEditor.done();
+            if (viewer != null) viewer.close();
+            selectFilter(F_NOTES);
             return;
         }
         if (ACTION_SEARCH.equals(intent.getAction())) {
@@ -1941,21 +1950,26 @@ public final class MainActivity extends Activity implements Engine.Listener, Vie
                 });
     }
 
-    private static final int[] REPEATS = {Spoken.ONCE, Spoken.DAILY, Spoken.WEEKDAYS, Spoken.WEEKLY, Spoken.MONTHLY, Spoken.YEARLY};
+    private static final int[] REPEATS = {Spoken.ONCE, Spoken.DAILY, Spoken.WEEKDAYS, Spoken.WEEKLY, Spoken.EVERY_DAYS + 14,
+            Spoken.MONTHLY, Spoken.MONTHLY_LAST, Spoken.EVERY_MONTHS + 3, Spoken.YEARLY};
 
     /** How often a reminder comes again: never, every day, on weekdays, every week, month, year. */
     void chooseRepeat(int current, final Engine.Callback<Integer> cb) {
-        String[] labels = new String[REPEATS.length];
+        final List<Integer> choices = new ArrayList<Integer>();
+        for (int r : REPEATS) choices.add(r);
+        // said in its own way («в последнюю пятницу месяца»): kept among the choices
+        if (!choices.contains(current) && !Spoken.repeatLabel(current).isEmpty()) choices.add(1, current);
+        String[] labels = new String[choices.size()];
         int selected = 0;
-        for (int i = 0; i < REPEATS.length; i++) {
-            String l = REPEATS[i] == Spoken.ONCE ? "не повторять" : Spoken.repeatLabel(REPEATS[i]);
+        for (int i = 0; i < choices.size(); i++) {
+            String l = choices.get(i) == Spoken.ONCE ? "не повторять" : Spoken.repeatLabel(choices.get(i));
             labels[i] = Character.toUpperCase(l.charAt(0)) + l.substring(1);
-            if (REPEATS[i] == current) selected = i;
+            if (choices.get(i) == current) selected = i;
         }
         sheet = Sheet.choose(root, "Повторять", labels, null, selected, new Sheet.Choice() {
             @Override
             public void chosen(int i) {
-                cb.done(REPEATS[i], null);
+                cb.done(choices.get(i), null);
             }
         });
     }
@@ -2306,6 +2320,11 @@ public final class MainActivity extends Activity implements Engine.Listener, Vie
         engine.setPinned(note, pinned);
         toast(pinned ? "Закреплена — первой среди заметок" : "Откреплена");
         if (resultsLabel == null) showRecent(false);
+    }
+
+    @Override
+    public void toCalendar(IndexStore.Item note) {
+        Calendars.add(this, note);
     }
 
     @Override

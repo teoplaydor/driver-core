@@ -158,6 +158,22 @@ public class LiteRtInstallTest {
         LiteRtRuntime.Installed j = rt.install(null);
         check(j != null && "litert-community/embeddinggemma-2-740m-litert-lm".equals(j.repo), "fallback bundle: " + (j == null ? null : j.repo));
 
+        // Gemma for answers: the runtime whose generation JNI we checked (0.18, not 0.19), the generic Gemma 4 E2B file
+        // (not a chip's NPU build, not the web one), in its own directory
+        files.put(g + "/0.18.0/litertlm-android-0.18.0.aar", aar("jni/arm64-v8a/liblitertlm_jni.so"));
+        files.put("/hf/api/models/litert-community/gemma-4-E2B-it-litert-lm?blobs=true", ("{\"siblings\":["
+                + "{\"rfilename\":\"gemma-4-E2B-it_qualcomm_sm8750.litertlm\",\"size\":10},"
+                + "{\"rfilename\":\"gemma-4-E2B-it-web.litertlm\",\"size\":20},"
+                + "{\"rfilename\":\"gemma-4-E2B-it.litertlm\",\"size\":70}]}").getBytes("UTF-8"));
+        files.put("/hf/litert-community/gemma-4-E2B-it-litert-lm/resolve/main/gemma-4-E2B-it.litertlm", new byte[70]);
+        File chatDir = new File(dir.getParentFile(), dir.getName() + "-gemma");
+        LiteRtRuntime chat = LiteRtRuntime.forChat(base + "/maven", base + "/hf", chatDir, null);
+        LiteRtRuntime.Installed c = chat.install(null);
+        check(c != null && "0.18.0".equals(c.version) && "gemma-4-E2B-it.litertlm".equals(c.model)
+                        && "litert-community/gemma-4-E2B-it-litert-lm".equals(c.repo) && chat.modelFile(c).length() == 70,
+                "Gemma for answers: runtime " + (c == null ? null : c.version) + ", " + (c == null ? null : c.model));
+        LiteRtRuntime.deleteTree(chatDir);
+
         // no compatible runtime version
         files.put(g + "/maven-metadata.xml", "<metadata><version>0.17.1</version><version>0.20.0</version></metadata>".getBytes("UTF-8"));
         try {

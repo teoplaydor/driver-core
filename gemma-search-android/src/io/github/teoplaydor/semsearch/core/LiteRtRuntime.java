@@ -30,6 +30,9 @@ public final class LiteRtRuntime {
     /** Embedding JNI (LiteRtLmJni.kt) is the same from 0.18.0 (first with EmbeddingGemma 2) through 0.19. */
     static final int[] MIN_VERSION = {0, 18}, MAX_VERSION = {0, 19};
     public static final String DEFAULT_MODEL_REPO = "litert-community/embeddinggemma-2-740m-litert-lm";
+    /** Gemma 4 E2B (instruction-tuned) for answers in words; its generation JNI is checked against 0.18. */
+    public static final String CHAT_REPO = "litert-community/gemma-4-E2B-it-litert-lm";
+    static final int[] CHAT_MIN_VERSION = {0, 18}, CHAT_MAX_VERSION = {0, 18};
     public static final String ABI = "arm64-v8a";
     public static final String JNI_LIB = "liblitertlm_jni.so";
 
@@ -37,6 +40,8 @@ public final class LiteRtRuntime {
     private final String hfHost;
     private final String token;
     private final File dir;
+    /** The generative Gemma rather than EmbeddingGemma. */
+    private boolean chat;
 
     public LiteRtRuntime(File dir, String token) {
         this(MAVEN, null, dir, token);
@@ -48,6 +53,13 @@ public final class LiteRtRuntime {
         this.hfHost = hfHost;
         this.dir = dir;
         this.token = token;
+    }
+
+    /** The runtime with Gemma 4 E2B (answers in words) instead of EmbeddingGemma. */
+    public static LiteRtRuntime forChat(String maven, String hfHost, File dir, String token) {
+        LiteRtRuntime r = new LiteRtRuntime(maven != null ? maven : MAVEN, hfHost, dir, token);
+        r.chat = true;
+        return r;
     }
 
     public File dir() { return dir; }
@@ -111,21 +123,23 @@ public final class LiteRtRuntime {
     public Installed install(HfRepo.Progress progress) throws IOException {
         if (!dir.exists() && !dir.mkdirs()) throw new IOException("mkdir " + dir);
         // 1. which runtime and which model
-        String version = pickVersion(httpText(maven + "/" + ARTIFACT + "/maven-metadata.xml"));
+        int[] lo = chat ? CHAT_MIN_VERSION : MIN_VERSION, hi = chat ? CHAT_MAX_VERSION : MAX_VERSION;
+        String version = pickVersion(httpText(maven + "/" + ARTIFACT + "/maven-metadata.xml"), lo, hi);
         if (version == null) {
-            throw new IOException("в Google Maven нет версии LiteRT-LM " + MIN_VERSION[0] + "." + MIN_VERSION[1]
-                    + "–" + MAX_VERSION[0] + "." + MAX_VERSION[1] + ".x");
+            throw new IOException("в Google Maven нет версии LiteRT-LM " + lo[0] + "." + lo[1] + "–" + hi[0] + "." + hi[1] + ".x");
         }
         String base = maven + "/" + ARTIFACT + "/" + version + "/litertlm-android-" + version;
         List<String[]> deps = nativeDeps(httpTextOrNull(base + ".pom"));
-        String repo = DEFAULT_MODEL_REPO;
-        try {
-            repo = pickModelRepo(hub(DEFAULT_MODEL_REPO).search("embeddinggemma-2", "litert-community"), repo);
-        } catch (IOException e) {
-            // search is a nicety: the 740M bundle is known to exist
+        String repo = chat ? CHAT_REPO : DEFAULT_MODEL_REPO;
+        if (!chat) {
+            try {
+                repo = pickModelRepo(hub(DEFAULT_MODEL_REPO).search("embeddinggemma-2", "litert-community"), repo);
+            } catch (IOException e) {
+                // search is a nicety: the 740M bundle is known to exist
+            }
         }
         HfRepo hub = hub(repo);
-        HfRepo.RemoteFile model = pickModelFile(hub.listFiles());
+        HfRepo.RemoteFile model = chat ? pickChatFile(hub.listFiles()) : pickModelFile(hub.listFiles());
         if (model == null) throw new IOException("в " + repo + " нет файла .litertlm");
 
         // 2. sizes for one progress bar (the AARs' sizes are only known once they start)
@@ -218,12 +232,16 @@ public final class LiteRtRuntime {
 
     /** Highest released version in [MIN_VERSION, MAX_VERSION] (by major.minor), or null. */
     static String pickVersion(String metadataXml) {
+        return pickVersion(metadataXml, MIN_VERSION, MAX_VERSION);
+    }
+
+    static String pickVersion(String metadataXml, int[] lo, int[] hi) {
         Matcher m = Pattern.compile("<version>\\s*([0-9]+)\\.([0-9]+)\\.([0-9]+)\\s*</version>").matcher(metadataXml);
         String best = null;
         long bestKey = -1;
         while (m.find()) {
             int a = Integer.parseInt(m.group(1)), b = Integer.parseInt(m.group(2)), c = Integer.parseInt(m.group(3));
-            if (cmp(a, b, MIN_VERSION) < 0 || cmp(a, b, MAX_VERSION) > 0) continue;
+            if (cmp(a, b, lo) < 0 || cmp(a, b, hi) > 0) continue;
             long key = ((long) a << 40) | ((long) b << 20) | c;
             if (key > bestKey) {
                 bestKey = key;
@@ -299,6 +317,23 @@ public final class LiteRtRuntime {
         return best;
     }
 
+    /**
+     * Gemma for answers: the generic {@code .litertlm} (CPU and GPU), not a chip's NPU build nor a web one; among
+     * several, the smallest (it has to fit next to everything else in memory).
+     */
+    static HfRepo.RemoteFile pickChatFile(List<HfRepo.RemoteFile> files) {
+        HfRepo.RemoteFile best = null;
+        for (HfRepo.RemoteFile f : files) {
+            String l = f.path.toLowerCase(Locale.ROOT);
+            if (!l.endsWith(".litertlm") || l.contains("web")) continue;
+            boolean chip = false;
+            for (String c : CHIP_MARKERS) chip |= l.contains(c);
+            if (chip) continue;
+            if (best == null || size(f) < size(best)) best = f;
+        }
+        return best;
+    }
+
     private static int rank(HfRepo.RemoteFile f) {
         String l = f.path.toLowerCase(Locale.ROOT);
         return (l.contains("440m") ? 2 : 0) + (l.contains("vision") ? 1 : 0) + (l.indexOf('/') < 0 ? 1 : 0);
@@ -310,13 +345,22 @@ public final class LiteRtRuntime {
 
     // ------------------------------------------------------------------ native libraries
 
+    /** Where LiteRT-LM was loaded from in this process (null: not yet). */
+    private static String loadedFrom;
+
+    public static synchronized String loadedFrom() {
+        return loadedFrom;
+    }
+
     /**
      * Loads the extracted libraries by path. The JNI library may need others first (and LiteRT later opens its
      * GPU accelerator by name, which finds an already-loaded library): load in passes until nothing more loads.
      * Returns the libraries that could not be loaded with the reason (OpenCL-only accelerators fail on phones
      * without OpenCL; that is fine as long as the JNI library loads).
      */
-    public static List<String> load(File libDir, List<String> libs) {
+    public static synchronized List<String> load(File libDir, List<String> libs) {
+        // one LiteRT-LM per process: loaded already (for the other model), its functions serve both
+        if (loadedFrom != null) return new ArrayList<String>();
         List<String> left = new ArrayList<String>(libs);
         // the JNI library last: its dependencies (if separate) are then in place
         if (left.remove(JNI_LIB)) left.add(JNI_LIB);
@@ -339,6 +383,7 @@ public final class LiteRtRuntime {
         if (left.contains(JNI_LIB)) {
             throw new UnsatisfiedLinkError("LiteRT-LM не загрузился: " + errors);
         }
+        loadedFrom = libDir.getPath();
         return errors;
     }
 

@@ -24,6 +24,10 @@
     <uses-permission android:name="android.permission.USE_EXACT_ALARM" />
     <!-- quick notes by voice: the phone's speech recognizer listens for the app -->
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <!-- reminders at places: «когда буду дома», a proximity alert of the phone's own location service -->
+    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+    <uses-permission android:name="android.permission.ACCESS_BACKGROUND_LOCATION" />
 
     <queries>
         <!-- the phone's speech recognizer (Android 11+ hides other apps' services unless named here) -->
@@ -108,7 +112,16 @@
                 <action android:name="io.github.teoplaydor.semsearch.QUICK_NOTE" />
                 <category android:name="android.intent.category.DEFAULT" />
             </intent-filter>
+            <!-- a headset's button held (Bluetooth or wired): «voice command» -->
+            <intent-filter>
+                <action android:name="android.intent.action.VOICE_COMMAND" />
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
         </activity>
+        <!-- a reply to «Быстрая заметка» in the shade or on a watch -->
+        <receiver
+            android:name=".app.QuickReply"
+            android:exported="false" />
         <!-- its own icon in the app list (off until turned on in the settings): phones open «an app» on a gesture -->
         <activity-alias
             android:name=".app.VoiceNote"
@@ -162,6 +175,12 @@
         </service>
         <receiver
             android:name=".app.Reminders"
+            android:exported="false" />
+        <receiver
+            android:name=".app.Digest"
+            android:exported="false" />
+        <receiver
+            android:name=".app.PlaceAlert"
             android:exported="false" />
         <receiver
             android:name=".app.BootReceiver"

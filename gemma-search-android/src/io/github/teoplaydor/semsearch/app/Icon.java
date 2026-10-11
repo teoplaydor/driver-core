@@ -14,7 +14,8 @@ final class Icon extends Drawable {
     static final int SEARCH = 0, CLOSE = 1, BACK = 2, TUNE = 3, IMAGE = 4, SHARE = 5, OPEN = 6, SIMILAR = 7, PLAY = 8,
             PLUS = 9, NOTE = 10, TRASH = 11, CHECK = 12, CHEVRON = 13, STOP = 14, DOWNLOAD = 15, VIDEO = 16, INFO = 17,
             GRID = 18, TAG = 19, ALBUMS = 20, HIDE = 21, SHOW = 22, LOCK = 23, PERSON = 24, SCAN = 25, EDIT = 26, PIN = 27,
-            BELL = 28, MIC = 29, LIST = 30, FILE = 31, AUDIO = 32, PAUSE = 33, FOLDER = 34;
+            BELL = 28, MIC = 29, LIST = 30, FILE = 31, AUDIO = 32, PAUSE = 33, FOLDER = 34, CALENDAR = 35, PLACE = 36, ANSWER = 37,
+            TEXT = 38;
 
     private final int kind;
     private final Paint p = new Paint(Paint.ANTI_ALIAS_FLAG);
@@ -319,6 +320,49 @@ final class Icon extends Drawable {
             case PAUSE:
                 line(c, 9, 6, 9, 18);
                 line(c, 15, 6, 15, 18);
+                break;
+            case CALENDAR: // a page of a calendar: rings on top, a day marked
+                r.set(4, 5.5f, 20, 19.5f);
+                c.drawRoundRect(r, 2.5f, 2.5f, p);
+                line(c, 4, 10, 20, 10);
+                line(c, 8.5f, 3.5f, 8.5f, 7);
+                line(c, 15.5f, 3.5f, 15.5f, 7);
+                r.set(13, 13.5f, 16.5f, 17);
+                c.drawRoundRect(r, 0.8f, 0.8f, p);
+                break;
+            case PLACE: // a map pin
+                path.moveTo(12, 21);
+                path.cubicTo(7, 15.5f, 5.5f, 12.5f, 5.5f, 9.5f);
+                path.cubicTo(5.5f, 5.8f, 8.4f, 3, 12, 3);
+                path.cubicTo(15.6f, 3, 18.5f, 5.8f, 18.5f, 9.5f);
+                path.cubicTo(18.5f, 12.5f, 17, 15.5f, 12, 21);
+                path.close();
+                c.drawPath(path, p);
+                c.drawCircle(12, 9.5f, 2.5f, p);
+                break;
+            case ANSWER: // a speech bubble with a spark: an answer from the notes
+                path.moveTo(5, 5);
+                path.lineTo(19, 5);
+                path.quadTo(20.5f, 5, 20.5f, 6.5f);
+                path.lineTo(20.5f, 15);
+                path.quadTo(20.5f, 16.5f, 19, 16.5f);
+                path.lineTo(11, 16.5f);
+                path.lineTo(7, 20);
+                path.lineTo(7, 16.5f);
+                path.lineTo(5, 16.5f);
+                path.quadTo(3.5f, 16.5f, 3.5f, 15);
+                path.lineTo(3.5f, 6.5f);
+                path.quadTo(3.5f, 5, 5, 5);
+                path.close();
+                c.drawPath(path, p);
+                line(c, 12, 8, 12, 13.5f);
+                line(c, 9.25f, 10.75f, 14.75f, 10.75f);
+                break;
+            case TEXT: // a «T» in a frame: text read on a picture
+                r.set(3.5f, 4.5f, 20.5f, 19.5f);
+                c.drawRoundRect(r, 2.5f, 2.5f, p);
+                line(c, 8, 8.5f, 16, 8.5f);
+                line(c, 12, 8.5f, 12, 16);
                 break;
             case FOLDER:
                 path.moveTo(3.5f, 7);

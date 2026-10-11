@@ -6,7 +6,8 @@ import android.content.Intent;
 
 /**
  * After a reboot: resumes indexing-while-idle if it was on (the background jobs are persisted by themselves); the
- * notes' reminders set again (the engine does that as it opens its index; alarms do not outlive a reboot).
+ * notes' reminders set again (the engine does that as it opens its index; alarms do not outlive a reboot), the places'
+ * too, the morning digest, the quick note in the shade.
  */
 public final class BootReceiver extends BroadcastReceiver {
     @Override
@@ -14,9 +15,13 @@ public final class BootReceiver extends BroadcastReceiver {
         if (!Intent.ACTION_BOOT_COMPLETED.equals(i.getAction())) return;
         if (IdleIndex.enabled(c) && AutoIndex.hasMediaAccess(c)) IdleIndex.start(c);
         final PendingResult held = goAsync();
+        final Context app = c.getApplicationContext();
+        QuickNotes.showShade(app, null);
+        Digest.schedule(app);
         Engine.get(c).afterOpen(new Runnable() {
             @Override
             public void run() {
+                Places.restore(app);
                 if (held != null) held.finish();
             }
         });

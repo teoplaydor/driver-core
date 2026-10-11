@@ -53,6 +53,13 @@ public final class IndexStore {
         public long remind, edited;
         /** How the reminder repeats (Spoken.ONCE, DAILY…). */
         public int repeat;
+        /** A note: the place to remind at (Places' name, null: none), on leaving it rather than coming. */
+        public String place;
+        public boolean leaving;
+        /** A note: its voice recording (a file of the app's), or null. */
+        public String audio;
+        /** A photo: the text read on it (OCR; "" read and none, null not read). */
+        public String ocr;
         float[] norms = new float[DIMS.length];
 
         void computeNorms() {
@@ -85,12 +92,13 @@ public final class IndexStore {
     private HashSet<Long> hidden = new HashSet<Long>();
 
     public IndexStore(Context ctx) {
-        SQLiteOpenHelper helper = new SQLiteOpenHelper(ctx, "index.db", null, 3) {
+        SQLiteOpenHelper helper = new SQLiteOpenHelper(ctx, "index.db", null, 4) {
             @Override
             public void onCreate(SQLiteDatabase d) {
                 d.execSQL("CREATE TABLE items (id INTEGER PRIMARY KEY AUTOINCREMENT, kind INTEGER, media_id INTEGER,"
                         + " uri TEXT, title TEXT, body TEXT, date INTEGER, emb BLOB, pinned INTEGER DEFAULT 0,"
-                        + " remind INTEGER DEFAULT 0, edited INTEGER DEFAULT 0, repeat INTEGER DEFAULT 0)");
+                        + " remind INTEGER DEFAULT 0, edited INTEGER DEFAULT 0, repeat INTEGER DEFAULT 0,"
+                        + " place TEXT, leaving INTEGER DEFAULT 0, audio TEXT, ocr TEXT)");
             }
 
             @Override
@@ -103,10 +111,18 @@ public final class IndexStore {
                 }
                 // 3: reminders that repeat
                 if (o < 3) d.execSQL("ALTER TABLE items ADD COLUMN repeat INTEGER DEFAULT 0");
+                // 4: reminders at places, voice recordings with notes, text read on photos
+                if (o < 4) {
+                    d.execSQL("ALTER TABLE items ADD COLUMN place TEXT");
+                    d.execSQL("ALTER TABLE items ADD COLUMN leaving INTEGER DEFAULT 0");
+                    d.execSQL("ALTER TABLE items ADD COLUMN audio TEXT");
+                    d.execSQL("ALTER TABLE items ADD COLUMN ocr TEXT");
+                }
             }
         };
         db = helper.getWritableDatabase();
-        Cursor c = db.rawQuery("SELECT id, kind, media_id, uri, title, body, date, emb, pinned, remind, edited, repeat FROM items", null);
+        Cursor c = db.rawQuery("SELECT id, kind, media_id, uri, title, body, date, emb, pinned, remind, edited, repeat, place, leaving,"
+                + " audio, ocr FROM items", null);
         try {
             while (c.moveToNext()) {
                 Item it = new Item();
@@ -123,6 +139,10 @@ public final class IndexStore {
                 it.remind = c.getLong(9);
                 it.edited = c.getLong(10);
                 it.repeat = c.getInt(11);
+                it.place = c.getString(12);
+                it.leaving = c.getInt(13) != 0;
+                it.audio = c.getString(14);
+                it.ocr = c.getString(15);
                 it.computeNorms();
                 track(it, true);
                 items.add(it);
@@ -187,6 +207,64 @@ public final class IndexStore {
         v.put("pinned", pinned ? 1 : 0);
         db.update("items", v, "id = ?", new String[]{String.valueOf(it.id)});
         it.pinned = pinned;
+    }
+
+    public synchronized void setPlace(Item it, String place, boolean leaving) {
+        ContentValues v = new ContentValues();
+        v.put("place", place);
+        v.put("leaving", leaving ? 1 : 0);
+        db.update("items", v, "id = ?", new String[]{String.valueOf(it.id)});
+        it.place = place;
+        it.leaving = leaving;
+    }
+
+    public synchronized void setAudio(Item it, String path) {
+        ContentValues v = new ContentValues();
+        v.put("audio", path);
+        db.update("items", v, "id = ?", new String[]{String.valueOf(it.id)});
+        it.audio = path;
+    }
+
+    public synchronized void setOcr(Item it, String text) {
+        ContentValues v = new ContentValues();
+        v.put("ocr", text);
+        db.update("items", v, "id = ?", new String[]{String.valueOf(it.id)});
+        it.ocr = text;
+    }
+
+    /** What the text read on the photos says is ahead (a ticket, an appointment, a warranty), each with its photo. */
+    public synchronized List<io.github.teoplaydor.semsearch.core.PhotoEvent> photoEvents() {
+        List<io.github.teoplaydor.semsearch.core.PhotoEvent> out = new ArrayList<io.github.teoplaydor.semsearch.core.PhotoEvent>();
+        long now = System.currentTimeMillis();
+        java.util.TimeZone tz = java.util.TimeZone.getDefault();
+        for (Item it : items) {
+            if (it.kind != KIND_PHOTO || it.ocr == null || it.ocr.isEmpty() || isHidden(it)) continue;
+            for (io.github.teoplaydor.semsearch.core.PhotoEvent e : io.github.teoplaydor.semsearch.core.PhotoEvent.find(it.ocr, it.date, now, tz)) {
+                e.mediaId = it.mediaId;
+                out.add(e);
+            }
+        }
+        return out;
+    }
+
+    /** Notes that remind at a place. */
+    public synchronized List<Item> placed() {
+        List<Item> out = new ArrayList<Item>();
+        for (Item it : items) if (it.kind == KIND_NOTE && it.place != null) out.add(it);
+        return out;
+    }
+
+    /** Photos whose text has not been read yet (newest first). */
+    public synchronized List<Item> unread(int limit) {
+        List<Item> out = new ArrayList<Item>();
+        for (Item it : items) if (it.kind == KIND_PHOTO && it.ocr == null) out.add(it);
+        Collections.sort(out, new Comparator<Item>() {
+            @Override
+            public int compare(Item a, Item b) {
+                return Long.compare(b.date, a.date);
+            }
+        });
+        return out.size() > limit ? new ArrayList<Item>(out.subList(0, limit)) : out;
     }
 
     public synchronized void setRemind(Item it, long at, int repeat) {

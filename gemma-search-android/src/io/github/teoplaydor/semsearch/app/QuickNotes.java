@@ -76,6 +76,72 @@ final class QuickNotes {
                 : PackageManager.COMPONENT_ENABLED_STATE_DEFAULT, PackageManager.DONT_KILL_APP);
     }
 
+    // ------------------------------------------------------------------ the shade, a watch
+
+    static final String PREF_SHADE = "quick_shade";
+    private static final String CHANNEL = "quick_note";
+
+    static boolean shadeOn(Context c) {
+        return Engine.get(c).prefs().getBoolean(PREF_SHADE, false);
+    }
+
+    static void setShade(Context c, boolean on) {
+        Engine.get(c).prefs().edit().putBoolean(PREF_SHADE, on).apply();
+        if (on) showShade(c, null);
+        else {
+            android.app.NotificationManager nm = (android.app.NotificationManager) c.getSystemService(Context.NOTIFICATION_SERVICE);
+            if (nm != null) nm.cancel("quick", 1);
+        }
+    }
+
+    /**
+     * «Быстрая заметка» in the shade (quiet, at the bottom), answered with text — or by voice on a watch, where phone
+     * notifications come with their replies. {@code status}: what the last reply became.
+     */
+    static void showShade(Context c, CharSequence status) {
+        if (!shadeOn(c)) return;
+        android.app.NotificationManager nm = (android.app.NotificationManager) c.getSystemService(Context.NOTIFICATION_SERVICE);
+        if (nm == null) return;
+        android.app.Notification.Builder b;
+        if (Build.VERSION.SDK_INT >= 26) {
+            try {
+                Class<?> ch = Class.forName("android.app.NotificationChannel");
+                Object channel = ch.getConstructor(String.class, CharSequence.class, int.class)
+                        .newInstance(CHANNEL, "Быстрая заметка в шторке", 2 /* IMPORTANCE_LOW */);
+                android.app.NotificationManager.class.getMethod("createNotificationChannel", ch).invoke(nm, channel);
+                b = (android.app.Notification.Builder) android.app.Notification.Builder.class
+                        .getConstructor(Context.class, String.class).newInstance(c, CHANNEL);
+            } catch (Exception e) {
+                b = new android.app.Notification.Builder(c);
+            }
+        } else {
+            b = new android.app.Notification.Builder(c);
+        }
+        android.app.RemoteInput in = new android.app.RemoteInput.Builder(QuickReply.KEY).setLabel("Заметка или напоминание").build();
+        // a reply needs a mutable PendingIntent (the text is put into it)
+        int mutable = Build.VERSION.SDK_INT >= 31 ? 0x02000000 /* FLAG_MUTABLE */ : 0;
+        android.app.PendingIntent reply = android.app.PendingIntent.getBroadcast(c, 0, new Intent(c, QuickReply.class),
+                android.app.PendingIntent.FLAG_UPDATE_CURRENT | mutable);
+        android.app.PendingIntent voice = android.app.PendingIntent.getActivity(c, 3, intent(c, false),
+                android.app.PendingIntent.FLAG_UPDATE_CURRENT | 0x04000000);
+        b.setSmallIcon(R.drawable.ic_tile_mic)
+                .setContentTitle("Быстрая заметка")
+                .setContentText(status != null ? status : "Ответьте — текст станет заметкой: «завтра в 9 позвонить маме»")
+                .setStyle(new android.app.Notification.BigTextStyle().bigText(status != null ? status
+                        : "Ответьте — текст станет заметкой: «завтра в 9 позвонить маме». На часах — голосом."))
+                .setContentIntent(voice)
+                .setOnlyAlertOnce(true)
+                .setShowWhen(false)
+                .setPriority(android.app.Notification.PRIORITY_LOW)
+                .addAction(new android.app.Notification.Action.Builder(0, "Заметка", reply).addRemoteInput(in).build())
+                .addAction(new android.app.Notification.Action.Builder(0, "Голосом", voice).build());
+        try {
+            nm.notify("quick", 1, b.build());
+        } catch (SecurityException e) {
+            // notifications not allowed
+        }
+    }
+
     // ------------------------------------------------------------------ the tile, the widget
 
     /** Android 13+: the system's own «add this tile?»; false when the phone can't ask (then by hand). */

@@ -9,7 +9,10 @@ import java.util.List;
 import javax.imageio.ImageIO;
 
 import com.google.ai.edge.litertlm.LiteRtLmJniException;
+import com.google.ai.edge.litertlm.SamplerConfig;
 
+import io.github.teoplaydor.semsearch.core.Answers;
+import io.github.teoplaydor.semsearch.core.GemmaChat;
 import io.github.teoplaydor.semsearch.core.ImagePreprocessor;
 import io.github.teoplaydor.semsearch.core.LiteRtEmbedder;
 import io.github.teoplaydor.semsearch.core.LiteRtRuntime;
@@ -133,6 +136,49 @@ public class LiteRtJniTest {
             check(false, "closed engine refuses");
         } catch (IllegalStateException ex) {
             check(true, "closed engine refuses: " + ex.getMessage());
+        }
+        // Gemma for answers: the generative engine, a session with our sampler read through its getters, the prompt
+        // (Cyrillic) as text, the answer with its turn marker taken off; a session per question, freed after
+        try {
+            new GemmaChat(new File(tmp, "missing.litertlm"), LiteRtEmbedder.GPU, 2048, 4, cache);
+            check(false, "missing Gemma throws");
+        } catch (LiteRtLmJniException ge) {
+            check(ge.getMessage().contains("Model file not found"), "missing Gemma: " + ge.getMessage());
+        }
+        GemmaChat chat = new GemmaChat(model, LiteRtEmbedder.GPU, 2048, 4, cache);
+        check(lastCall().equals("engine path=" + model.getPath() + " backend=GPU vision= audio= tokens=2048 images=0 cache=" + cache.getPath()
+                + " benchmark=false speculative=- npu=|| threads=-1/-1 vision_tokens=-1 activation=-1"), "Gemma engine: " + lastCall());
+        String prompt = Answers.prompt("Какой код домофона у Саши?", Arrays.asList("Заметка: Код домофона у Саши: 47К1290", "Заметка: Пароль"));
+        String said = chat.generate(prompt);
+        check(said.equals("Ответ: Заметка: Код домофона у Саши: 47К1290"), "Gemma's answer, its turn marker off: " + said);
+        check(lastCall().startsWith("generate [top_p k=40 p=0.90 t=0.20 seed=1] text[Ответь на вопрос") && lastCall().endsWith("Вопрос: Какой код домофона у Саши?] | session deleted"),
+                "our sampler read by its getters, the prompt as text, the session freed: " + lastCall().substring(0, 50));
+        GemmaChat cpuChat = new GemmaChat(model, LiteRtEmbedder.CPU, 1024, 4, null);
+        check(lastCall().contains("backend=CPU") && lastCall().contains("threads=4/-1") && lastCall().contains("tokens=1024 images=0 cache= "),
+                "Gemma on the CPU: " + lastCall());
+        cpuChat.close();
+        try {
+            StringBuilder huge = new StringBuilder();
+            for (int i = 0; i < 500; i++) huge.append("очень длинная заметка ");
+            chat.generate(huge.toString());
+            check(false, "too long throws");
+        } catch (LiteRtLmJniException ge) {
+            check(ge.getMessage().contains("kv-cache"), "too long for the context: " + ge.getMessage());
+        }
+        chat.close();
+        check("delete engine".equals(lastCall()), "close frees Gemma's engine");
+        try {
+            chat.generate("x");
+            check(false, "closed Gemma refuses");
+        } catch (IllegalStateException ex) {
+            check(true, "closed Gemma refuses");
+        }
+        // sampler settings as LiteRT-LM checks them
+        try {
+            new SamplerConfig(0, 0.9, 0.2, 1);
+            check(false, "topK 0 refused");
+        } catch (IllegalArgumentException ex) {
+            check(true, "topK 0 refused");
         }
         LiteRtRuntime.deleteTree(tmp);
         System.out.println(bad == 0 ? "LITERT JNI OK" : bad + " FAILED");

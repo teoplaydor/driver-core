@@ -18,13 +18,14 @@ import io.github.teoplaydor.semsearch.core.Spoken;
 
 /**
  * Reminders of notes: an alarm at the time set (exact where Android lets the app, else as close as it can while the
- * phone sleeps), then a notification with the note's first line and the rest under it; a tap opens the note, its
- * buttons put it off (10 minutes, an hour, tomorrow morning). A repeating one is set again for its next time. The alarm
+ * phone sleeps), then a notification with the note's first line and the rest under it; a tap opens the note, «Готово»
+ * ticks it, the other buttons put it off (an hour, tomorrow morning). A repeating one is set again for its next time. The alarm
  * carries the note's text (the notification needs no database) and the regular time of a repeating one (a put-off
  * reminder does not move it); after a reboot they are set again.
  */
 public final class Reminders extends BroadcastReceiver {
-    static final String ACTION = "io.github.teoplaydor.semsearch.REMIND", ACTION_SNOOZE = "io.github.teoplaydor.semsearch.SNOOZE";
+    static final String ACTION = "io.github.teoplaydor.semsearch.REMIND", ACTION_SNOOZE = "io.github.teoplaydor.semsearch.SNOOZE",
+            ACTION_DONE = "io.github.teoplaydor.semsearch.DONE";
     static final String EXTRA_NOTE = "note_id", EXTRA_TEXT = "note_text", EXTRA_AT = "remind_at", EXTRA_BASE = "remind_base",
             EXTRA_REPEAT = "remind_repeat", EXTRA_DELAY = "snooze_min";
     /** «Завтра в 9» among the put-off choices. */
@@ -89,6 +90,13 @@ public final class Reminders extends BroadcastReceiver {
                 if (held != null) held.finish();
             }
         };
+        if (ACTION_DONE.equals(i.getAction())) {
+            // done: the notification goes, the note's first line ticked (a repeating one just waits for its next time)
+            NotificationManager nm = (NotificationManager) c.getSystemService(Context.NOTIFICATION_SERVICE);
+            if (nm != null) nm.cancel("note", (int) id);
+            Engine.get(c).markDone(id, done);
+            return;
+        }
         if (ACTION_SNOOZE.equals(i.getAction())) {
             // put off: the notification goes, the alarm comes again then
             NotificationManager nm = (NotificationManager) c.getSystemService(Context.NOTIFICATION_SERVICE);
@@ -158,8 +166,12 @@ public final class Reminders extends BroadcastReceiver {
                 .setPriority(Notification.PRIORITY_HIGH)
                 .setDefaults(Notification.DEFAULT_ALL);
         if (repeat != Spoken.ONCE) b.setSubText(Spoken.repeatLabel(repeat));
+        // «Готово», then put off: an hour, tomorrow morning (the phone shows three; a watch shows them too)
+        Intent d = new Intent(c, Reminders.class).setAction(ACTION_DONE).putExtra(EXTRA_NOTE, id);
+        b.addAction(new Notification.Action.Builder(0, "Готово",
+                PendingIntent.getBroadcast(c, (int) (id * 4), d, PendingIntent.FLAG_UPDATE_CURRENT | 0x04000000)).build());
         int k = 1;
-        for (int[] choice : new int[][]{{10}, {60}, {TOMORROW}}) {
+        for (int[] choice : new int[][]{{60}, {TOMORROW}}) {
             Intent s = new Intent(c, Reminders.class).setAction(ACTION_SNOOZE).putExtra(EXTRA_NOTE, id)
                     .putExtra(EXTRA_DELAY, choice[0]).putExtra(EXTRA_BASE, base);
             PendingIntent pi = PendingIntent.getBroadcast(c, (int) (id * 4 + k++), s, PendingIntent.FLAG_UPDATE_CURRENT | 0x04000000);

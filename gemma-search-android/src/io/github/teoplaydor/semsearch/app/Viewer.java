@@ -119,6 +119,9 @@ final class Viewer extends FrameLayout {
         /** A reminder of the note chosen (or taken away). */
         void remind(IndexStore.Item note);
 
+        /** The note, with its time, to the phone's calendar. */
+        void toCalendar(IndexStore.Item note);
+
         /** A PDF's page as a picture (null when it cannot be drawn), off the main thread. */
         void pdfPage(IndexStore.Item file, int page, Engine.Callback<Bitmap> cb);
     }
@@ -427,6 +430,14 @@ final class Viewer extends FrameLayout {
                     host.remind(it);
                 }
             });
+            if (it.remind > 0) {
+                action(Icon.CALENDAR, "В календарь", new Runnable() {
+                    @Override
+                    public void run() {
+                        host.toCalendar(it);
+                    }
+                });
+            }
             action(Icon.TRASH, "Удалить", new Runnable() {
                 @Override
                 public void run() {

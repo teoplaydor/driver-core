@@ -2546,6 +2546,231 @@ public final class Engine {
         });
     }
 
+    private Chat chat;
+
+    /** Gemma for answers in words (downloaded or not). */
+    synchronized Chat chat() {
+        if (chat == null) chat = new Chat(ctx, prefs, prefs.getString("token", ""));
+        return chat;
+    }
+
+    /** A question to the notes answered: the answer's words, where they come from, other lines found. */
+    public static final class Answer {
+        public String question;
+        /** The answer (null: the notes do not say). */
+        public String text;
+        /** Where it was found: a note, a document, a photo (its text). */
+        public IndexStore.Item source;
+        /** Other lines that may answer, with their sources. */
+        public final List<String> more = new ArrayList<String>();
+        public final List<IndexStore.Item> moreSources = new ArrayList<IndexStore.Item>();
+        /** Said by the generative model (Gemma) from the lines found, rather than one of them as it is. */
+        public boolean generated;
+    }
+
+    /**
+     * A question answered from the notes, documents and texts read on photos: the line that answers it, found by the
+     * question's words and (with the model) by meaning — or, with Gemma downloaded and on, Gemma's answer from the
+     * lines found. «Что купить?»: what is left to tick in the shopping list.
+     */
+    public void answer(final String question, final Callback<Answer> cb) {
+        ml.submit(new Runnable() {
+            @Override
+            public void run() {
+                Answer a = new Answer();
+                a.question = question;
+                try {
+                    if (store != null) answerNow(a);
+                    post(cb, a, null);
+                } catch (Exception e) {
+                    post(cb, a, e);
+                }
+            }
+        });
+    }
+
+    private void answerNow(Answer a) throws Exception {
+        String q = a.question;
+        List<String> keys = io.github.teoplaydor.semsearch.core.Answers.keys(q);
+        // «что купить?»: the list with boxes left (the one with the question's words, else the latest)
+        if (io.github.teoplaydor.semsearch.core.Answers.asksList(q)) {
+            IndexStore.Item best = null;
+            int bestWords = -1;
+            for (IndexStore.Item n : store.notes()) {
+                if (io.github.teoplaydor.semsearch.core.Answers.openItems(n.body) == null) continue;
+                int w = 0;
+                for (String k : keys) if (NoteText.hasWords(n.body, k)) w++;
+                if (w > bestWords || w == bestWords && Math.max(n.date, n.edited) > Math.max(best.date, best.edited)) {
+                    best = n;
+                    bestWords = w;
+                }
+            }
+            if (best != null) {
+                a.text = io.github.teoplaydor.semsearch.core.Answers.openItems(best.body);
+                a.source = best;
+                return;
+            }
+        }
+        // where the answer may be: what shares the question's words, and (with the model) what is nearest in meaning
+        List<IndexStore.Item> cands = new ArrayList<IndexStore.Item>();
+        java.util.Set<Long> seen = new java.util.HashSet<Long>();
+        boolean meaning = model != null && state == State.READY && notesUsable;
+        float[] qv = null;
+        if (meaning) {
+            qv = model.embedQuery(q);
+            IndexStore.Tiers t = store.searchTiers(null, mediaDims(), qv, notesDims(), IndexStore.NOTES | IndexStore.FILES, false, -1);
+            for (IndexStore.Hit h : t.sure) if (cands.size() < 8 && seen.add(h.item.id)) cands.add(h.item);
+            for (IndexStore.Hit h : t.more) if (cands.size() < 8 && seen.add(h.item.id)) cands.add(h.item);
+        }
+        List<IndexStore.Item> all = new ArrayList<IndexStore.Item>(store.notes());
+        all.addAll(store.items(IndexStore.KIND_FILE));
+        for (IndexStore.Item it : store.items(IndexStore.KIND_PHOTO)) if (it.ocr != null && !it.ocr.isEmpty() && !store.isHidden(it)) all.add(it);
+        for (IndexStore.Item it : all) {
+            if (seen.contains(it.id)) continue;
+            String words = textOf(it);
+            for (String k : keys) {
+                if (NoteText.hasWords(words, k)) {
+                    seen.add(it.id);
+                    cands.add(it);
+                    break;
+                }
+            }
+        }
+        List<String[]> sources = new ArrayList<String[]>();
+        for (IndexStore.Item it : cands) sources.add(new String[]{titleOf(it), textOf(it)});
+        List<io.github.teoplaydor.semsearch.core.Answers.Line> lines = io.github.teoplaydor.semsearch.core.Answers.best(q, sources, 8);
+        if (meaning && lines.size() > 1) {
+            // by meaning too: the line nearest the question
+            for (io.github.teoplaydor.semsearch.core.Answers.Line l : lines) {
+                float[] lv = model.embedDocument(l.text);
+                l.score += 2 * cos(qv, lv);
+            }
+            java.util.Collections.sort(lines, new java.util.Comparator<io.github.teoplaydor.semsearch.core.Answers.Line>() {
+                @Override
+                public int compare(io.github.teoplaydor.semsearch.core.Answers.Line x, io.github.teoplaydor.semsearch.core.Answers.Line y) {
+                    return Double.compare(y.score, x.score);
+                }
+            });
+        }
+        if (lines.isEmpty()) return;
+        a.text = io.github.teoplaydor.semsearch.core.Answers.tidy(lines.get(0).text, 220);
+        a.source = cands.get(lines.get(0).source);
+        for (int i = 1; i < lines.size() && a.more.size() < 3; i++) {
+            if (lines.get(i).source == lines.get(0).source && lines.get(i).at == lines.get(0).at) continue;
+            a.more.add(io.github.teoplaydor.semsearch.core.Answers.tidy(lines.get(i).text, 160));
+            a.moreSources.add(cands.get(lines.get(i).source));
+        }
+        // Gemma, when there: an answer in its own words from the lines found
+        Chat chat = chat();
+        if (chat != null && chat.on()) {
+            List<String> passages = new ArrayList<String>();
+            for (io.github.teoplaydor.semsearch.core.Answers.Line l : lines) {
+                passages.add(titleOf(cands.get(l.source)) + ": " + l.text);
+                if (passages.size() >= 6) break;
+            }
+            try {
+                String said = chat.generate(io.github.teoplaydor.semsearch.core.Answers.prompt(q, passages));
+                if (said != null && !said.trim().isEmpty()) {
+                    a.text = said.trim();
+                    a.generated = true;
+                }
+            } catch (Exception e) {
+                android.util.Log.w("SemSearch", "chat", e);
+            }
+        }
+    }
+
+    private static float cos(float[] a, float[] b) {
+        int n = Math.min(a.length, b.length);
+        double d = 0, na = 0, nb = 0;
+        for (int i = 0; i < n; i++) {
+            d += a[i] * b[i];
+            na += a[i] * a[i];
+            nb += b[i] * b[i];
+        }
+        return na == 0 || nb == 0 ? 0 : (float) (d / Math.sqrt(na * nb));
+    }
+
+    /** What an item says in words: a note's text, a document's, the text read on a photo. */
+    static String textOf(IndexStore.Item it) {
+        if (it.kind == IndexStore.KIND_PHOTO) return it.ocr == null ? "" : it.ocr;
+        if (it.kind == IndexStore.KIND_NOTE) return it.body == null ? "" : it.body;
+        return (it.body == null ? "" : it.body);
+    }
+
+    /** «Заметка», a document's name, «Текст на фото». */
+    static String titleOf(IndexStore.Item it) {
+        if (it.kind == IndexStore.KIND_PHOTO) return "Текст на фото";
+        if (it.kind == IndexStore.KIND_NOTE) return "Заметка";
+        return it.title == null ? "Документ" : it.title;
+    }
+
+    /** The note reminds at a place (null: nowhere), on coming there or leaving; its alert set or taken away. */
+    public void setPlace(final IndexStore.Item it, final String place, final boolean leaving) {
+        it.place = place;
+        it.leaving = leaving;
+        ml.submit(new Runnable() {
+            @Override
+            public void run() {
+                store.setPlace(it, place, leaving);
+                if (place == null) Places.disarm(ctx, it.id);
+                else Places.arm(ctx, it);
+                notifyChanged();
+            }
+        });
+    }
+
+    /** «Готово» on a reminder: the note's first line ticked (unless it repeats, or is a list or ticked already). */
+    void markDone(final long id, final Runnable then) {
+        ml.submit(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    IndexStore.Item it = store == null ? null : store.find(id);
+                    if (it == null || it.kind != IndexStore.KIND_NOTE || it.repeat != Spoken.ONCE) return;
+                    if (it.remind > 0) {
+                        it.remind = 0;
+                        store.setRemind(it, 0);
+                        Reminders.cancel(ctx, it.id);
+                    }
+                    String body = NoteText.markDone(it.body);
+                    if (!body.equals(it.body)) {
+                        it.body = body;
+                        store.updateBody(it, body);
+                    }
+                    notifyChanged();
+                } finally {
+                    then.run();
+                }
+            }
+        });
+    }
+
+    /**
+     * When the event a note names comes, by the notes: «день рождения Оли» → «День рождения Оли — 15 марта» → its next
+     * 15 March at 9:00; 0 when no note says (the most recently changed one wins).
+     */
+    public void findEventDate(final String event, final Callback<Long> cb) {
+        ml.submit(new Runnable() {
+            @Override
+            public void run() {
+                long best = 0, bestAt = -1;
+                if (store != null && event != null) {
+                    for (IndexStore.Item n : store.notes()) {
+                        if (!Spoken.about(n.body, event)) continue;
+                        long d = Spoken.dateIn(n.body, System.currentTimeMillis(), java.util.TimeZone.getDefault());
+                        long when = Math.max(n.date, n.edited);
+                        if (d > 0 && when > bestAt) {
+                            best = d;
+                            bestAt = when;
+                        }
+                    }
+                }
+                post(cb, best, null);
+            }
+        });
+    }
+
     /** The next of a repeating reminder after {@code base} still ahead of now. */
     static long nextRepeat(long base, int repeat) {
         long now = System.currentTimeMillis(), next = base;
@@ -2624,7 +2849,11 @@ public final class Engine {
     }
 
     public void deleteItem(final IndexStore.Item it) {
-        if (it.kind == IndexStore.KIND_NOTE) Reminders.cancel(ctx, it.id);
+        if (it.kind == IndexStore.KIND_NOTE) {
+            Reminders.cancel(ctx, it.id);
+            if (it.place != null) Places.disarm(ctx, it.id);
+            if (it.audio != null) new java.io.File(it.audio).delete();
+        }
         ml.submit(new Runnable() {
             @Override
             public void run() {

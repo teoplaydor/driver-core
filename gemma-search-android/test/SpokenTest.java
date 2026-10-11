@@ -53,6 +53,21 @@ public class SpokenTest {
                 + (ok ? "" : "   expected «" + text.replace("\n", " | ") + "» " + fmt(want) + (repeat != 0 ? " " + Spoken.repeatLabel(repeat) : "")));
     }
 
+    static void place(String said, String place, boolean leaving, String text) {
+        Spoken.Result r = Spoken.parse(said, NOW, TZ);
+        boolean ok = place.equals(r.place) && r.leaving == leaving && r.text.equals(text) && r.remindAt == 0 && !r.wantsReminder;
+        if (!ok) bad++;
+        System.out.println((ok ? "ok   " : "FAIL ") + "«" + said + "» → «" + r.text + "» at «" + r.place + "»" + (r.leaving ? " leaving" : "")
+                + (r.wantsReminder ? " [ask]" : "") + (r.remindAt != 0 ? " " + fmt(r.remindAt) : ""));
+    }
+
+    static void question(String said, String q) {
+        Spoken.Result r = Spoken.parse(said, NOW, TZ);
+        boolean ok = q.equals(r.question);
+        if (!ok) bad++;
+        System.out.println((ok ? "ok   " : "FAIL ") + "«" + said + "» → question «" + r.question + "»");
+    }
+
     static void search(String said, String query) {
         Spoken.Result r = Spoken.parse(said, NOW, TZ);
         boolean ok = query.equals(r.query);
@@ -98,6 +113,84 @@ public class SpokenTest {
         check("каждый вечер в 22 выключить роутер", "Выключить роутер", "2026-10-14 22:00", Spoken.DAILY);
         check("каждый месяц 5 числа показания счётчиков", "Показания счётчиков", "2026-11-05 09:00", Spoken.MONTHLY);
         check("по средам в 18 бассейн", "Бассейн", "2026-10-14 18:00", Spoken.WEEKLY);
+        // by the month, every few days or months
+        check("напомни в последний день месяца оплатить аренду", "Оплатить аренду", "2026-10-31 09:00", 0);
+        check("каждый последний день месяца сдавать показания", "Сдавать показания", "2026-10-31 09:00", Spoken.MONTHLY_LAST);
+        check("в первый понедельник месяца планёрка", "Планёрка", "2026-11-02 09:00", 0);
+        check("каждую последнюю пятницу месяца в 17 отчёт", "Отчёт", "2026-10-30 17:00", Spoken.MONTHLY_NTH + 50 + Calendar.FRIDAY);
+        check("каждые 2 недели в субботу уборка", "Уборка", "2026-10-17 09:00", Spoken.EVERY_DAYS + 14);
+        check("каждые 3 дня полить кактус", "Полить кактус", "2026-10-15 09:00", Spoken.EVERY_DAYS + 3);
+        check("раз в квартал платить налоги", "Платить налоги", "2026-10-15 09:00", Spoken.EVERY_MONTHS + 3);
+        check("раз в полгода менять фильтр", "Менять фильтр", "2026-10-15 09:00", Spoken.EVERY_MONTHS + 6);
+        check("в конце месяца сдать отчёт", "Сдать отчёт", "2026-10-31 09:00", 0);
+        check("в начале месяца оплатить кружок", "Оплатить кружок", "2026-11-01 09:00", 0);
+        check("в середине месяца проверить счёт", "Проверить счёт", "2026-10-15 09:00", 0);
+        check("в конце недели позвонить бабушке", "Позвонить бабушке", "2026-10-16 09:00", 0);
+        check("на следующей неделе записаться к врачу", "Записаться к врачу", "2026-10-19 09:00", 0);
+        // before something
+        check("за день до 15 марта оплатить налог", "Оплатить налог", "2027-03-14 09:00", 0);
+        check("за 2 часа до поезда в 18:40 взять паспорт", "До поезда взять паспорт", "2026-10-14 16:40", 0);
+        check("за полчаса до встречи в 16:00 распечатать договор", "До встречи распечатать договор", "2026-10-14 15:30", 0);
+        Spoken.Result gift = Spoken.parse("напомни за день до дня рождения Оли купить подарок", NOW, TZ);
+        boolean ev = "дня рождения Оли".equals(gift.beforeEvent) && gift.beforeMs == 86_400_000L && gift.remindAt == 0
+                && gift.wantsReminder && gift.text.equals("До дня рождения Оли купить подарок");
+        Spoken.Result trip = Spoken.parse("за неделю до отпуска оформить страховку", NOW, TZ);
+        ev &= "отпуска".equals(trip.beforeEvent) && trip.beforeMs == 7 * 86_400_000L && trip.text.equals("До отпуска оформить страховку");
+        if (!ev) bad++;
+        System.out.println((ev ? "ok   " : "FAIL ") + "before an event without a date: «" + gift.beforeEvent + "» − " + gift.beforeMs / 3_600_000L
+                + " h → «" + gift.text + "»; «" + trip.beforeEvent + "» → «" + trip.text + "»");
+        // its date in a note
+        long bday = Spoken.dateIn("День рождения Оли — 15 марта", NOW, TZ);
+        boolean found = fmt(bday).startsWith("2027-03-15 09:00") && Spoken.about("День рождения Оли — 15 марта", "дня рождения Оли")
+                && Spoken.about("У Оли день рожденья 15.03", "дня рождения Оли") && !Spoken.about("День рождения Саши 2 мая", "дня рождения Оли")
+                && Spoken.dateIn("Купить молоко", NOW, TZ) == 0 && fmt(Spoken.dateIn("Оля 21.10", NOW, TZ)).startsWith("2026-10-21 09:00");
+        if (!found) bad++;
+        System.out.println((found ? "ok   " : "FAIL ") + "the event's date in a note: " + fmt(bday));
+        // where
+        place("когда буду в магазине купить хлеб", "Магазин", false, "Купить хлеб");
+        place("напомни когда приду домой полить цветы", "Дом", false, "Полить цветы");
+        place("когда выйду из дома взять ключи", "Дом", true, "Взять ключи");
+        place("когда буду на работе распечатать договор", "Работа", false, "Распечатать договор");
+        place("как приеду на дачу открыть воду", "Дача", false, "Открыть воду");
+        place("когда буду у мамы забрать банки", "У мамы", false, "Забрать банки");
+        // questions to the notes
+        question("какой код от домофона у Саши", "Какой код от домофона у Саши?");
+        question("когда день рождения Оли?", "Когда день рождения Оли?");
+        question("напомни, где я припарковался", "Где я припарковался?");
+        question("сколько стоит интернет", "Сколько стоит интернет?");
+        question("что нужно купить", "Что нужно купить?");
+        boolean notQ = Spoken.parse("когда буду дома позвонить маме", NOW, TZ).question == null
+                && Spoken.parse("напомни когда приду домой полить цветы", NOW, TZ).question == null;
+        if (!notQ) bad++;
+        System.out.println((notQ ? "ok   " : "FAIL ") + "«когда буду дома…» is a place, not a question");
+        // how they read
+        String labels = Spoken.repeatLabel(Spoken.MONTHLY_NTH + 50 + Calendar.FRIDAY) + " | " + Spoken.repeatLabel(Spoken.MONTHLY_NTH + 10 + Calendar.MONDAY)
+                + " | " + Spoken.repeatLabel(Spoken.MONTHLY_NTH + 20 + Calendar.TUESDAY) + " | " + Spoken.repeatLabel(Spoken.MONTHLY_NTH + 50 + Calendar.SUNDAY)
+                + " | " + Spoken.repeatLabel(Spoken.EVERY_DAYS + 14) + " | " + Spoken.repeatLabel(Spoken.EVERY_DAYS + 3) + " | "
+                + Spoken.repeatLabel(Spoken.EVERY_DAYS + 21) + " | " + Spoken.repeatLabel(Spoken.EVERY_MONTHS + 3) + " | "
+                + Spoken.repeatLabel(Spoken.EVERY_MONTHS + 2) + " | " + Spoken.repeatLabel(Spoken.MONTHLY_LAST);
+        boolean lb = labels.equals("в последнюю пятницу месяца | в первый понедельник месяца | во второй вторник месяца | "
+                + "в последнее воскресенье месяца | раз в две недели | каждые 3 дня | каждые 3 недели | раз в квартал | каждые 2 месяца | "
+                + "в последний день месяца");
+        if (!lb) bad++;
+        System.out.println((lb ? "ok   " : "FAIL ") + labels);
+        long lastFri = Spoken.parse("каждую последнюю пятницу месяца в 17 отчёт", NOW, TZ).remindAt;
+        long lastDay = Spoken.parse("каждый последний день месяца сдавать показания", NOW, TZ).remindAt;
+        boolean nm = fmt(Spoken.next(lastFri, Spoken.MONTHLY_NTH + 50 + Calendar.FRIDAY, TZ)).startsWith("2026-11-27 17:00")
+                && fmt(Spoken.next(lastDay, Spoken.MONTHLY_LAST, TZ)).startsWith("2026-11-30 09:00")
+                && fmt(Spoken.next(Spoken.next(lastDay, Spoken.MONTHLY_LAST, TZ), Spoken.MONTHLY_LAST, TZ)).startsWith("2026-12-31 09:00")
+                && fmt(Spoken.next(lastDay, Spoken.EVERY_MONTHS + 3, TZ)).startsWith("2027-01-31 09:00");
+        if (!nm) bad++;
+        System.out.println((nm ? "ok   " : "FAIL ") + "next: the last Friday of November, the last days of November and December, a quarter on");
+        // the calendar's rules
+        String rr = Spoken.rrule(Spoken.WEEKDAYS) + " " + Spoken.rrule(Spoken.MONTHLY_LAST) + " " + Spoken.rrule(Spoken.EVERY_DAYS + 14)
+                + " " + Spoken.rrule(Spoken.EVERY_DAYS + 3) + " " + Spoken.rrule(Spoken.EVERY_MONTHS + 3) + " "
+                + Spoken.rrule(Spoken.MONTHLY_NTH + 50 + Calendar.FRIDAY) + " " + Spoken.rrule(Spoken.MONTHLY_NTH + 10 + Calendar.MONDAY)
+                + " " + Spoken.rrule(Spoken.ONCE);
+        boolean rok = rr.equals("FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR FREQ=MONTHLY;BYMONTHDAY=-1 FREQ=WEEKLY;INTERVAL=2 FREQ=DAILY;INTERVAL=3 "
+                + "FREQ=MONTHLY;INTERVAL=3 FREQ=MONTHLY;BYDAY=-1FR FREQ=MONTHLY;BYDAY=1MO null");
+        if (!rok) bad++;
+        System.out.println((rok ? "ok   " : "FAIL ") + "calendar rules: " + rr);
         // lists, the rest
         check("Купить молоко, хлеб и сыр", "Купить:\n☐ молоко\n☐ хлеб\n☐ сыр", null, 0);
         check("ну короче надо сделать отчёт, позвонить в банк и записаться к врачу",
