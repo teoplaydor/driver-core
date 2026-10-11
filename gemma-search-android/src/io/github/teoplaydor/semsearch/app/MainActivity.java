@@ -2509,6 +2509,55 @@ public final class MainActivity extends Activity implements Engine.Listener, Vie
     }
 
     @Override
+    public boolean canRead() {
+        return engine.ocrInstalled();
+    }
+
+    /** The text read on a photo in a sheet: copied with a tap; a ticket's or a receipt's time offered as a reminder. */
+    @Override
+    public void showText(final IndexStore.Item photo) {
+        if (photo.ocr == null) toast("Читаю текст на фото…");
+        engine.textOf(photo, new Engine.Callback<String>() {
+            @Override
+            public void done(final String text, Exception e) {
+                if (e != null || text == null) {
+                    toast("Текст не прочитался" + (e != null && e.getMessage() != null ? ": " + e.getMessage() : ""));
+                    return;
+                }
+                if (text.isEmpty()) {
+                    toast("Текста на фото не нашлось");
+                    return;
+                }
+                List<io.github.teoplaydor.semsearch.core.PhotoEvent> found = io.github.teoplaydor.semsearch.core.PhotoEvent.find(text,
+                        photo.date, System.currentTimeMillis(), java.util.TimeZone.getDefault());
+                final io.github.teoplaydor.semsearch.core.PhotoEvent ev = found.isEmpty() ? null : found.get(0);
+                String head = ev == null ? "" : "Найдено: " + ev.title
+                        + (io.github.teoplaydor.semsearch.core.PhotoEvent.WARRANTY.equals(ev.kind) ? "" : ", " + NoteEditor.when(ev.at)) + "\n\n";
+                sheet = Sheet.message(root, "Текст на фото", head + text, ev != null ? "Напомнить " + ev.beforeLabel() : "Копировать",
+                        new Runnable() {
+                            @Override
+                            public void run() {
+                                if (ev == null) {
+                                    android.content.ClipboardManager cm = (android.content.ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
+                                    if (cm != null) cm.setPrimaryClip(android.content.ClipData.newPlainText("Текст на фото", text));
+                                    toast("Скопировано");
+                                    return;
+                                }
+                                askNotifications();
+                                PhotoAlerts.remind(MainActivity.this, photo.id, ev.title, ev.at, ev.before, new Engine.Callback<IndexStore.Item>() {
+                                    @Override
+                                    public void done(IndexStore.Item it, Exception err) {
+                                        toast(err != null ? "Не сохранилось" : "Напомнит " + NoteEditor.when(it.remind));
+                                        if (viewer != null) viewer.refreshNote();
+                                    }
+                                });
+                            }
+                        });
+            }
+        });
+    }
+
+    @Override
     public void toCalendar(IndexStore.Item note) {
         Calendars.add(this, note);
     }

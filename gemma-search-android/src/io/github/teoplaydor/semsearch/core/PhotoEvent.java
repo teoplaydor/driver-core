@@ -75,10 +75,11 @@ public final class PhotoEvent {
         List<Stamp> stamps = stamps(t, now, tz);
 
         // a receipt with a warranty
-        Matcher w = Pattern.compile("гарант[а-я]*(?:\\s+[а-я]+){0,2}[\\s:.-]*(\\d{1,2})\\s*(мес[а-я.]*|г(?:од[а-я]*|\\.)?|лет)", F).matcher(low);
+        Matcher w = Pattern.compile("(?:гарант[а-я]*|warranty|guarantee)(?:\\s+[а-яa-z]+){0,2}[\\s:.-]*(\\d{1,2})\\s*(мес[а-я.]*|months?|"
+                + "г(?:од[а-я]*|\\.)?|лет|years?)", F).matcher(low);
         if (w.find()) {
             int n = Integer.parseInt(w.group(1));
-            int months = w.group(2).startsWith("мес") ? n : 12 * n;
+            int months = w.group(2).startsWith("мес") || w.group(2).startsWith("month") ? n : 12 * n;
             long bought = taken > 0 ? taken : now;
             for (Stamp s : stamps(t, 0, tz)) if (s.at <= now + 86_400_000L && s.at > now - 10L * 365 * 86_400_000L) {
                 bought = s.at;
@@ -113,11 +114,11 @@ public final class PhotoEvent {
             Matcher fm = Pattern.compile("(?:рейс|flight)[\\s:№#]*([A-ZА-Я0-9]{2}\\s?-?\\d{2,4})", F).matcher(t);
             if (fm.find()) no = fm.group(1).toUpperCase(Locale.ROOT).replaceAll("\\s|-", " ").replaceAll("\\s+", " ").trim();
             title = "Рейс" + (no != null ? " " + no : "") + route(t);
-        } else if (has(low, "поезд|вагон|ржд|плацкарт|купе|электричк|ласточк|сапсан|отправление")) {
+        } else if (has(low, "поезд|вагон|ржд|плацкарт|купе|электричк|ласточк|сапсан|отправление|train|departure")) {
             kind = TRAIN;
             before = 2 * 3_600_000L;
-            anchor = "отправлен|отпр";
-            m = Pattern.compile("поезд[\\s:№#]*(\\d{2,4}[а-яa-z]?)", F).matcher(t);
+            anchor = "отправлен|отпр|departure";
+            m = Pattern.compile("(?:поезд|train)[\\s:№#]*(\\d{2,4}[а-яa-z]?)", F).matcher(t);
             title = "Поезд" + (m.find() ? " " + m.group(1).toUpperCase(Locale.ROOT) : "") + route(t);
         } else if (has(low, "автобус|автовокзал|рейс автобуса|перевозчик")) {
             kind = BUS;
@@ -248,8 +249,8 @@ public final class PhotoEvent {
 
     /** « Москва — Казань» when the text names two places with a dash or an arrow between, else "". */
     private static String route(String t) {
-        Matcher m = Pattern.compile("([А-ЯЁ][А-ЯЁа-яё-]{2,}(?: [А-ЯЁ][А-ЯЁа-яё-]{2,})?) *(?:—|–|-|→|->|>) *([А-ЯЁ][А-ЯЁа-яё-]{2,}"
-                + "(?: [А-ЯЁ][А-ЯЁа-яё-]{2,})?)").matcher(t);
+        Matcher m = Pattern.compile("([А-ЯЁA-Z][А-ЯЁа-яёA-Za-z-]{2,}(?: [А-ЯЁA-Z][А-ЯЁа-яёA-Za-z-]{2,})?) *(?:—|–|-|→|->|>) *"
+                + "([А-ЯЁA-Z][А-ЯЁа-яёA-Za-z-]{2,}(?: [А-ЯЁA-Z][А-ЯЁа-яёA-Za-z-]{2,})?)").matcher(t);
         while (m.find()) {
             String a = cap(m.group(1)), b = cap(m.group(2));
             if (a.equalsIgnoreCase(b)) continue;
@@ -259,10 +260,14 @@ public final class PhotoEvent {
     }
 
     private static String cap(String s) {
-        String l = s.toLowerCase(Locale.ROOT);
         StringBuilder b = new StringBuilder();
-        for (String w : l.split(" ")) {
+        for (String raw : s.split(" ")) {
             if (b.length() > 0) b.append(' ');
+            if (raw.length() <= 3 && raw.equals(raw.toUpperCase(Locale.ROOT)) && b.length() > 0) {
+                b.append(raw); // an airport's or a station's code: SVO, AER
+                continue;
+            }
+            String w = raw.toLowerCase(Locale.ROOT);
             String[] parts = w.split("-");
             for (int i = 0; i < parts.length; i++) {
                 if (i > 0) b.append('-');

@@ -125,6 +125,12 @@ final class Viewer extends FrameLayout {
         /** The place the note reminds at chosen (or taken away). */
         void choosePlace(IndexStore.Item note);
 
+        /** The text read on the photo (and what it says is ahead: a reminder offered). */
+        void showText(IndexStore.Item photo);
+
+        /** Whether text can be read on photos (the OCR models are there). */
+        boolean canRead();
+
         /** A PDF's page as a picture (null when it cannot be drawn), off the main thread. */
         void pdfPage(IndexStore.Item file, int page, Engine.Callback<Bitmap> cb);
     }
@@ -476,6 +482,14 @@ final class Viewer extends FrameLayout {
                     @Override
                     public void run() {
                         host.setHidden(it, !hidden);
+                    }
+                });
+            }
+            if (it.kind == IndexStore.KIND_PHOTO && (host.canRead() || it.ocr != null && !it.ocr.isEmpty())) {
+                action(Icon.TEXT, "Текст", new Runnable() {
+                    @Override
+                    public void run() {
+                        host.showText(it);
                     }
                 });
             }

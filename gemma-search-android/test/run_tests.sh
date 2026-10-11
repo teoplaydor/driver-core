@@ -4,6 +4,7 @@
 #   2. pipeline parity   — EmbeddingGemma2 (Java + ONNX Runtime) vs transformers.js EmbeddingGemma2Model
 #                          on a dummy model with the same ONNX inputs/outputs (text, images, video)
 #                          and SigLIP 2 (the fast photo model) vs transformers.js SiglipText/VisionModel
+#   2a'. OCR             — text on pictures (PaddleOCR models on ONNX Runtime) vs RapidOCR: same text, same boxes
 #   2d. LiteRT-LM        — our Java side against a stand-in library with LiteRT-LM 0.18's own JNI glue
 #                          (engine settings, prompts, budgets, batches, errors), install from mock
 #                          Google Maven + Hub (version, arm64 libraries, bundle choice, resume)
@@ -49,6 +50,13 @@ java -Xmx3g -cp "$T/cls:build/deps/ort-classes:$T/ort-desktop.jar" PipelineParit
 cp test/parity/reference_audio.mjs "$T/reference_audio.mjs"
 (cd "$T" && node reference_audio.mjs "$PWD/models" dummy > reference_audio.json)
 java -Xmx3g -cp "$T/cls:build/deps/ort-classes:$T/ort-desktop.jar" AudioParityTest "$T/models/dummy" "$T/reference_audio.json"
+
+echo "== 2a'. text on pictures (OCR) vs RapidOCR 3.10 with its bundled PP-OCRv6 models"
+python3 -m pip install -q rapidocr==3.10.0 shapely pyclipper opencv-python-headless onnxruntime pillow
+python3 test/ocr/reference_ocr.py "$T/ocr" 2>&1 | grep -v "INFO\|WARNING" || true
+RAPID=$(python3 -c "import os, rapidocr; print(os.path.join(os.path.dirname(rapidocr.__file__), 'models'))")
+javac --release 8 -nowarn -encoding UTF-8 -cp "$T/cls:$T/ort-desktop.jar" -d "$T/cls" test/ocr/OcrParityTest.java
+java -Dfile.encoding=UTF-8 -Dstdout.encoding=UTF-8 -cp "$T/cls:$T/ort-desktop.jar" OcrParityTest "$T/ocr" "$RAPID"
 
 echo "== 2b. Russian stemmer vs Snowball, query bridge"
 python3 -m pip install -q snowballstemmer

@@ -52,6 +52,10 @@ final class SettingsPanel extends FrameLayout implements Engine.Listener {
     private Toggle chatToggle;
     private View chatToggleRow;
     private ProgressLine chatProgress;
+    private TextView ocrValue, ocrNote, ocrButton, ocrDelete;
+    private Toggle ocrToggle;
+    private View ocrToggleRow;
+    private ProgressLine ocrProgress;
 
     SettingsPanel(MainActivity activity) {
         super(activity);
@@ -93,6 +97,7 @@ final class SettingsPanel extends FrameLayout implements Engine.Listener {
         buildModel();
         buildQuick();
         buildPlaces();
+        buildText();
         buildChat();
         buildIndex();
         buildSoundAndFiles();
@@ -988,6 +993,62 @@ final class SettingsPanel extends FrameLayout implements Engine.Listener {
         }
     }
 
+    private void buildText() {
+        final Context c = getContext();
+        LinearLayout card = section("Текст на фото");
+        ocrValue = row(card, "Распознавание текста", "скриншоты и снимки документов читаются в фоне: их текст находится поиском по "
+                + "словам, а билеты, записи к врачу и чеки с гарантией предлагают напоминание. PaddleOCR (кириллица и латиница), "
+                + "на телефоне", null);
+        ocrNote = note(card);
+        ocrProgress = progress(card);
+        ocrButton = action(card, "Скачать модели текста (≈20 МБ)", true, new Runnable() {
+            @Override
+            public void run() {
+                e.downloadOcr();
+                onEngineChanged();
+            }
+        });
+        ocrToggle = new Toggle(c, e.ocrOn());
+        ocrToggle.setListener(new Toggle.Listener() {
+            @Override
+            public void changed(boolean on) {
+                e.setOcrOn(on);
+            }
+        });
+        ocrToggleRow = toggleRow(card, "Читать в фоне", "скриншоты и документы после индексации; любое фото — кнопкой «Текст» в "
+                + "просмотре", ocrToggle);
+        ocrDelete = quiet(card, "Удалить модели текста", Ui.TEXT2, new Runnable() {
+            @Override
+            public void run() {
+                Sheet.confirm(root(), "Удалить модели текста?", "Прочитанный текст останется в поиске.", "Удалить", new Runnable() {
+                    @Override
+                    public void run() {
+                        e.deleteOcr();
+                    }
+                });
+            }
+        });
+    }
+
+    private void showText() {
+        if (ocrValue == null) return;
+        boolean inst = e.ocrInstalled();
+        ocrValue.setText(e.ocrDownloading ? "загрузка" : !inst ? "не скачано" : e.ocrReading ? e.ocrDone + " из " + e.ocrTotal
+                : e.ocrOn() ? "включено" : "выключено");
+        ocrValue.setTextColor(inst && e.ocrOn() ? Ui.ACCENT : Ui.TEXT2);
+        String note = e.ocrDlError != null ? e.ocrDlError : "";
+        ocrNote.setText(note);
+        ocrNote.setVisibility(note.isEmpty() ? GONE : VISIBLE);
+        boolean busy = e.ocrDownloading || e.ocrReading && e.ocrTotal > 0;
+        ocrProgress.setVisibility(busy ? VISIBLE : GONE);
+        if (e.ocrDownloading && e.ocrDlTotal > 0) ocrProgress.setProgress(e.ocrDlDone / (float) e.ocrDlTotal);
+        else if (e.ocrReading && e.ocrTotal > 0) ocrProgress.setProgress(e.ocrDone / (float) e.ocrTotal);
+        ocrButton.setVisibility(inst || e.ocrDownloading ? GONE : VISIBLE);
+        ocrToggleRow.setVisibility(inst ? VISIBLE : GONE);
+        if (ocrToggle.isOn() != e.ocrOn()) ocrToggle.setOn(e.ocrOn(), false);
+        ocrDelete.setVisibility(inst ? VISIBLE : GONE);
+    }
+
     private void buildChat() {
         final Context c = getContext();
         LinearLayout card = section("Ответы своими словами");
@@ -1070,6 +1131,7 @@ final class SettingsPanel extends FrameLayout implements Engine.Listener {
         digestValue.setText(String.format(java.util.Locale.ROOT, "%d:%02d", at / 60, at % 60));
         rowOf(digestValue).setVisibility(Digest.on(getContext()) ? VISIBLE : GONE);
         showPlaces();
+        showText();
         showChat();
     }
 

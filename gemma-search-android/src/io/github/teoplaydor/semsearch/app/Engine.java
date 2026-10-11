@@ -1209,8 +1209,15 @@ public final class Engine {
         if ((kinds & IndexStore.NOTES) != 0) texts.addAll(store.notes());
         if ((kinds & IndexStore.FILES) != 0) texts.addAll(store.items(IndexStore.KIND_FILE));
         if ((kinds & IndexStore.AUDIO) != 0) texts.addAll(store.items(IndexStore.KIND_AUDIO));
+        // photos by the text read on them (a code on a screenshot, a name on a receipt)
+        if ((kinds & IndexStore.PHOTOS) != 0) {
+            for (IndexStore.Item p : store.items(IndexStore.KIND_PHOTO)) {
+                if (p.ocr != null && !p.ocr.isEmpty() && !store.isHidden(p)) texts.add(p);
+            }
+        }
         for (IndexStore.Item n : texts) {
-            String words = n.kind == IndexStore.KIND_NOTE ? n.body : (n.title == null ? "" : n.title) + "\n" + (n.body == null ? "" : n.body);
+            String words = n.kind == IndexStore.KIND_NOTE ? n.body : n.kind == IndexStore.KIND_PHOTO ? n.ocr
+                    : (n.title == null ? "" : n.title) + "\n" + (n.body == null ? "" : n.body);
             if (NoteText.hasWords(words, query)) {
                 exact.add(new IndexStore.Hit(n, 1f));
                 ids.add(n.id);
@@ -1637,6 +1644,252 @@ public final class Engine {
      */
     static final int FACE_SCAN = 2;
     static final float FACE_SCORE = 0.75f;
+    // ------------------------------------------------------------------ text on photos (OCR)
+
+    /** RapidOCR 3.10's models on ModelScope: PP-OCRv6 detection (small) and East Slavic recognition (PP-OCRv5 mobile). */
+    static final String OCR_BASE = "https://www.modelscope.cn/models/RapidAI/RapidOCR/resolve/v3.10.0/";
+    static final String OCR_DET = "PP-OCRv6_det_small.onnx", OCR_REC = "eslav_PP-OCRv5_rec_mobile.onnx", OCR_DICT = "ppocrv5_eslav_dict.txt";
+    /** {file, its address, SHA-256 (RapidOCR's own; "" for the alphabet)}. */
+    static final String[][] OCR_FILES = {
+            {OCR_DET, OCR_BASE + "onnx/PP-OCRv6/det/PP-OCRv6_det_small.onnx", "090f04abcd9d9a7498bc4ebf677e4cb9bdce1fe4197ddb7e529f1ef44e1ff94f"},
+            {OCR_REC, OCR_BASE + "onnx/PP-OCRv5/rec/eslav_PP-OCRv5_rec_mobile.onnx", "08705d6721849b1347d26187f15a5e362c431963a2a62bfff4feac578c489aab"},
+            {OCR_DICT, OCR_BASE + "paddle/PP-OCRv5/rec/eslav_PP-OCRv5_rec_mobile/ppocrv5_eslav_dict.txt", ""}};
+    /** A photo is read at about this many pixels (its longest side at most OCR_SIDE). */
+    static final long OCR_PIXELS = 2_400_000L;
+    static final int OCR_SIDE = 1600;
+
+    private final ExecutorService ocrPool = Executors.newSingleThreadExecutor();
+    private io.github.teoplaydor.semsearch.core.Ocr ocr;
+    public volatile boolean ocrReading, ocrDownloading;
+    public volatile int ocrDone, ocrTotal;
+    public volatile long ocrDlDone, ocrDlTotal;
+    public volatile String ocrDlError;
+    private volatile boolean stopOcr;
+    /** Tests: OCR with these models instead of the downloaded ones ({det, rec, dict}). */
+    static volatile File[] ocrForTest;
+
+    File ocrDir() {
+        return new File(ctx.getFilesDir(), "ocr");
+    }
+
+    public boolean ocrInstalled() {
+        return ocrForTest != null || onnxFile(new File(ocrDir(), OCR_DET)) && onnxFile(new File(ocrDir(), OCR_REC))
+                && new File(ocrDir(), OCR_DICT).length() > 100;
+    }
+
+    public long ocrBytes() {
+        long n = 0;
+        for (String[] f : OCR_FILES) n += new File(ocrDir(), f[0]).length();
+        return n;
+    }
+
+    /** Reading text on photos on (once the models are there). */
+    public boolean ocrOn() {
+        return prefs.getBoolean("ocr_on", true);
+    }
+
+    public void setOcrOn(boolean on) {
+        prefs.edit().putBoolean("ocr_on", on).apply();
+        if (on) readTexts();
+        else stopOcr = true;
+        notifyChanged();
+    }
+
+    private static String sha256(File f) throws Exception {
+        java.security.MessageDigest md = java.security.MessageDigest.getInstance("SHA-256");
+        java.io.InputStream in = new java.io.FileInputStream(f);
+        try {
+            byte[] buf = new byte[1 << 16];
+            int n;
+            while ((n = in.read(buf)) > 0) md.update(buf, 0, n);
+        } finally {
+            in.close();
+        }
+        StringBuilder b = new StringBuilder();
+        for (byte x : md.digest()) b.append(String.format(java.util.Locale.ROOT, "%02x", x));
+        return b.toString();
+    }
+
+    /** Downloads the OCR models (≈20 MB, checked by their SHA-256), then reads the text on screenshots and documents. */
+    public void downloadOcr() {
+        if (ocrDownloading || ocrInstalled()) return;
+        ocrDownloading = true;
+        ocrDlError = null;
+        ocrDlDone = ocrDlTotal = 0;
+        notifyChanged();
+        net.submit(new Runnable() {
+            @Override
+            public void run() {
+                HfRepo.Progress progress = new HfRepo.Progress() {
+                    @Override
+                    public boolean onProgress(String file, long fd, long ft, long all, long allTotal) {
+                        ocrDlDone = fd;
+                        ocrDlTotal = ft;
+                        notifyChanged();
+                        return true;
+                    }
+                };
+                try {
+                    File dir = ocrDir();
+                    if (!dir.exists() && !dir.mkdirs()) throw new java.io.IOException("не создаётся папка " + dir);
+                    for (String[] f : OCR_FILES) {
+                        File dst = new File(dir, f[0]);
+                        if (dst.length() > 0 && (f[2].isEmpty() || sha256(dst).equals(f[2]))) continue;
+                        dst.delete();
+                        HfRepo.fetch(f[1], null, f[0], -1, dst, 0, -1, progress);
+                        if (!f[2].isEmpty() && !sha256(dst).equals(f[2])) {
+                            dst.delete();
+                            throw new java.io.IOException(f[0] + ": файл не тот (контрольная сумма не сходится)");
+                        }
+                    }
+                    io.github.teoplaydor.semsearch.core.Ocr o = new io.github.teoplaydor.semsearch.core.Ocr(new File(dir, OCR_DET),
+                            new File(dir, OCR_REC), new File(dir, OCR_DICT), 1);
+                    o.close();
+                    Journal.add(ctx, "app", "текст на фото: модели скачаны");
+                } catch (Throwable e) {
+                    ocrDlError = "Модели текста не скачались: " + e.getMessage();
+                    Journal.add(ctx, "app", ocrDlError);
+                } finally {
+                    ocrDownloading = false;
+                    notifyChanged();
+                }
+                readTexts();
+            }
+        });
+    }
+
+    public void deleteOcr() {
+        stopOcr = true;
+        ocrPool.submit(new Runnable() {
+            @Override
+            public void run() {
+                synchronized (Engine.this) {
+                    if (ocr != null) ocr.close();
+                    ocr = null;
+                }
+                deleteTree(ocrDir());
+                notifyChanged();
+            }
+        });
+    }
+
+    private synchronized io.github.teoplaydor.semsearch.core.Ocr ocr() throws Exception {
+        if (ocr == null) {
+            File[] f = ocrForTest != null ? ocrForTest
+                    : new File[]{new File(ocrDir(), OCR_DET), new File(ocrDir(), OCR_REC), new File(ocrDir(), OCR_DICT)};
+            ocr = new io.github.teoplaydor.semsearch.core.Ocr(f[0], f[1], f[2], Math.max(1, Math.min(4, Runtime.getRuntime().availableProcessors() / 2)));
+            ocr.setMaxSide(OCR_SIDE);
+        }
+        return ocr;
+    }
+
+    /** The text on one photo, read now (decoded at about OCR_PIXELS, upright). */
+    private String readText(IndexStore.Item it) throws Exception {
+        ContentResolver cr = ctx.getContentResolver();
+        Bitmap b = Media.decode(cr, Uri.parse(it.uri), Media.orientation(cr, it.mediaId), OCR_PIXELS);
+        try {
+            return io.github.teoplaydor.semsearch.core.Ocr.text(ocr().read(new Media.BitmapSource(b)));
+        } finally {
+            b.recycle();
+        }
+    }
+
+    /** The text on a photo (read now if it has not been), for the viewer's «Текст на фото». */
+    public void textOf(final IndexStore.Item it, final Callback<String> cb) {
+        if (it.ocr != null) {
+            post(cb, it.ocr, null);
+            return;
+        }
+        ocrPool.submit(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    String t = readText(it);
+                    store.setOcr(it, t);
+                    post(cb, t, null);
+                    if (!t.isEmpty()) notifyChanged();
+                } catch (Exception e) {
+                    post(cb, null, e);
+                }
+            }
+        });
+    }
+
+    /**
+     * Whether a photo is worth reading in the background: a screenshot, or a document by the look of it (a page, a
+     * receipt, a ticket — PhotoTags.document); other photos are read when opened.
+     */
+    private boolean worthReading(IndexStore.Item it, PhotoTags tags) {
+        String t = it.title == null ? "" : it.title.toLowerCase(java.util.Locale.ROOT);
+        String u = it.uri == null ? "" : it.uri.toLowerCase(java.util.Locale.ROOT);
+        if (t.startsWith("screenshot") || t.contains("скриншот") || u.contains("screenshot")) return true;
+        return tags != null && it.emb != null && tags.vecs.length > 0 && tags.vecs[0].length == it.emb.length && tags.document(it.emb);
+    }
+
+    /** Reads the text on the screenshots and documents not read yet (newest first), in the background, after indexing. */
+    public void readTexts() {
+        if (!ocrInstalled() || !ocrOn() || store == null) return;
+        synchronized (this) {
+            if (ocrReading) return;
+            ocrReading = true;
+        }
+        stopOcr = false;
+        ocrPool.submit(new Runnable() {
+            @Override
+            public void run() {
+                int read = 0, found = 0, failed = 0;
+                try {
+                    PhotoTags tags = null;
+                    try {
+                        // on the model's thread (the dictionary's vectors are made with it)
+                        if (state == State.READY && photo != null) {
+                            tags = ml.submit(new java.util.concurrent.Callable<PhotoTags>() {
+                                @Override
+                                public PhotoTags call() throws Exception {
+                                    return state == State.READY && photo != null ? photoTags() : null;
+                                }
+                            }).get();
+                        }
+                    } catch (Exception e) {
+                        tags = null;
+                    }
+                    List<IndexStore.Item> todo = new ArrayList<IndexStore.Item>();
+                    for (IndexStore.Item it : store.unread(Integer.MAX_VALUE)) if (worthReading(it, tags)) todo.add(it);
+                    ocrTotal = todo.size();
+                    ocrDone = 0;
+                    if (todo.isEmpty()) return;
+                    notifyChanged();
+                    long last = 0;
+                    for (IndexStore.Item it : todo) {
+                        if (stopOcr || indexing) break; // indexing first: reading goes on after it
+                        try {
+                            String t = readText(it);
+                            store.setOcr(it, t);
+                            read++;
+                            if (!t.isEmpty()) {
+                                found++;
+                                PhotoAlerts.check(ctx, it);
+                            }
+                        } catch (Exception e) {
+                            failed++;
+                            store.setOcr(it, ""); // unreadable: not tried again and again
+                        }
+                        ocrDone++;
+                        if (System.currentTimeMillis() - last > 1000) {
+                            last = System.currentTimeMillis();
+                            notifyChanged();
+                        }
+                    }
+                } finally {
+                    ocrReading = false;
+                    if (read > 0) Journal.add(ctx, "app", "текст на фото: прочитано " + read + ", с текстом " + found
+                            + (failed > 0 ? ", не прочиталось " + failed : ""));
+                    notifyChanged();
+                }
+            }
+        });
+    }
+
     /** About this many pixels of a photo are looked at for faces. */
     static final long FACE_PIXELS = 1_600_000L;
     /** Unnamed people offered, at most. */
@@ -5599,6 +5852,7 @@ public final class Engine {
         notifyChanged();
         refreshAdult();
         scanFaces();
+        readTexts();
     }
 
     public void stopIndex() {

@@ -183,6 +183,9 @@
             android:name=".app.PlaceAlert"
             android:exported="false" />
         <receiver
+            android:name=".app.PhotoAlerts"
+            android:exported="false" />
+        <receiver
             android:name=".app.BootReceiver"
             android:exported="true">
             <intent-filter>
