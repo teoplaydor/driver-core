@@ -56,6 +56,9 @@ final class SettingsPanel extends FrameLayout implements Engine.Listener {
     private Toggle ocrToggle;
     private View ocrToggleRow;
     private ProgressLine ocrProgress;
+    private Toggle stretchToggle, quietToggle;
+    private TextView stretchAccess, stretchAfter;
+    private View quietRow, afterRow;
 
     SettingsPanel(MainActivity activity) {
         super(activity);
@@ -97,6 +100,7 @@ final class SettingsPanel extends FrameLayout implements Engine.Listener {
         buildModel();
         buildQuick();
         buildPlaces();
+        buildWellbeing();
         buildText();
         buildChat();
         buildIndex();
@@ -1004,6 +1008,88 @@ final class SettingsPanel extends FrameLayout implements Engine.Listener {
         }
     }
 
+    private void buildWellbeing() {
+        final Context c = getContext();
+        LinearLayout card = section("Разомнись");
+        TextView how = Ui.text(c, "Мягкое напоминание, когда экран включён слишком долго подряд (засиделись, залипли в ленте). "
+                + "Приложение смотрит только на то, сколько экран горит и какое приложение открыто — без камеры, микрофона и "
+                + "записи. Проверка редкая и почти не расходует батарею.", 13, Ui.TEXT2, Ui.REGULAR);
+        how.setPadding(Ui.dp(c, 18), Ui.dp(c, 12), Ui.dp(c, 18), Ui.dp(c, 4));
+        card.addView(how);
+        stretchToggle = new Toggle(c, Wellbeing.on(c));
+        stretchToggle.setListener(new Toggle.Listener() {
+            @Override
+            public void changed(boolean on) {
+                if (on) {
+                    a.askNotifications();
+                    if (!Wellbeing.hasAccess(c)) {
+                        try {
+                            a.startActivity(Wellbeing.accessSettings());
+                        } catch (Exception e) {
+                            a.toast("Разрешите «Доступ к данным об использовании» в настройках");
+                        }
+                    }
+                }
+                Wellbeing.set(c, on, Wellbeing.after(c), Wellbeing.quiet(c));
+                showWellbeing();
+            }
+        });
+        toggleRow(card, "Напоминать размяться", "когда засиделись с телефоном", stretchToggle);
+        stretchAccess = row(card, "Доступ к статистике", "нужен, чтобы знать, сколько горит экран; выдаётся один раз в "
+                + "системных настройках", new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    a.startActivity(Wellbeing.accessSettings());
+                } catch (Exception e) {
+                    a.toast("Откройте Настройки → Доступ к данным об использовании");
+                }
+            }
+        });
+        stretchAfter = row(card, "Через сколько", null, new Runnable() {
+            @Override
+            public void run() {
+                final int[] opts = {20, 30, 40, 60, 90};
+                String[] labels = new String[opts.length];
+                int sel = 2;
+                for (int i = 0; i < opts.length; i++) {
+                    labels[i] = opts[i] + " мин";
+                    if (opts[i] == Wellbeing.after(c)) sel = i;
+                }
+                Sheet.choose(root(), "Через сколько напоминать", labels, null, sel, new Sheet.Choice() {
+                    @Override
+                    public void chosen(int i) {
+                        Wellbeing.set(c, true, opts[i], Wellbeing.quiet(c));
+                        showWellbeing();
+                    }
+                });
+            }
+        });
+        quietToggle = new Toggle(c, Wellbeing.quiet(c));
+        quietToggle.setListener(new Toggle.Listener() {
+            @Override
+            public void changed(boolean on) {
+                Wellbeing.set(c, Wellbeing.on(c), Wellbeing.after(c), on);
+            }
+        });
+        quietRow = toggleRow(card, "Не ночью", "молчит с 23:00 до 8:00", quietToggle);
+        afterRow = rowOf(stretchAfter);
+    }
+
+    private void showWellbeing() {
+        if (stretchToggle == null) return;
+        Context c = getContext();
+        boolean on = Wellbeing.on(c);
+        if (stretchToggle.isOn() != on) stretchToggle.setOn(on, false);
+        boolean access = Wellbeing.hasAccess(c);
+        rowOf(stretchAccess).setVisibility(on && !access ? VISIBLE : GONE);
+        stretchAccess.setText(access ? "есть" : "выдать");
+        stretchAccess.setTextColor(access ? Ui.TEXT2 : Ui.ACCENT);
+        afterRow.setVisibility(on ? VISIBLE : GONE);
+        quietRow.setVisibility(on ? VISIBLE : GONE);
+        stretchAfter.setText(Wellbeing.after(c) + " мин");
+    }
+
     private void buildText() {
         final Context c = getContext();
         LinearLayout card = section("Текст на фото");
@@ -1142,6 +1228,7 @@ final class SettingsPanel extends FrameLayout implements Engine.Listener {
         digestValue.setText(String.format(java.util.Locale.ROOT, "%d:%02d", at / 60, at % 60));
         rowOf(digestValue).setVisibility(Digest.on(getContext()) ? VISIBLE : GONE);
         showPlaces();
+        showWellbeing();
         showText();
         showChat();
     }
@@ -1149,8 +1236,11 @@ final class SettingsPanel extends FrameLayout implements Engine.Listener {
     @Override
     public void onWindowFocusChanged(boolean focus) {
         super.onWindowFocusChanged(focus);
-        // back from the phone's settings: the assistant may be chosen now
-        if (focus) showQuick();
+        // back from the phone's settings: the assistant may be chosen now, usage access given
+        if (focus) {
+            showQuick();
+            showWellbeing();
+        }
     }
 
     private void buildSoundAndFiles() {

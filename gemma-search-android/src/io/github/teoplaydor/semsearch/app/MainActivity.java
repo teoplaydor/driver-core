@@ -177,6 +177,7 @@ public final class MainActivity extends Activity implements Engine.Listener, Vie
         engine.ensureLoaded();
         if (AutoIndex.hasMediaAccess(this)) AutoIndex.schedule(this);
         resumeIdleIndex();
+        Wellbeing.schedule(this);
         ui.post(new Runnable() {
             @Override
             public void run() {

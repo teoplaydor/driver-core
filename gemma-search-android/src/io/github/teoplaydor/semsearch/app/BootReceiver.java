@@ -18,6 +18,7 @@ public final class BootReceiver extends BroadcastReceiver {
         final Context app = c.getApplicationContext();
         QuickNotes.showShade(app, null);
         Digest.schedule(app);
+        Wellbeing.schedule(app);
         Engine.get(c).afterOpen(new Runnable() {
             @Override
             public void run() {
