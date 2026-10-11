@@ -44,11 +44,11 @@ public final class WristGesture {
     /** The hand still for this long makes the starting position. */
     static final long STILL_MS = 280;
     /** The turn has to start within this long after the hand was still. */
-    static final long FRESH_MS = 350;
+    static final long FRESH_MS = 550;
     /** Leaving the starting position (degrees). */
     static final float START_DEG = 14;
-    /** Still: every sample within this many degrees of their mean. */
-    static final float STILL_DEG = 5;
+    /** Still: every sample within this many degrees of their mean (a real wrist is never perfectly still). */
+    static final float STILL_DEG = 9;
     /** Around the forearm: the turn's axis within this many degrees of it. */
     static final float AXIS_DEG = 40;
     /** Samples per second when the watch has not said. */
@@ -72,6 +72,10 @@ public final class WristGesture {
     // the signal
     private final float[] f = new float[3];
     private boolean primed;
+    // a diagnostic, for the screen: how far the watch is tilted from its slowly-tracked resting posture (degrees)
+    private final float[] ref = new float[3];
+    private boolean refSet;
+    private float diagTilt;
     private float g; // the size of gravity in the watch's units, learnt when the hand is still
     private boolean gSeen;
     private float[] ring = new float[0];
@@ -117,6 +121,11 @@ public final class WristGesture {
     /** The size of gravity measured in the watch's units (0 until the hand was still once). */
     public float gravity() {
         return gSeen ? g : 0;
+    }
+
+    /** For the screen: how far the watch is tilted from its resting posture right now, in degrees. */
+    public float tilt() {
+        return diagTilt;
     }
 
     public long samples() {
@@ -287,6 +296,25 @@ public final class WristGesture {
         }
         float m = norm(f);
         if (m <= 0) return NONE;
+        // the diagnostic tilt: angle between the gravity direction now and a slow average of it (≈3 s)
+        if (!refSet) {
+            ref[0] = f[0] / m;
+            ref[1] = f[1] / m;
+            ref[2] = f[2] / m;
+            refSet = true;
+        } else {
+            float rs = (float) (1 - Math.exp(-2 * Math.PI * (1 / 3.0) / rate));
+            ref[0] += rs * (f[0] / m - ref[0]);
+            ref[1] += rs * (f[1] / m - ref[1]);
+            ref[2] += rs * (f[2] / m - ref[2]);
+            float rn = norm(ref);
+            if (rn > 0) {
+                ref[0] /= rn;
+                ref[1] /= rn;
+                ref[2] /= rn;
+            }
+        }
+        diagTilt = angle(ref, f);
 
         int k = ringAt % ringN;
         ring[4 * k] = f[0] / m;
@@ -374,7 +402,7 @@ public final class WristGesture {
         for (int i = 0; i < ringN; i++) {
             float d = ring[4 * i] * u[0] + ring[4 * i + 1] * u[1] + ring[4 * i + 2] * u[2];
             if (d < cos) return false;
-            if (Math.abs(ring[4 * i + 3] - mm) > 0.08f * mm) return false;
+            if (Math.abs(ring[4 * i + 3] - mm) > 0.15f * mm) return false;
         }
         return true;
     }

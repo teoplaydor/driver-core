@@ -251,6 +251,10 @@ public final class WristLink {
             boolean trusted, notify;
             /** What the watch was last told: 1 stream, 0 pause, -1 nothing yet. */
             int told = -1;
+            /** For the screen: how many sample packets have arrived, the largest tilt seen, and when it was last shown. */
+            long packets;
+            float maxTilt;
+            long shownAt;
 
             Conn(BluetoothDevice dev) {
                 this.dev = dev;
@@ -560,7 +564,23 @@ public final class WristLink {
                 answer(k, WristGesture.EV_LEARNED);
                 return;
             }
-            if (r != WristGesture.RIGHT && r != WristGesture.LEFT) return;
+            if (r == WristGesture.RIGHT || r == WristGesture.LEFT) {
+                // a turn: shown below
+            } else {
+                // samples flowing: show the live tilt now and then, so it is clear the phone sees the movement
+                synchronized (this) {
+                    k.packets++;
+                    k.maxTilt = Math.max(k.maxTilt * 0.9f, k.d.tilt());
+                    long now = System.currentTimeMillis();
+                    if (now - k.shownAt > 900) {
+                        k.shownAt = now;
+                        String learnt = learnt(c) ? "" : " · направление не задано";
+                        setStatus(k.d.platform() + " · " + k.d.rate() + " Гц · наклон " + Math.round(k.maxTilt) + "°" + learnt);
+                        k.maxTilt = k.d.tilt();
+                    }
+                }
+                return;
+            }
             boolean right = r == WristGesture.RIGHT;
             if (!musicPlaying(c)) {
                 remember((right ? "вправо" : "влево") + ", но музыка не играла");
