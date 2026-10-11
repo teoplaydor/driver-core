@@ -300,6 +300,8 @@ public final class QuickNoteActivity extends Activity {
             return;
         }
         triedOther = false;
+        noTape = false;
+        voice = null;
         startRecognizer(onDeviceAvailable());
     }
 
@@ -342,6 +344,17 @@ public final class QuickNoteActivity extends Activity {
                 .putExtra(RecognizerIntent.EXTRA_CALLING_PACKAGE, getPackageName())
                 .putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 2000L)
                 .putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, 1500L);
+        // the voice kept too (Android 13+, when on): the app records, the recognizer listens to the same sound
+        taped = false;
+        if (Engine.get(this).keepVoice() && !noTape) {
+            tape = VoiceTape.start();
+            if (tape != null) {
+                taped = true;
+                i.putExtra(VoiceTape.EXTRA_SOURCE, tape.source()).putExtra(VoiceTape.EXTRA_CHANNELS, 1)
+                        .putExtra(VoiceTape.EXTRA_ENCODING, android.media.AudioFormat.ENCODING_PCM_16BIT)
+                        .putExtra(VoiceTape.EXTRA_RATE, VoiceTape.RATE);
+            }
+        }
         listening = true;
         mic.setListening(true);
         try {
@@ -352,9 +365,18 @@ public final class QuickNoteActivity extends Activity {
         }
     }
 
+    /** The voice being recorded with the recognition; what it recorded once stopped. */
+    private VoiceTape tape;
+    byte[] voice;
+    private boolean taped, noTape;
+
     private void stopRecognizer() {
         listening = false;
         if (mic != null) mic.setListening(false);
+        if (tape != null) {
+            voice = tape.stop();
+            tape = null;
+        }
         if (sr != null) {
             try {
                 sr.cancel();
@@ -422,6 +444,17 @@ public final class QuickNoteActivity extends Activity {
         public void onError(int error) {
             listening = false;
             mic.setListening(false);
+            float heardPeak = tape != null ? tape.peak : 0;
+            if (taped && !noTape && partial.trim().isEmpty() && heardPeak > 0.05f && (error == SpeechRecognizer.ERROR_NO_MATCH
+                    || error == SpeechRecognizer.ERROR_SPEECH_TIMEOUT || error == SpeechRecognizer.ERROR_AUDIO
+                    || error == SpeechRecognizer.ERROR_CLIENT)) {
+                // the recognizer did not take the app's sound though something was said: without the recording, now and on
+                Engine.get(QuickNoteActivity.this).keepVoiceBroken();
+                noTape = true;
+                startRecognizer(onDevice);
+                hint("Скажите ещё раз — запись голоса на этом телефоне не работает, сохраню только текст");
+                return;
+            }
             if (!partial.trim().isEmpty() && error != SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS) {
                 // it stopped after words were heard: those are the note
                 String p = partial;
@@ -601,6 +634,9 @@ public final class QuickNoteActivity extends Activity {
                 }
                 saved = it;
                 if (r.place != null) Engine.get(QuickNoteActivity.this).setPlace(it, r.place, r.leaving);
+                // the voice with it (half a second at least)
+                if (voice != null && voice.length >= VoiceTape.RATE) Engine.get(QuickNoteActivity.this).setVoice(it, VoiceTape.wav(voice));
+                voice = null;
                 pendingDate = dateOf;
                 pendingBefore = r.beforeMs;
                 showSaved(r.wantsReminder && it.remind == 0 && r.place == null && dateOf == null);

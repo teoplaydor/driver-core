@@ -897,6 +897,17 @@ final class SettingsPanel extends FrameLayout implements Engine.Listener {
                 if (!QuickNotes.askForWidget(c)) a.toast("Долгое нажатие на главном экране → «Виджеты» → «Смысловой поиск»");
             }
         });
+        if (android.os.Build.VERSION.SDK_INT >= 33) {
+            final Toggle voice = new Toggle(c, e.keepVoice());
+            voice.setListener(new Toggle.Listener() {
+                @Override
+                public void changed(boolean on) {
+                    e.setKeepVoice(on);
+                }
+            });
+            toggleRow(card, "Сохранять запись голоса", "запись остаётся с заметкой на телефоне — её можно послушать, а со звуковой "
+                    + "частью модели поиск находит её и по звуку", voice);
+        }
         shadeToggle = new Toggle(c, QuickNotes.shadeOn(c));
         shadeToggle.setListener(new Toggle.Listener() {
             @Override

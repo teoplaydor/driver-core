@@ -131,6 +131,9 @@ final class Viewer extends FrameLayout {
         /** Whether text can be read on photos (the OCR models are there). */
         boolean canRead();
 
+        /** The note's voice recording played (or stopped). */
+        void playVoice(IndexStore.Item note);
+
         /** A PDF's page as a picture (null when it cannot be drawn), off the main thread. */
         void pdfPage(IndexStore.Item file, int page, Engine.Callback<Bitmap> cb);
     }
@@ -439,6 +442,14 @@ final class Viewer extends FrameLayout {
                     host.remind(it);
                 }
             });
+            if (it.audio != null) {
+                action(Icon.PLAY, "Запись", new Runnable() {
+                    @Override
+                    public void run() {
+                        host.playVoice(it);
+                    }
+                });
+            }
             action(Icon.PLACE, it.place != null ? (it.leaving ? "Уходя" : it.place) : "У места", new Runnable() {
                 @Override
                 public void run() {

@@ -2508,6 +2508,34 @@ public final class MainActivity extends Activity implements Engine.Listener, Vie
         });
     }
 
+    private android.media.MediaPlayer voicePlayer;
+
+    @Override
+    public void playVoice(IndexStore.Item note) {
+        if (voicePlayer != null) {
+            voicePlayer.release();
+            voicePlayer = null;
+            return;
+        }
+        if (note.audio == null || !new java.io.File(note.audio).exists()) {
+            toast("Записи нет");
+            return;
+        }
+        voicePlayer = android.media.MediaPlayer.create(this, Uri.fromFile(new java.io.File(note.audio)));
+        if (voicePlayer == null) {
+            toast("Запись не играет");
+            return;
+        }
+        voicePlayer.setOnCompletionListener(new android.media.MediaPlayer.OnCompletionListener() {
+            @Override
+            public void onCompletion(android.media.MediaPlayer mp) {
+                mp.release();
+                if (voicePlayer == mp) voicePlayer = null;
+            }
+        });
+        voicePlayer.start();
+    }
+
     @Override
     public boolean canRead() {
         return engine.ocrInstalled();

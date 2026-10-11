@@ -2958,6 +2958,81 @@ public final class Engine {
         return it.title == null ? "Документ" : it.title;
     }
 
+    /** A note's voice recording among the sounds: its id (the note's, marked). */
+    static final long VOICE_BIT = 1L << 61;
+
+    /** Keeping the voice of quick notes (Android 13+; off until turned on, and off for good if it broke recognition). */
+    public boolean keepVoice() {
+        return android.os.Build.VERSION.SDK_INT >= 33 && prefs.getBoolean("keep_voice", false) && !prefs.getBoolean("keep_voice_broken", false);
+    }
+
+    public void setKeepVoice(boolean on) {
+        prefs.edit().putBoolean("keep_voice", on).putBoolean("keep_voice_broken", false).apply();
+    }
+
+    /** The recognizer did not take the app's sound: the voice is not kept on this phone. */
+    void keepVoiceBroken() {
+        prefs.edit().putBoolean("keep_voice_broken", true).apply();
+        Journal.add(ctx, "app", "запись голоса: распознаватель не принял звук приложения — запись отключена");
+    }
+
+    File voiceDir() {
+        return new File(ctx.getFilesDir(), "voice");
+    }
+
+    /**
+     * The note's voice kept (a WAV file of the app's) — and among the sounds, found by what it sounds like, when the
+     * audio encoder is there.
+     */
+    public void setVoice(final IndexStore.Item note, final byte[] wav) {
+        ml.submit(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    File dir = voiceDir();
+                    if (!dir.exists() && !dir.mkdirs()) return;
+                    File f = new File(dir, note.id + ".wav");
+                    java.io.FileOutputStream out = new java.io.FileOutputStream(f);
+                    try {
+                        out.write(wav);
+                    } finally {
+                        out.close();
+                    }
+                    store.setAudio(note, f.getPath());
+                    indexVoice(note);
+                    notifyChanged();
+                } catch (Exception e) {
+                    android.util.Log.w("SemSearch", "voice", e);
+                }
+            }
+        });
+    }
+
+    /** The voice among the sounds (on the model's thread). */
+    private void indexVoice(IndexStore.Item note) {
+        if (note.audio == null || !soundIndexing() || model == null) return;
+        try {
+            File f = new File(note.audio);
+            java.io.InputStream in = new java.io.FileInputStream(f);
+            float[] pcm;
+            try {
+                io.github.teoplaydor.semsearch.core.Pcm.Wav w = io.github.teoplaydor.semsearch.core.Pcm.readWav(in, SOUND_S);
+                pcm = w.rate == io.github.teoplaydor.semsearch.core.Pcm.RATE ? w.samples
+                        : io.github.teoplaydor.semsearch.core.Pcm.resample(w.samples, w.rate, io.github.teoplaydor.semsearch.core.Pcm.RATE);
+            } finally {
+                in.close();
+            }
+            if (pcm.length < io.github.teoplaydor.semsearch.core.Pcm.RATE / 4) return;
+            float[] emb = model.embedAudio(pcm);
+            IndexStore.Item old = store.findMedia(IndexStore.KIND_AUDIO, VOICE_BIT | note.id);
+            if (old != null) store.delete(old);
+            store.add(IndexStore.KIND_AUDIO, VOICE_BIT | note.id, android.net.Uri.fromFile(f).toString(),
+                    "Голосовая заметка: " + NoteText.title(note.body, 40), note.body, note.date, emb);
+        } catch (Exception e) {
+            android.util.Log.w("SemSearch", "voice index", e);
+        }
+    }
+
     /** The note reminds at a place (null: nowhere), on coming there or leaving; its alert set or taken away. */
     public void setPlace(final IndexStore.Item it, final String place, final boolean leaving) {
         it.place = place;
@@ -3105,7 +3180,16 @@ public final class Engine {
         if (it.kind == IndexStore.KIND_NOTE) {
             Reminders.cancel(ctx, it.id);
             if (it.place != null) Places.disarm(ctx, it.id);
-            if (it.audio != null) new java.io.File(it.audio).delete();
+            if (it.audio != null) {
+                new java.io.File(it.audio).delete();
+                ml.submit(new Runnable() {
+                    @Override
+                    public void run() {
+                        IndexStore.Item v = store.findMedia(IndexStore.KIND_AUDIO, VOICE_BIT | it.id);
+                        if (v != null) store.delete(v);
+                    }
+                });
+            }
         }
         ml.submit(new Runnable() {
             @Override
@@ -5004,7 +5088,7 @@ public final class Engine {
         java.util.Set<Long> sounds = AutoIndex.hasAudioAccess(ctx) ? Media.allIds(cr, IndexStore.KIND_AUDIO) : null;
         if (sounds != null) {
             for (IndexStore.Item it : store.items(IndexStore.KIND_AUDIO)) {
-                if ((it.mediaId & Folders.FILE_BIT) == 0 && !sounds.contains(it.mediaId)) {
+                if ((it.mediaId & (Folders.FILE_BIT | VOICE_BIT)) == 0 && !sounds.contains(it.mediaId)) {
                     store.delete(it);
                     gone++;
                 }
