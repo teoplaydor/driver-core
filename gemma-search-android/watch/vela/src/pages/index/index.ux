@@ -11,7 +11,8 @@
 <script>
 /**
  * The watch's side of «tracks by a turn of the wrist»: finds the phone (SemSearch → Настройки → Часы) by its Bluetooth
- * LE service, connects, sends the raw accelerometer, vibrates on the phone's answer. The phone recognises the turn.
+ * LE service, connects, finds the turns in its own accelerometer and sends one short packet per turn (the phone's radio
+ * and processor stay idle in between), vibrates on the phone's answer. The phone decides which way and what to press.
  * Vela lets neither the sensor nor Bluetooth run in the background, so the page keeps the screen on while it works;
  * when the music stops the phone says «pause» and the sensor is switched off until it plays again.
  */
@@ -38,8 +39,9 @@ const NOTIFY_MS = 4000
 const WRITE_MS = 150
 
 /**
- * The accelerometer's pace: «ui» (~16 a second) first; on the S5 «game» gave one value over and over, so a pace whose
- * values never change at all in PROBE_MS is given up for «normal» (~5 a second), which the S5 does deliver live.
+ * The accelerometer's pace: «ui» (~16 a second) first — a quick turn needs it; on the S5 «game» gave one value over and
+ * over, so a pace whose values never change at all in PROBE_MS is given up for «normal» (~5 a second), which the S5 does
+ * deliver live (there a quick turn can fall between two samples).
  */
 const PACES = ['ui', 'normal']
 const PROBE_MS = 2500
@@ -364,31 +366,40 @@ export default {
     if (this.stepTimer) clearTimeout(this.stepTimer)
     this.stepTimer = 0
     this.state = this.feedback === false ? 'подключено (без вибро-отклика)' : 'подключено'
-    // what happens to the samples on the way, on the screen: from the sensor, packed, written, and how the writes ended
+    // what happens on the way, on the screen: samples from the sensor, turns found, writes and how they ended
     this.n = { s: 0, p: 0, w: 0, ok: 0, bad: 0, to: 0, code: '' }
     this.ev = ''
+    this.turn = ''
     this.newPacker()
     this.listen(true)
   },
 
-  /** A fresh packer: it measures the pace again and says HELLO with it (after a change of pace too). */
+  /** A fresh packer: it measures the pace again and says HELLO with it (after a change of pace too); turns found here. */
   newPacker() {
     const self = this
     this.packer = createPacker({
       id: this.id,
       platform: 'vela',
+      turns: true,
       send(buf) {
         self.send(buf)
+      },
+      onTurn(t) {
+        self.turn = Math.round(t.peak) + '° за ' + String(Math.round(t.took / 100) / 10).replace('.', ',') + ' с'
+        self.showDiag()
       }
     })
   },
 
-  /** The counters line: sensor · packets · writes (✓ done, ✗ failed, ⏱ no answer in time) · pace · the phone's last word. */
+  /**
+   * The counters line: the last turn found · sensor samples and pace · turns sent · writes (✓ done, ✗ failed, ⏱ no
+   * answer in time) · the phone's last word.
+   */
   showDiag() {
     const n = this.n
     if (!n) return
-    this.diag = 'датчик ' + n.s + ' · пакеты ' + n.p + ' · записи ' + n.w + ': ✓' + n.ok + ' ✗' + n.bad
-      + (n.code !== '' ? ' (' + n.code + ')' : '') + ' ⏱' + n.to + ' · ' + PACES[this.pace]
+    this.diag = (this.turn ? 'поворот ' + this.turn + ' · ' : '') + 'датчик ' + n.s + ' (' + PACES[this.pace] + ') · повороты '
+      + n.p + ' · записи ' + n.w + ': ✓' + n.ok + ' ✗' + n.bad + (n.code !== '' ? ' (' + n.code + ')' : '') + ' ⏱' + n.to
       + (this.ev ? ' · телефон: ' + this.ev : '')
   },
 
@@ -534,12 +545,15 @@ export default {
       const f1 = function (v) {
         return String(Math.round((Number(v) || 0) * 10) / 10)
       }
+      // and how far the hand is from where it last rested (what a turn is measured by)
+      const fd = this.packer.finder
       this.state = 'x' + f1(ret.x) + ' y' + f1(ret.y) + ' z' + f1(ret.z) + (this.moved ? ' ✓' : ' стоит')
+        + (fd ? ' · наклон ' + Math.round(fd.tilt) + '°' : '')
       this.showDiag()
     }
   },
 
-  /** One write at a time; a slow link loses the oldest samples, not the newest. */
+  /** One write at a time (a packet per turn; queued, in case turns come faster than the link). */
   send(buf) {
     if (this.n && new Uint8Array(buf)[0] !== 0) this.n.p++
     this.queue.push(buf)

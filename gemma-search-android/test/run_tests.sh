@@ -74,8 +74,9 @@ java -Dfile.encoding=UTF-8 -Dstdout.encoding=UTF-8 -cp "$T/cls" PcmTest
 java -Dfile.encoding=UTF-8 -Dstdout.encoding=UTF-8 -cp "$T/cls" SpokenTest
 java -Dfile.encoding=UTF-8 -Dstdout.encoding=UTF-8 -cp "$T/cls" PhotoEventTest
 java -Dfile.encoding=UTF-8 -Dstdout.encoding=UTF-8 -cp "$T/cls" AnswersTest
-# wrist turns from a watch's raw accelerometer: a simulated hand through the Bluetooth packets
-java -Dfile.encoding=UTF-8 -Dstdout.encoding=UTF-8 -cp "$T/cls" WristGestureTest
+# wrist turns: a simulated hand through the Bluetooth packets (raw samples, and turns found on the watch); the streams
+# for the watches' JavaScript finder go to $T/watch
+java -Dfile.encoding=UTF-8 -Dstdout.encoding=UTF-8 -cp "$T/cls" WristGestureTest "$T/watch"
 # the watch apps (Xiaomi Vela, Zepp OS): their protocol module and their pages over stand-ins of the watches' modules,
 # the packets they write recognised by the phone's Java
 node test/watch/proto_test.mjs watch/vela/src/common/proto.js "$T/watch"

@@ -1,7 +1,10 @@
 // The watch apps' protocol (watch/vela/src/common/proto.js, shared by the Vela and Zepp OS apps) run as the watches
 // would run it: a simulated wrist — still, a turn right and back, still, a turn left and back — sampled the way each
 // platform gives it (Vela: about every 20 ms, in m/s², with jitter; Zepp OS: about 25 a second, in cm/s²); the packets
-// it makes are printed as hex, one per line, for the phone's Java (WristJsTest) to read and recognise.
+// it makes — raw samples, and turns found on the watch — are printed as hex, one per line, for the phone's Java
+// (WristJsTest) to read and recognise. And the watches' turn finder over the streams the Java test wrote
+// (OUT_DIR/finder_in.txt, from WristGestureTest): the turns it finds go to finder_js.txt for WristJsTest to compare
+// with the phone's own finder.
 // usage: node test/watch/proto_test.mjs PROTO.js OUT_DIR
 import fs from 'fs'
 import path from 'path'
@@ -45,11 +48,43 @@ for (const [name, dt, jitter, unit] of [['vela', 20, 6, 1], ['zepp', 40, 4, 100]
   console.log(name + ': ' + lines.length + ' packets, hello ' + lines[0])
 }
 
+// the same wrist, the turns found on the watch: HELLO v2, then one TURN packet per turn
+for (const [name, dt, jitter, unit] of [['vela', 60, 12, 1], ['zepp', 40, 4, 100]]) {
+  const lines = []
+  const pk = P.createPacker({ id: 0x0badcafe, platform: name, turns: true, send: (b) => lines.push(hex(b)) })
+  for (const [x, y, z, t] of wrist(segs, dt, jitter, unit)) pk.sample(x, y, z, t)
+  fs.writeFileSync(path.join(out, name + '_turns.hex'), lines.join('\n') + '\n')
+  console.log(name + ' (turns found on the watch): ' + lines.length + ' packets — ' + lines.join(' '))
+}
+
 // the encoders against fixed values (the Java side builds the same and compares)
 fs.writeFileSync(path.join(out, 'fixed.hex'), [
   hex(P.hello(0x0badcafe, 25, 981, 'vela')),
   hex(P.accel(7, [1000, -1000, 32767, -32768, 0, 981, 40000, -40000, 1], 3)),
+  hex(P.hello(0x0badcafe, 16, 981, 'vela', P.VERSION_TURNS)),
+  hex(P.turnPacket(9, 61.6, 344, [0.6, -0.8, 0])),
 ].join('\n') + '\n')
+
+// the turn finder over the Java test's streams: what it finds, for WristJsTest to compare with the Java finder
+const inFile = path.join(out, 'finder_in.txt')
+if (fs.existsSync(inFile)) {
+  const found = []
+  let f = null
+  let name = ''
+  for (const l of fs.readFileSync(inFile, 'ascii').split('\n')) {
+    if (l.startsWith('# ')) {
+      name = l.slice(2).trim()
+      f = P.createFinder()
+      continue
+    }
+    if (!l.trim() || !f) continue
+    const [t, x, y, z] = l.trim().split(' ').map(Number)
+    const r = f.sample(x, y, z, t)
+    if (r) found.push([name, r.peak.toFixed(3), r.took.toFixed(1), r.axis.map((v) => v.toFixed(5)).join(' ')].join(' '))
+  }
+  fs.writeFileSync(path.join(out, 'finder_js.txt'), found.join('\n') + '\n')
+  console.log('finder: ' + found.length + ' turns in the Java test\'s streams')
+}
 
 // the advertisement check: Android's packet with our 128-bit service; another; nothing to check
 const uuid = P.SERVICE.replace(/-/g, '')

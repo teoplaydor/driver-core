@@ -1,5 +1,6 @@
 // The watch's side of «tracks by a turn of the wrist»: finds the phone (SemSearch → Настройки → Часы) by its Bluetooth
-// LE service, connects, sends the raw accelerometer, vibrates on the phone's answer. The phone recognises the turn.
+// LE service, connects, finds the turns in its own accelerometer and sends one short packet per turn (the phone stays
+// idle in between), vibrates on the phone's answer. The phone decides which way and what to press.
 // Zepp OS keeps a page's sensor and Bluetooth only while the page is open, so the screen is kept on while it works;
 // when the music stops the phone says «pause» and the sensor is switched off until it plays again.
 import * as hmUI from '@zos/ui'
@@ -204,7 +205,14 @@ Page({
   linked() {
     this.state.linked = true
     this.show('подключено')
-    this.state.packer = createPacker({ id: this.id, platform: 'zepp', send: (b) => this.send(b) })
+    // the turns are found here, on the watch: one short packet per turn, the phone idle in between
+    this.state.packer = createPacker({
+      id: this.id,
+      platform: 'zepp',
+      turns: true,
+      send: (b) => this.send(b),
+      onTurn: (t) => this.show('поворот ' + Math.round(t.peak) + '° за ' + String(Math.round(t.took / 100) / 10).replace('.', ',') + ' с')
+    })
     this.listen(true)
   },
 

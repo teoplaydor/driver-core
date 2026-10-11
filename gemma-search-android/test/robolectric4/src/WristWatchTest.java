@@ -45,10 +45,10 @@ import io.github.teoplaydor.semsearch.wrist.StreamService;
 
 /**
  * The Wear OS watch app and the phone together, end to end, in one Robolectric runtime: the watch (StreamService) scans
- * for the phone's service, connects, raises the link to bigger packets, switches the phone's answers on, says HELLO;
- * the phone (WristLink) remembers it and, music playing, tells it to stream; the watch's accelerometer (a simulated
- * turn of the wrist, in m/s² as Android gives it) goes out in packets; the phone presses «next» / «previous» and
- * answers, the watch vibrates; the music stops — the watch stops its sensor and lets the processor sleep; the
+ * for the phone's service, connects, switches the phone's answers on, says HELLO (it finds the turns itself); the phone
+ * (WristLink) remembers it and, music playing, tells it to listen; the watch's accelerometer (a simulated turn of the
+ * wrist, in m/s² as Android gives it) is read on the watch, and one packet per turn goes out; the phone presses «next» /
+ * «previous» and answers, the watch vibrates; the music stops — the watch stops its sensor and lets the processor sleep; the
  * connection drops — the watch looks for the phone again. Between the two, the test carries the bytes as the air would.
  */
 @RunWith(RobolectricTestRunner.class)
@@ -166,7 +166,8 @@ public class WristWatchTest {
         settle();
 
         // HELLO taken, the watch remembered; music plays, so: stream
-        assertTrue(WristLink.status(), WristLink.status().contains("wearos") && WristLink.status().contains("25 Гц"));
+        assertTrue(WristLink.status(), WristLink.status().contains("wearos") && WristLink.status().contains("25 Гц")
+                && WristLink.status().contains("распознаёт повороты сам"));
         assertEquals("told to stream", WristGesture.EV_STREAM, w.heard);
         assertTrue("the accelerometer on", ssm.hasListener(w));
         assertTrue("awake while streaming", ShadowPowerManager.getLatestWakeLock().isHeld());
@@ -175,7 +176,7 @@ public class WristWatchTest {
         // a turn to the right: the phone presses «next», the watch buzzes once
         int before = w.sent;
         move(ssm, 0, 1, 70, 0.6, 0, 1);
-        assertTrue("samples went out in big packets: " + (w.sent - before), w.sent - before >= 3 && w.sent - before <= 5);
+        assertEquals("one packet for the turn, found on the watch", 1, w.sent - before);
         assertEquals("next", WristGesture.EV_NEXT, server.lastEvent);
         assertEquals("the watch heard", WristGesture.EV_NEXT, w.heard);
         assertTrue(Arrays.toString(Shadows.shadowOf(vib).getPattern()), Arrays.equals(new long[]{0, 40}, Shadows.shadowOf(vib).getPattern()));

@@ -1,9 +1,9 @@
 // The Xiaomi Vela and Zepp OS watch apps' own page code, run in Node over stand-ins of the watches' system modules
 // (Bluetooth LE client, accelerometer, vibration, screen, storage — with the shapes their docs give): the page finds
-// the phone among other devices, connects, switches the phone's answers on, says HELLO, streams a simulated wrist,
-// one write at a time; vibrates on «next» / «previous»; stops the sensor on «pause» and starts it on «stream»; looks
-// for the phone again when the link drops; stops on «Стоп». The packets it wrote go to a file for the phone's Java
-// (WristJsTest) to recognise: right, then left.
+// the phone among other devices, connects, switches the phone's answers on, says HELLO, finds the turns of a simulated
+// wrist itself and sends one packet per turn, one write at a time; vibrates on «next» / «previous»; stops the sensor on
+// «pause» and starts it on «stream»; looks for the phone again when the link drops; stops on «Стоп». The packets it
+// wrote go to a file for the phone's Java (WristJsTest) to read: right, then left.
 // usage: node test/watch/apps_test.mjs WATCH_DIR OUT_DIR
 import fs from 'fs'
 import path from 'path'
@@ -149,8 +149,9 @@ async function zepp() {
   await flush()
   ok(!W.overlap, 'zepp: one write at a time')
   const sent = W.writes.filter((w) => w[0] === SAMPLES)
-  ok(sent.length > 20 && sent[0][1].startsWith('0001') && Buffer.from(sent[0][1].slice(20), 'hex').toString() === 'zepp',
-    'zepp: HELLO first, then ' + (sent.length - 1) + ' sample packets')
+  ok(sent.length === 3 && sent[0][1].startsWith('0002') && Buffer.from(sent[0][1].slice(20), 'hex').toString() === 'zepp'
+    && sent.slice(1).every((w) => w[1].startsWith('20')),
+    'zepp: HELLO (the watch finds the turns) first, then one packet per turn: ' + (sent.length - 1) + ' — ' + W.text)
   ok(sent.every((w) => w[2] <= 20), 'zepp: every write fits 20 bytes')
   fs.writeFileSync(path.join(out, 'zepp_app.hex'), sent.map((w) => w[1]).join('\n') + '\n')
   // the phone's answers
@@ -239,11 +240,12 @@ async function vela() {
   ok(W.acc && W.acc.interval === 'ui' && page.paceKnown, 'vela: «ui» gave live numbers — kept')
   const sent = W.writes.filter((w) => w[1] === SAMPLES)
   page.showDiag() // (the screen itself is refreshed at most every 0.4 s)
-  const d = page.diag.match(/датчик (\d+) · пакеты (\d+) · записи (\d+): ✓(\d+) ✗(\d+) ⏱(\d+) · ui/)
+  const d = page.diag.match(/^поворот \d+° за [\d,]+ с · датчик (\d+) \(ui\) · повороты (\d+) · записи (\d+): ✓(\d+) ✗(\d+) ⏱(\d+)/)
   ok(d && +d[1] > 200 && +d[2] === sent.length - 1 && +d[3] === sent.length && +d[4] === sent.length && +d[5] === 0,
-    'vela: the counters on the screen — sensor, packets, writes and how they ended («' + page.diag + '»)')
-  ok(sent.length > 20 && sent[0][2].startsWith('0001') && Buffer.from(sent[0][2].slice(20), 'hex').toString() === 'vela',
-    'vela: HELLO first, then ' + (sent.length - 1) + ' sample packets')
+    'vela: the counters on the screen — the last turn, sensor, turns, writes and how they ended («' + page.diag + '»)')
+  ok(sent.length === 3 && sent[0][2].startsWith('0002') && Buffer.from(sent[0][2].slice(20), 'hex').toString() === 'vela'
+    && sent.slice(1).every((w) => w[2].startsWith('20')),
+    'vela: HELLO (the watch finds the turns) first, then one packet per turn: ' + (sent.length - 1))
   ok(sent.every((w) => w[2].length <= 40 && w[0] === SERVICE && Array.isArray(w[3])), 'vela: every write fits 20 bytes, with its service and descriptors')
   fs.writeFileSync(path.join(out, 'vela_app.hex'), sent.map((w) => w[2]).join('\n') + '\n')
   const say = (b) => g.onBLECharacteristicChange({ serviceUuid: SERVICE, characteristicUuid: EVENTS, characteristicValue: new Uint8Array([b]).buffer })
@@ -268,9 +270,13 @@ async function vela() {
   W.gatts[W.gatts.length - 1].onBLEConnectionStateChange(2)
   await flush(); await flush()
   const w0 = W.writes.length
-  for (let i = 0; i < 40; i++) { clock += 20; W.acc && W.acc.callback({ x: 0, y: 9.8 * Math.sin(i / 6), z: 9.8 * Math.cos(i / 6) }); await flush(); await advance(30) }
+  for (const [x, y, z] of wrist([[0, 1.5], [70, 0.4], [0, 0.7], [-70, 0.4], [0, 0.7], [70, 0.4], [0, 0.7]], 50, 1)) {
+    W.acc && W.acc.callback({ x, y, z })
+    await flush()
+    await advance(20)
+  }
   const wrote = W.writes.length - w0
-  ok(wrote >= 3, 'vela: writes keep flowing though no completion comes (' + wrote + ' writes)')
+  ok(wrote === 4, 'vela: writes keep flowing though no completion comes (' + wrote + ' writes: HELLO and three turns)')
   W.hangWrites = false
   page.stop(); await flush(); page.start(); await flush(); await flush(); await flush(); await flush()
 
@@ -344,11 +350,11 @@ async function vela() {
     await advance(0)
   }
   ok(W.acc && W.acc.interval === 'normal' && p2.paceKnown, 'vela (static sensor): «ui» gave one value over and over — «normal» now')
-  const hellos = W.writes.slice(w1).filter((w) => w[1] === SAMPLES && w[2].startsWith('0001'))
+  const hellos = W.writes.slice(w1).filter((w) => w[1] === SAMPLES && w[2].startsWith('0002'))
   ok(hellos.length === 2 && hellos[0][2].slice(12, 16) === '1100' && hellos[1][2].slice(12, 16) === '0500',
     'vela (static sensor): HELLO at ~17 a second, then again at 5 (' + hellos.map((h) => h[2].slice(12, 16)).join(', ') + ')')
   p2.showDiag()
-  ok(/· normal/.test(p2.diag) && /пакеты [1-9]/.test(p2.diag), 'vela (static sensor): streaming at «normal» — «' + p2.diag + '»')
+  ok(/\(normal\)/.test(p2.diag) && /записи [1-9]/.test(p2.diag), 'vela (static sensor): listening at «normal» — «' + p2.diag + '»')
   p2.onDestroy()
 }
 

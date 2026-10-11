@@ -44,9 +44,11 @@ import io.github.teoplaydor.semsearch.core.WristGesture;
 
 /**
  * The watch's side of «tracks by a turn of the wrist»: finds the phone by its Bluetooth LE service, connects, says
- * HELLO and sends the raw accelerometer (25 samples a second, in milli-g) while the phone says music is playing; the
- * phone recognises the turn and answers with a byte, the watch vibrates. When the music stops the phone says «pause»
- * and nothing is sent (the processor may sleep); when the connection drops, the phone is looked for again.
+ * HELLO and, while the phone says music is playing, listens to the accelerometer (25 samples a second) and finds the
+ * turns itself (the phone's own {@link WristGesture.Finder}): one short packet per turn goes to the phone, which decides
+ * which way it was and answers with a byte, the watch vibrates. The phone's radio and processor stay idle in between.
+ * When the music stops the phone says «pause» and the sensor is off (the processor may sleep); when the connection
+ * drops, the phone is looked for again.
  */
 public final class StreamService extends Service implements SensorEventListener {
     static final String ACTION_STOP = "io.github.teoplaydor.semsearch.wrist.STOP";
@@ -56,7 +58,7 @@ public final class StreamService extends Service implements SensorEventListener 
             EVENTS = UUID.fromString(WristGesture.EVENTS),
             CCCD = UUID.fromString("00002902-0000-1000-8000-00805f9b34fb");
     /** More waiting than this and the oldest packets go: the turn is live or it is useless. */
-    static final int MAX_QUEUE = 30;
+    static final int MAX_QUEUE = 8;
     private static final String CHANNEL = "stream";
 
     private static volatile String status = "";
@@ -71,9 +73,11 @@ public final class StreamService extends Service implements SensorEventListener 
     private BluetoothGattCharacteristic samples;
     private boolean linked, streaming, writing;
     private final ArrayDeque<byte[]> queue = new ArrayDeque<byte[]>();
-    private int perPacket = 3, seq;
-    private final short[] buf = new short[3 * 15];
-    private int bufN;
+    private int seq;
+    /** The turns are found here, on the watch; the sample times (ms) by the sensor's clock. */
+    private final WristGesture.Finder finder = new WristGesture.Finder();
+    private long lastNs;
+    private double sampleMs;
     private SensorManager sensors;
     private PowerManager.WakeLock wake;
     private int watchId;
@@ -280,23 +284,10 @@ public final class StreamService extends Service implements SensorEventListener 
                 public void run() {
                     if (g != gatt) return;
                     if (state == BluetoothProfile.STATE_CONNECTED) {
-                        // bigger packets when the link allows: fewer writes for the same samples
-                        if (!g.requestMtu(100)) g.discoverServices();
+                        g.discoverServices();
                     } else if (state == BluetoothProfile.STATE_DISCONNECTED) {
                         lost();
                     }
-                }
-            });
-        }
-
-        @Override
-        public void onMtuChanged(final BluetoothGatt g, final int mtu, int st) {
-            h.post(new Runnable() {
-                @Override
-                public void run() {
-                    if (g != gatt) return;
-                    perPacket = Math.max(3, Math.min(15, (mtu - 3 - 2) / 6));
-                    g.discoverServices();
                 }
             });
         }
@@ -364,7 +355,7 @@ public final class StreamService extends Service implements SensorEventListener 
 
     private void linked() {
         linked = true;
-        send(WristGesture.hello(watchId, RATE, 1000, "wearos"));
+        send(WristGesture.hello(WristGesture.VERSION_TURNS, watchId, RATE, 1000, "wearos"));
         setStatus("подключено · ждёт музыку");
     }
 
@@ -411,7 +402,8 @@ public final class StreamService extends Service implements SensorEventListener 
             return;
         }
         streaming = true;
-        bufN = 0;
+        finder.reset();
+        lastNs = 0;
         wake.acquire(4 * 3_600_000L);
         // 25 a second; the sensor may gather them for up to 0.1 s and hand them over together
         sensors.registerListener(this, acc, 1_000_000 / RATE, 100_000);
@@ -429,14 +421,12 @@ public final class StreamService extends Service implements SensorEventListener 
     @Override
     public void onSensorChanged(SensorEvent e) {
         if (!streaming) return;
-        for (int k = 0; k < 3; k++) {
-            float mg = e.values[k] / SensorManager.GRAVITY_EARTH * 1000f;
-            buf[3 * bufN + k] = (short) Math.max(-32768, Math.min(32767, Math.round(mg)));
-        }
-        bufN++;
-        if (bufN >= perPacket) {
-            send(WristGesture.accel(seq++ & 0xff, buf, 0, bufN));
-            bufN = 0;
+        // the sensor's own time of the sample (batched samples come together but keep their times); without one, the
+        // nominal pace
+        sampleMs += e.timestamp > lastNs && lastNs > 0 ? (e.timestamp - lastNs) / 1e6 : 1000.0 / RATE;
+        lastNs = e.timestamp;
+        if (finder.sample(e.values[0], e.values[1], e.values[2], sampleMs)) {
+            send(WristGesture.turnPacket(seq++ & 0xff, finder.peak(), finder.took(), finder.axis()));
         }
     }
 
@@ -444,7 +434,7 @@ public final class StreamService extends Service implements SensorEventListener 
     public void onAccuracyChanged(Sensor s, int accuracy) {
     }
 
-    /** Queued: one write at a time over Bluetooth; a slow link loses the oldest samples, not the newest. */
+    /** Queued: one write at a time over Bluetooth (HELLO, a packet per turn), each answered by the phone. */
     private void send(byte[] p) {
         queue.add(p);
         while (queue.size() > MAX_QUEUE) queue.poll();
@@ -461,8 +451,7 @@ public final class StreamService extends Service implements SensorEventListener 
     private void pump() {
         if (writing || gatt == null || samples == null || queue.isEmpty()) return;
         byte[] p = queue.peek();
-        boolean hello = ((p[0] & 0xff) >>> 4) == WristGesture.KIND_HELLO;
-        samples.setWriteType(hello ? BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT : BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE);
+        samples.setWriteType(BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT);
         samples.setValue(p);
         try {
             writing = gatt.writeCharacteristic(samples);

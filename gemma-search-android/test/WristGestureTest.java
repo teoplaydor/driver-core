@@ -6,11 +6,13 @@ import java.util.Random;
 
 /**
  * Wrist turns from a watch's raw accelerometer, on a simulated hand: the watch is turned by the motion and its
- * accelerometer reads gravity plus the watch's own acceleration (it sits on the wrist, 3 cm off the forearm's axis),
- * with sensor noise; the samples go through the Bluetooth packets as a watch would send them. Turns right and left on
- * either hand, at 25, 50 and 12 Hz, in milli-g, raw counts or m/s²; a watch with its own axes taught by one turn; and
- * what must not count: raising the hand to look, walking, turning and staying, a small or a slow turn, a lost packet.
- * usage: WristGestureTest
+ * accelerometer reads gravity plus the watch's own acceleration (it sits on the wrist, 2–3.5 cm off the forearm's
+ * axis), with sensor noise; the samples go through the Bluetooth packets as a watch would send them. Turns right and
+ * left on either hand, at 25, 50, 12 and 5 Hz, in milli-g, raw counts or m/s²; quick turns (a quarter of a second)
+ * sampled at any moment, back only roughly where they started; a watch with its own axes taught by one turn; what must
+ * not count: raising the hand to look, walking, turning and staying, a small or a slow turn, a lost packet, half an
+ * hour of everyday movement; and turns found on the watch and sent as TURN packets.
+ * usage: WristGestureTest [DIR — where to write the streams for the watches' JavaScript finder]
  */
 public class WristGestureTest {
     static int bad;
@@ -28,6 +30,8 @@ public class WristGestureTest {
         final Random rnd = new Random(7);
         final List<double[]> out = new ArrayList<double[]>(); // watch-frame specific force, m/s²
         double noise = 0.02 * G;
+        /** Where the samples fall within a sample period (0..1): the same motion sampled a little earlier or later. */
+        double phase;
 
         Sim(int rate) {
             this.rate = rate;
@@ -90,7 +94,7 @@ public class WristGestureTest {
             int n = (int) Math.round(s * rate);
             double h = 1e-3;
             for (int i = 0; i < n; i++) {
-                double t = i / (double) rate;
+                double t = (i + phase) / rate;
                 double th = m.angle(t);
                 double[][] r = rot(axis, th);
                 // the watch's acceleration: the second difference of its position
@@ -190,11 +194,126 @@ public class WristGestureTest {
         System.out.println((ok ? "ok   " : "FAIL ") + what + ": " + names(got) + (ok ? "" : "   expected " + names(w)));
     }
 
+    static void rate(String what, double got, double least) {
+        boolean ok = got >= least;
+        if (!ok) bad++;
+        System.out.println((ok ? "ok   " : "FAIL ") + what + String.format(": %.0f%% found (%.0f%% at least)", 100 * got, 100 * least));
+    }
+
+    /** Out to deg in s/2, back to rem × deg in s/2 (only roughly where it started), held there 1 s. */
+    static Sim flick(Sim sim, final double deg, final double s, final double rem, double r) {
+        final double a = Math.toRadians(deg);
+        return sim.move(FOREARM, new double[]{0, 0, r}, s + 1.0, new Motion() {
+            @Override
+            public double angle(double t) {
+                if (t <= 0) return 0;
+                double x = Math.sin(Math.PI * Math.min(t, s) / s);
+                if (t < s / 2) return a * x * x;
+                if (t < s) return a * (rem + (1 - rem) * x * x);
+                return a * rem;
+            }
+        });
+    }
+
+    /** The share of turns found the right way: both ways, 45–80°, back fully or to 30% off, 0.35 or 1.2 s still before. */
+    static double hits(int rate, double... durs) {
+        int ok = 0, n = 0;
+        long seed = 11;
+        for (double d : durs)
+            for (double deg : new double[]{45, 60, 80})
+                for (double rem : new double[]{0, 0.3})
+                    for (double pre : new double[]{0.35, 1.2})
+                        for (double r : new double[]{0.02, 0.035})
+                            for (int ph = 0; ph < 3; ph++)
+                                for (int dir = -1; dir <= 1; dir += 2) {
+                                    Sim sim = new Sim(rate);
+                                    sim.rnd.setSeed(seed++);
+                                    sim.raise(25, 0.8);
+                                    sim.phase = ph / 3.0;
+                                    sim.still(pre);
+                                    flick(sim, dir * deg, d, rem, r);
+                                    List<Integer> got = run(watch(rate, 0, "x", true), sim, ANDROID, 0, 3, -1);
+                                    n++;
+                                    if (got.size() == 1 && got.get(0) == (dir > 0 ? R : L)) ok++;
+                                }
+        return ok / (double) n;
+    }
+
+    /** Ten minutes of everyday movement: the false turns found. */
+    static int everyday(int rate, long seed) {
+        Random q = new Random(seed);
+        Sim sim = new Sim(rate);
+        sim.rnd.setSeed(seed);
+        double total = 0;
+        while (total < 600) {
+            double s;
+            switch (q.nextInt(7)) {
+                case 0: s = 0.5 + 2.5 * q.nextDouble(); sim.still(s); break;
+                case 1: s = 0.6 + q.nextDouble(); sim.raise(30 + 40 * q.nextDouble(), s); break;
+                case 2: s = 3 + 5 * q.nextDouble(); sim.walk(s); break;
+                case 3: s = 0.4 + 0.8 * q.nextDouble(); sim.turn(FOREARM, (q.nextBoolean() ? 1 : -1) * (8 + 14 * q.nextDouble()), s, true); break;
+                case 4: s = 0.8 + 0.6 * q.nextDouble(); sim.turn(FOREARM, (q.nextBoolean() ? 1 : -1) * (35 + 30 * q.nextDouble()), s, false); sim.still(0.5); break;
+                case 5: s = 2 + q.nextDouble(); sim.turn(FOREARM, (q.nextBoolean() ? 1 : -1) * (40 + 30 * q.nextDouble()), s, true); break;
+                default: s = 0.5 + q.nextDouble(); sim.raise(10 + 15 * q.nextDouble(), s); break;
+            }
+            total += s;
+        }
+        return run(watch(rate, 0, "x", true), sim, ANDROID, 0, 3, -1).size();
+    }
+
+    /**
+     * Streams for the watches' JavaScript finder (test/watch/proto_test.mjs runs it, WristJsTest compares with this
+     * Java one): quick and ordinary turns both ways at the watches' paces, sampled at slightly uneven times, and
+     * everyday movement. Lines «# name», then «t x y z» (ms, m/s²).
+     */
+    static void streams(String out) throws java.io.IOException {
+        StringBuilder sb = new StringBuilder();
+        Random jit = new Random(3);
+        int k = 0;
+        for (int rate : new int[]{5, 16, 25, 50})
+            for (double d : new double[]{0.25, 0.4, 0.7})
+                for (int dir = -1; dir <= 1; dir += 2) {
+                    Sim sim = new Sim(rate);
+                    sim.rnd.setSeed(100 + k);
+                    sim.phase = (k % 4) / 4.0;
+                    sim.raise(20, 0.7).still(0.6);
+                    flick(sim, dir * 65, d, 0.15, 0.03);
+                    sim.still(0.5);
+                    flick(sim, -dir * 55, d, 0, 0.03);
+                    stream(sb, "turns-" + rate + "hz-" + d + "s-" + (dir > 0 ? "right" : "left"), sim, rate, jit);
+                    k++;
+                }
+        for (int rate : new int[]{5, 16, 25}) {
+            Sim sim = new Sim(rate);
+            Random q = new Random(rate);
+            for (int i = 0; i < 40; i++) {
+                switch (q.nextInt(4)) {
+                    case 0: sim.still(0.5 + q.nextDouble()); break;
+                    case 1: sim.raise(30 + 30 * q.nextDouble(), 0.8); break;
+                    case 2: sim.walk(3); break;
+                    default: sim.turn(FOREARM, (q.nextBoolean() ? 1 : -1) * 50, 0.5, true); break;
+                }
+            }
+            stream(sb, "everyday-" + rate + "hz", sim, rate, jit);
+        }
+        java.nio.file.Files.createDirectories(java.nio.file.Paths.get(out));
+        java.nio.file.Files.write(java.nio.file.Paths.get(out, "finder_in.txt"), sb.toString().getBytes(java.nio.charset.StandardCharsets.US_ASCII));
+    }
+
+    static void stream(StringBuilder sb, String name, Sim sim, int rate, Random jit) {
+        sb.append("# ").append(name).append('\n');
+        for (int i = 0; i < sim.out.size(); i++) {
+            double[] v = sim.out.get(i);
+            double t = 1000.0 * i / rate + (i == 0 ? 0 : (jit.nextDouble() - 0.5) * 0.2 * 1000.0 / rate);
+            sb.append(String.format(java.util.Locale.ROOT, "%.1f %.4f %.4f %.4f%n", t, v[0], v[1], v[2]));
+        }
+    }
+
     static final double[] FOREARM = {1, 0, 0};
     static final double[] BACKWARD = {-1, 0, 0};
     static final int R = WristGesture.RIGHT, L = WristGesture.LEFT;
 
-    public static void main(String[] args) {
+    public static void main(String[] args) throws Exception {
         // the packets themselves
         WristGesture h = watch(25, 1000, "wearos", true);
         boolean helloOk = h.hasHello() && h.watchId() == 0x5eed1234 && h.rate() == 25 && h.perG() == 1000 && "wearos".equals(h.platform());
@@ -276,6 +395,59 @@ public class WristGestureTest {
         WristGesture again = watch(25, 1000, "garmin", true);
         again.setRight(ax, true);
         check("learnt axis restored", run(again, new Sim(25).still(1).turn(FOREARM, -70, 0.6, true).still(1), ODD, 1000, 3, -1), L);
+
+        // quick turns: out and back in a quarter to two thirds of a second, sampled at any moment of the motion, the hand
+        // back only roughly where it started, a short pause before — at the paces the watches give
+        for (int rate : new int[]{16, 25, 50}) rate("quick turns at " + rate + " Hz", hits(rate, 0.25, 0.3, 0.4, 0.5, 0.7), 0.93);
+        // 5 Hz (the Xiaomi Watch S5's «normal»): the samples may miss the far end of a quick turn; ordinary ones count
+        rate("ordinary turns at 5 Hz", hits(5, 0.5, 0.7), 0.85);
+        // everyday movement: raising and lowering the hand, walking, small twists, turning to look at the dial and staying,
+        // slow twists and back — 10 minutes at each pace
+        int falses = everyday(25, 1) + everyday(16, 2) + everyday(5, 3);
+        if (falses > 5) bad++;
+        System.out.println((falses <= 5 ? "ok   " : "FAIL ") + "everyday movement, 30 min: " + falses + " false turns (5 at most)");
+
+        // the watch finds the turn itself and sends one TURN packet: the phone decides what it means
+        WristGesture tw = new WristGesture();
+        tw.setRight(null, true);
+        tw.packet(WristGesture.hello(WristGesture.VERSION_TURNS, 0x1234, 16, 981, "vela"));
+        boolean rec = tw.recognises() && tw.rate() == 16 && "vela".equals(tw.platform());
+        if (!rec) bad++;
+        System.out.println((rec ? "ok   " : "FAIL ") + "HELLO v2: the watch recognises turns itself");
+        List<Integer> tg = new ArrayList<Integer>();
+        tg.add(tw.packet(WristGesture.turnPacket(0, 62, 340, new float[]{1, 0, 0})));
+        tg.add(tw.packet(WristGesture.turnPacket(1, 58, 300, new float[]{-0.98f, 0.1f, 0.15f})));
+        check("TURN packets: right, left", tg, R, L);
+        boolean small = tw.packet(WristGesture.turnPacket(2, 31, 280, new float[]{1, 0, 0})) == WristGesture.NONE
+                && Math.round(tw.lastPeak()) == 31 && Math.round(tw.lastTook()) == 280;
+        tw.turn = 30;
+        small &= tw.packet(WristGesture.turnPacket(3, 31, 280, new float[]{1, 0, 0})) == R;
+        small &= tw.packet(WristGesture.turnPacket(4, 60, 300, new float[]{0, 1, 0})) == WristGesture.NONE;
+        if (!small) bad++;
+        System.out.println((small ? "ok   " : "FAIL ") + "TURN packets: 31° is too small at 40°, enough at 30°; around another axis — nothing");
+        tw.learn();
+        tg.clear();
+        tg.add(tw.packet(WristGesture.turnPacket(5, 60, 300, new float[]{0, 0, -1})));
+        tg.add(tw.packet(WristGesture.turnPacket(6, 60, 300, new float[]{0.1f, 0, -0.99f})));
+        check("TURN packets: taught, then that way is right", tg, WristGesture.LEARNED, R);
+        // end to end as a Java watch (Wear OS) does it: its own Finder, then the packets
+        WristGesture.Finder wf = new WristGesture.Finder();
+        WristGesture ph = new WristGesture();
+        ph.setRight(null, true);
+        ph.packet(WristGesture.hello(WristGesture.VERSION_TURNS, 0x77, 25, 1000, "wearos"));
+        Sim both = new Sim(25).still(1).turn(FOREARM, 65, 0.35, true).still(0.8).turn(FOREARM, -65, 0.35, true).still(1);
+        tg.clear();
+        int seqT = 0;
+        for (int i = 0; i < both.out.size(); i++) {
+            double[] v = both.out.get(i);
+            if (wf.sample(v[0], v[1], v[2], i * 40.0)) {
+                int r = ph.packet(WristGesture.turnPacket(seqT++, wf.peak(), wf.took(), wf.axis()));
+                if (r != WristGesture.NONE) tg.add(r);
+            }
+        }
+        check("found on the watch, sent as TURN: quick right, quick left", tg, R, L);
+
+        if (args.length > 0) streams(args[0]);
 
         System.out.println(bad == 0 ? "WRIST GESTURES OK" : bad + " FAILED");
         if (bad != 0) System.exit(1);

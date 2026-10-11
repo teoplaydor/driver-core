@@ -35,9 +35,11 @@ import io.github.teoplaydor.semsearch.core.WristGesture;
 
 /**
  * Tracks by a turn of the wrist: the phone is a small Bluetooth LE device the watch connects to (a GATT server with
- * one service), the watch's own little app streams its raw accelerometer, the phone recognises the turn
- * ({@link WristGesture}) and presses «next» or «previous» like a headset's button would — only while music is playing.
- * Any watch whose apps can be a Bluetooth LE client works; no maker's SDK on the phone.
+ * one service). The watch's own little app recognises the turn itself and sends one short packet per turn — the
+ * phone's radio and processor stay idle in between — or, if it cannot, streams its raw accelerometer and the phone
+ * recognises the turn ({@link WristGesture}). The phone decides what the turn means (big enough, which way) and presses
+ * «next» or «previous» like a headset's button would — only while music is playing. Any watch whose apps can be a
+ * Bluetooth LE client works; no maker's SDK on the phone.
  *
  * <p>Only one watch is listened to: the first that says HELLO is remembered (its random id), others are turned away
  * until the user forgets it. The watch gets a one-byte answer to vibrate on, and «pause» / «stream» as the music stops
@@ -257,6 +259,8 @@ public final class WristLink {
             long shownAt;
             /** Sample packets that came without (or after a refused) HELLO. */
             long unheard;
+            /** The watch's turns already shown on the screen. */
+            long turnsShown;
 
             Conn(BluetoothDevice dev) {
                 this.dev = dev;
@@ -295,8 +299,13 @@ public final class WristLink {
             if (playing == 1) k.d.restart();
             answer(k, playing == 1 ? WristGesture.EV_STREAM : WristGesture.EV_PAUSE);
             // said on the screen too: a paused watch sends nothing, and without this the line just stops changing
-            setStatus(name(k) + " · " + k.d.rate() + " Гц · " + (playing == 1 ? "музыка играет — поверните кисть"
-                    : "пауза: на телефоне не играет музыка"));
+            setStatus(name(k) + (k.d.recognises() ? " · распознаёт повороты сам · " : " · ") + k.d.rate() + " Гц · "
+                    + (playing == 1 ? "музыка играет — поверните кисть" : "пауза: на телефоне не играет музыка"));
+        }
+
+        /** 0,3 — seconds with one decimal, the Russian way. */
+        static String seconds(float ms) {
+            return String.valueOf(Math.round(ms / 100) / 10.0).replace('.', ',');
         }
 
         private static String name(Conn k) {
@@ -574,7 +583,8 @@ public final class WristLink {
                     }
                     k.trusted = true;
                     k.told = -1; // a new HELLO (the watch reconnected or changed its pace): told again
-                    setStatus(name + " · " + k.d.rate() + " Гц · жду отсчёты");
+                    setStatus(k.d.recognises() ? name + " · распознаёт повороты сам · " + k.d.rate() + " Гц"
+                            : name + " · " + k.d.rate() + " Гц · жду отсчёты");
                     advertise(false); // found: nothing more to announce
                     listening(k);
                     return;
@@ -592,6 +602,18 @@ public final class WristLink {
             }
             if (r == WristGesture.RIGHT || r == WristGesture.LEFT) {
                 // a turn: shown below
+            } else if (k.d.recognises()) {
+                // the watch found a turn that means nothing here: say why, so the user knows what to change
+                synchronized (this) {
+                    if (k.d.turns() != k.turnsShown) {
+                        k.turnsShown = k.d.turns();
+                        float peak = k.d.lastPeak();
+                        setStatus(name(k) + " · поворот " + Math.round(peak) + "° за " + seconds(k.d.lastTook()) + " с — "
+                                + (peak < k.d.turn ? "мало, нужно " + Math.round(k.d.turn) + "° (или «Насколько поворачивать»)"
+                                : "не вокруг предплечья (если путает стороны — «Направление»)"));
+                    }
+                }
+                return;
             } else {
                 // samples flowing: show the live tilt now and then, so it is clear the phone sees the movement
                 synchronized (this) {
@@ -616,7 +638,8 @@ public final class WristLink {
                 return;
             }
             press(c, right ? KeyEvent.KEYCODE_MEDIA_NEXT : KeyEvent.KEYCODE_MEDIA_PREVIOUS);
-            remember(right ? "вправо → следующий трек" : "влево → предыдущий трек");
+            remember((right ? "вправо → следующий трек" : "влево → предыдущий трек") + " (" + Math.round(k.d.lastPeak()) + "° за "
+                    + seconds(k.d.lastTook()) + " с)");
             answer(k, right ? WristGesture.EV_NEXT : WristGesture.EV_PREVIOUS);
         }
 

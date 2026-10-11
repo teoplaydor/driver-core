@@ -183,6 +183,17 @@ public class WristTest {
         sg.notifyOnCharacteristicWriteRequest(other, 4, samples, false, false, 0, WristGesture.hello(0x12345678, 50, 0, "zepp"));
         assertTrue(WristLink.status(), WristLink.status().contains("zepp") && WristLink.status().contains("50 Гц"));
 
+        // a watch that finds the turns itself: one packet per turn; a small one is shown with the reason, a real one presses
+        sg.notifyOnCharacteristicWriteRequest(other, 5, samples, false, true, 0,
+                WristGesture.hello(WristGesture.VERSION_TURNS, 0x12345678, 16, 981, "zepp"));
+        assertTrue(WristLink.status(), WristLink.status().contains("распознаёт повороты сам"));
+        sg.notifyOnCharacteristicWriteRequest(other, 6, samples, false, true, 0, WristGesture.turnPacket(0, 26, 300, new float[]{1, 0, 0}));
+        assertTrue(WristLink.status(), WristLink.status().contains("поворот 26° за 0,3 с") && WristLink.status().contains("мало"));
+        server.lastEvent = -1;
+        sg.notifyOnCharacteristicWriteRequest(other, 7, samples, false, true, 0, WristGesture.turnPacket(1, 64, 350, new float[]{1, 0, 0}));
+        assertEquals("a turn found on the watch: next", WristGesture.EV_NEXT, server.lastEvent);
+        assertTrue(WristLink.last(app), WristLink.last(app).contains("следующий") && WristLink.last(app).contains("64°"));
+
         // off: the service and the link are gone
         WristLink.setOn(c, false);
         sc.destroy();

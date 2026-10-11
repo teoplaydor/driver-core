@@ -4,7 +4,7 @@
     "appId": 1076543,
     "appName": "Пульт кистью",
     "appType": "app",
-    "version": { "code": 1, "name": "1.0.0" },
+    "version": { "code": 2, "name": "1.1.0" },
     "icon": "icon.png",
     "vender": "semsearch",
     "description": "Turn the wrist to switch tracks: the raw accelerometer to the phone over Bluetooth LE"
