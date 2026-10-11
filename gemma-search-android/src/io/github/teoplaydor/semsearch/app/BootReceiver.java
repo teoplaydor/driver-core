@@ -7,7 +7,7 @@ import android.content.Intent;
 /**
  * After a reboot: resumes indexing-while-idle if it was on (the background jobs are persisted by themselves); the
  * notes' reminders set again (the engine does that as it opens its index; alarms do not outlive a reboot), the places'
- * too, the morning digest, the quick note in the shade.
+ * too, the morning digest, the quick note in the shade, the watch link for tracks by a turn of the wrist.
  */
 public final class BootReceiver extends BroadcastReceiver {
     @Override
@@ -19,6 +19,7 @@ public final class BootReceiver extends BroadcastReceiver {
         QuickNotes.showShade(app, null);
         Digest.schedule(app);
         Wellbeing.schedule(app);
+        WristLink.start(app);
         Engine.get(c).afterOpen(new Runnable() {
             @Override
             public void run() {

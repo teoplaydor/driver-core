@@ -1,0 +1,27 @@
+<?xml version="1.0"?>
+<!-- «Пульт кистью» for Garmin (Connect IQ 3.1+): the raw accelerometer to the phone over Bluetooth LE. -->
+<iq:manifest version="3" xmlns:iq="http://www.garmin.com/xml/connectiq">
+    <iq:application id="e3071535d5d341dcbb54df58f448cf70" type="watch-app" name="@Strings.AppName" entry="WristApp"
+        launcherIcon="@Drawables.LauncherIcon" minApiLevel="3.1.0">
+        <!-- add your watch here (its id as in the SDK's device list) -->
+        <iq:products>
+            <iq:product id="fenix7"/>
+            <iq:product id="fr255"/>
+            <iq:product id="fr265"/>
+            <iq:product id="fr955"/>
+            <iq:product id="fr965"/>
+            <iq:product id="venu2"/>
+            <iq:product id="venu3"/>
+            <iq:product id="vivoactive5"/>
+        </iq:products>
+        <iq:permissions>
+            <iq:uses-permission id="BluetoothLowEnergy"/>
+            <iq:uses-permission id="Sensor"/>
+        </iq:permissions>
+        <iq:languages>
+            <iq:language>eng</iq:language>
+            <iq:language>rus</iq:language>
+        </iq:languages>
+        <iq:barrels/>
+    </iq:application>
+</iq:manifest>

@@ -74,6 +74,14 @@ java -Dfile.encoding=UTF-8 -Dstdout.encoding=UTF-8 -cp "$T/cls" PcmTest
 java -Dfile.encoding=UTF-8 -Dstdout.encoding=UTF-8 -cp "$T/cls" SpokenTest
 java -Dfile.encoding=UTF-8 -Dstdout.encoding=UTF-8 -cp "$T/cls" PhotoEventTest
 java -Dfile.encoding=UTF-8 -Dstdout.encoding=UTF-8 -cp "$T/cls" AnswersTest
+# wrist turns from a watch's raw accelerometer: a simulated hand through the Bluetooth packets
+java -Dfile.encoding=UTF-8 -Dstdout.encoding=UTF-8 -cp "$T/cls" WristGestureTest
+# the watch apps (Xiaomi Vela, Zepp OS): their protocol module and their pages over stand-ins of the watches' modules,
+# the packets they write recognised by the phone's Java
+node test/watch/proto_test.mjs watch/vela/src/common/proto.js "$T/watch"
+node test/watch/apps_test.mjs watch "$T/watch"
+cmp watch/vela/src/common/proto.js watch/zepp/common/proto.js
+java -Dfile.encoding=UTF-8 -Dstdout.encoding=UTF-8 -cp "$T/cls" WristJsTest "$T/watch"
 # documents' text: files made by LibreOffice, python-pptx, fpdf2, pikepdf (and pdftotext's words to compare)
 python3 -m pip install -q fpdf2 pikepdf python-pptx
 rm -rf "$T/files" && python3 test/files/make_docs.py "$T/files"

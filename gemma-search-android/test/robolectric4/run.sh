@@ -10,6 +10,11 @@
 #   AssistantTest   — questions answered from the notes, dates found, places, «Готово», the shade, the digest, the
 #                     calendar, a ticket found in a photo's text, the voice kept
 #   WellbeingTest   — the «разомнись» nudge from usage statistics (screen-on time), cool-down, quiet hours, access
+#   WristTest       — tracks by a turn of the wrist: the GATT server and advertising, a watch's HELLO and samples, next /
+#                     previous while music plays, pause / stream with the music, another watch turned away, the
+#                     direction taught, off
+#   WristWatchTest  — the Wear OS watch app and the phone end to end: scan, connect, HELLO, the accelerometer streamed,
+#                     next / previous and the watch's buzz, paused with the music, reconnecting
 #   ScanTest        — a document photo offered as a scan for printing: the sheet cut out, black and white, saved;
 #                     a bent sheet flattened, its lines straightened by «Текст ровно»; pictures chosen with a long
 #                     press, the documents among them scanned into one PDF
@@ -71,6 +76,8 @@ EOF
 ANDROID_JAR=${ANDROID_JAR:-/usr/lib/android-sdk/platforms/android-23/android.jar}
 "$J21/javac" -nowarn -encoding UTF-8 -cp "$ANDROID_JAR:${CP}" -d "$R/cls" \
   $(find "$T/shim" -name '*.java') "$T/src/FakeMediaStore.java" "$T/src/FakeDocs.java"
+# The Wear OS watch app's classes too (the watch and the phone tested together), against the plain SDK like the shim
+"$J21/javac" -nowarn -encoding UTF-8 -cp "$ANDROID_JAR:build/classes" -d "$R/cls" $(find watch/wearos/src -name '*.java')
 "$J21/javac" -nowarn -encoding UTF-8 -cp "$R/cls:$AA:${CP}build/classes:build/deps/ort-classes" -d "$R/cls" \
   $(find "$T/src" -name '*.java' ! -name FakeMediaStore.java ! -name FakeDocs.java)
 
@@ -91,7 +98,7 @@ fi
 
 rm -rf build/shots
 TESTS=("$@")
-[ ${#TESTS[@]} -gt 0 ] || TESTS=(UiShots AppFlowTest AppIndexingTest IndexStopTest PipelineTest ViewerTest HiddenTest PeopleAppTest NavTest ScanTest NotesTest QuickNoteTest AssistantTest WellbeingTest AudioFilesTest OpenTimeoutTest AutoIndexTest IdleIndexTest SpeedupsTest)
+[ ${#TESTS[@]} -gt 0 ] || TESTS=(UiShots AppFlowTest AppIndexingTest IndexStopTest PipelineTest ViewerTest HiddenTest PeopleAppTest NavTest ScanTest NotesTest QuickNoteTest AssistantTest WellbeingTest WristTest WristWatchTest AudioFilesTest OpenTimeoutTest AutoIndexTest IdleIndexTest SpeedupsTest)
 # One JVM per class: Engine is an app-wide singleton.
 for t in "${TESTS[@]}"; do
   echo "-- $t"

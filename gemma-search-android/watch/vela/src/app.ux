@@ -1,0 +1,10 @@
+<script>
+/**
+ * «Пульт кистью» for Xiaomi Vela watches (Xiaomi Watch S5: the only one whose apps may read the accelerometer and be a
+ * Bluetooth LE client). Everything happens on the one page, which stays open while it works.
+ */
+export default {
+  onCreate() {},
+  onDestroy() {}
+}
+</script>

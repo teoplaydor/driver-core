@@ -33,6 +33,23 @@
     <uses-permission
         android:name="android.permission.PACKAGE_USAGE_STATS"
         tools:ignore="ProtectedPermissions" />
+    <!--
+      tracks by a turn of the wrist: the phone is a small Bluetooth LE device the watch's own app connects to and sends
+      its accelerometer to (Android 12+: «Nearby devices»; before: the old Bluetooth permissions)
+    -->
+    <uses-permission
+        android:name="android.permission.BLUETOOTH"
+        android:maxSdkVersion="30" />
+    <uses-permission
+        android:name="android.permission.BLUETOOTH_ADMIN"
+        android:maxSdkVersion="30" />
+    <uses-permission android:name="android.permission.BLUETOOTH_ADVERTISE" />
+    <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
+
+    <uses-feature
+        android:name="android.hardware.bluetooth_le"
+        android:required="false" />
 
     <queries>
         <!-- the phone's speech recognizer (Android 11+ hides other apps' services unless named here) -->
@@ -178,6 +195,11 @@
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
                 android:value="On-device indexing of the user's own photos while the phone is not in use" />
         </service>
+        <!-- the watch link: a GATT server the watch connects to, kept while the feature is on -->
+        <service
+            android:name=".app.WristService"
+            android:exported="false"
+            android:foregroundServiceType="connectedDevice" />
         <receiver
             android:name=".app.Reminders"
             android:exported="false" />

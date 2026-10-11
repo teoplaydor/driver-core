@@ -1,0 +1,11 @@
+# watch apps' build output and tools
+node_modules/
+vela/dist/
+vela/build/
+zepp/dist/
+zepp/.zeus*
+garmin/bin/
+*.rpk
+*.zab
+*.zpk
+*.prg

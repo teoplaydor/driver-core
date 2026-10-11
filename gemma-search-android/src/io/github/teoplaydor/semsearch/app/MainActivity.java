@@ -178,6 +178,7 @@ public final class MainActivity extends Activity implements Engine.Listener, Vie
         if (AutoIndex.hasMediaAccess(this)) AutoIndex.schedule(this);
         resumeIdleIndex();
         Wellbeing.schedule(this);
+        WristLink.start(this);
         ui.post(new Runnable() {
             @Override
             public void run() {
@@ -1696,6 +1697,17 @@ public final class MainActivity extends Activity implements Engine.Listener, Vie
 
     @Override
     public void onRequestPermissionsResult(int code, String[] perms, int[] res) {
+        if (code == REQ_BLUETOOTH) {
+            Runnable then = afterBluetooth;
+            afterBluetooth = null;
+            if (WristLink.hasPermissions(this)) {
+                if (then != null) then.run();
+            } else {
+                toast("Без доступа к устройствам поблизости часы не подключатся");
+            }
+            if (settings != null) settings.onEngineChanged();
+            return;
+        }
         if (code == REQ_LOCATION || code == REQ_LOCATION + 1) {
             Places.restore(this);
             Runnable then = afterLocation;
@@ -2393,8 +2405,18 @@ public final class MainActivity extends Activity implements Engine.Listener, Vie
         if (resultsLabel == null) showRecent(false);
     }
 
-    private static final int REQ_LOCATION = 21;
-    private Runnable afterLocation;
+    private static final int REQ_LOCATION = 21, REQ_BLUETOOTH = 23;
+    private Runnable afterLocation, afterBluetooth;
+
+    /** «Nearby devices» allowed (Android 12+, asked first if needed), then {@code then}. */
+    void withBluetooth(Runnable then) {
+        if (WristLink.hasPermissions(this)) {
+            then.run();
+            return;
+        }
+        afterBluetooth = then;
+        requestPermissions(WristLink.permissions(), REQ_BLUETOOTH);
+    }
 
     /** Location allowed (asked first if needed), then {@code then}. */
     void withLocation(Runnable then) {

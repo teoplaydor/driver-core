@@ -1,0 +1,29 @@
+{
+  "package": "io.github.teoplaydor.semsearch.wrist",
+  "name": "Пульт кистью",
+  "versionName": "1.0.0",
+  "versionCode": 1,
+  "minPlatformVersion": 1000,
+  "minAPILevel": 1,
+  "icon": "/common/logo.png",
+  "deviceTypeList": ["watch"],
+  "features": [
+    { "name": "system.sensor" },
+    { "name": "system.bluetooth.ble" },
+    { "name": "system.vibrator" },
+    { "name": "system.brightness" },
+    { "name": "system.storage" }
+  ],
+  "config": {
+    "logLevel": "log",
+    "designWidth": 480
+  },
+  "router": {
+    "entry": "pages/index",
+    "pages": {
+      "pages/index": {
+        "component": "index"
+      }
+    }
+  }
+}

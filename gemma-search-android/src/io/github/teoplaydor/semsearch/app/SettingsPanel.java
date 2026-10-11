@@ -59,6 +59,14 @@ final class SettingsPanel extends FrameLayout implements Engine.Listener {
     private Toggle stretchToggle, quietToggle;
     private TextView stretchAccess, stretchAfter;
     private View quietRow, afterRow;
+    private Toggle wristToggle;
+    private TextView wristState, wristHand, wristDir, wristTurn, wristForget;
+    private final Runnable wristShow = new Runnable() {
+        @Override
+        public void run() {
+            showWrist();
+        }
+    };
 
     SettingsPanel(MainActivity activity) {
         super(activity);
@@ -101,6 +109,7 @@ final class SettingsPanel extends FrameLayout implements Engine.Listener {
         buildQuick();
         buildPlaces();
         buildWellbeing();
+        buildWrist();
         buildText();
         buildChat();
         buildIndex();
@@ -1090,6 +1099,112 @@ final class SettingsPanel extends FrameLayout implements Engine.Listener {
         stretchAfter.setText(Wellbeing.after(c) + " мин");
     }
 
+    private void buildWrist() {
+        final Context c = getContext();
+        LinearLayout card = section("Часы: треки поворотом кисти");
+        TextView how = Ui.text(c, "Поверните кисть вправо и обратно — следующий трек, влево — предыдущий. Часы присылают телефону "
+                + "показания акселерометра по Bluetooth, поворот распознаёт телефон; работает, только пока играет музыка. Нужно "
+                + "маленькое приложение на часах: Wear OS, Xiaomi (HyperOS), Amazfit (Zepp OS), Garmin — см. описание.", 13, Ui.TEXT2,
+                Ui.REGULAR);
+        how.setPadding(Ui.dp(c, 18), Ui.dp(c, 12), Ui.dp(c, 18), Ui.dp(c, 4));
+        card.addView(how);
+        wristToggle = new Toggle(c, WristLink.on(c));
+        wristToggle.setListener(new Toggle.Listener() {
+            @Override
+            public void changed(boolean on) {
+                if (!on) {
+                    WristLink.setOn(c, false);
+                    showWrist();
+                    return;
+                }
+                if (!WristLink.supported(c)) {
+                    a.toast("Этот телефон не умеет быть Bluetooth-устройством для часов");
+                    wristToggle.setOn(false, true);
+                    return;
+                }
+                a.askNotifications();
+                a.withBluetooth(new Runnable() {
+                    @Override
+                    public void run() {
+                        WristLink.setOn(c, true);
+                        showWrist();
+                    }
+                });
+                showWrist();
+            }
+        });
+        toggleRow(card, "Переключать треки поворотом кисти", "вправо — дальше, влево — назад", wristToggle);
+        wristState = row(card, "Часы", null, null);
+        wristHand = row(card, "Рука с часами", null, new Runnable() {
+            @Override
+            public void run() {
+                Sheet.choose(root(), "На какой руке часы", new String[]{"На левой", "На правой"}, null,
+                        WristLink.leftHand(c) ? 0 : 1, new Sheet.Choice() {
+                            @Override
+                            public void chosen(int i) {
+                                WristLink.setHand(c, i == 0);
+                                showWrist();
+                            }
+                        });
+            }
+        });
+        wristDir = row(card, "Направление", "если путает право и лево: нажмите и один раз поверните кисть вправо и обратно",
+                new Runnable() {
+                    @Override
+                    public void run() {
+                        if (WristLink.learn()) a.toast("Поверните кисть вправо и обратно");
+                        else a.toast("Сначала откройте приложение на часах");
+                    }
+                });
+        wristTurn = row(card, "Насколько поворачивать", null, new Runnable() {
+            @Override
+            public void run() {
+                final int[] opts = {30, 40, 55};
+                String[] labels = {"Чуть-чуть (30°)", "Заметно (40°)", "Сильно (55°)"};
+                int sel = 1;
+                for (int i = 0; i < opts.length; i++) if (opts[i] == WristLink.turn(c)) sel = i;
+                Sheet.choose(root(), "Насколько поворачивать кисть", labels, null, sel, new Sheet.Choice() {
+                    @Override
+                    public void chosen(int i) {
+                        WristLink.setTurn(c, opts[i]);
+                        showWrist();
+                    }
+                });
+            }
+        });
+        wristForget = quiet(card, "Забыть часы", Ui.TEXT2, new Runnable() {
+            @Override
+            public void run() {
+                WristLink.forgetWatch(c);
+                a.toast("Следующие часы, которые подключатся, будут запомнены");
+                showWrist();
+            }
+        });
+        WristLink.listen(wristShow);
+    }
+
+    private void showWrist() {
+        if (wristToggle == null) return;
+        Context c = getContext();
+        boolean on = WristLink.on(c);
+        if (wristToggle.isOn() != on) wristToggle.setOn(on, false);
+        String st = WristLink.status();
+        String last = WristLink.last(c);
+        String name = WristLink.watchName(c);
+        wristState.setText(!on ? (name.isEmpty() ? "не подключены" : name) : !WristLink.hasPermissions(c) ? "нет доступа"
+                : (st.isEmpty() ? "запускается" : st) + (last.isEmpty() ? "" : "\n" + last));
+        rowOf(wristState).setVisibility(on || !name.isEmpty() ? VISIBLE : GONE);
+        wristHand.setText(WristLink.leftHand(c) ? "левая" : "правая");
+        wristDir.setText(WristLink.learnt(c) ? "выучено" : "обычное");
+        int t = WristLink.turn(c);
+        wristTurn.setText(t <= 30 ? "чуть-чуть" : t >= 55 ? "сильно" : "заметно");
+        rowOf(wristHand).setVisibility(on ? VISIBLE : GONE);
+        rowOf(wristDir).setVisibility(on ? VISIBLE : GONE);
+        rowOf(wristTurn).setVisibility(on ? VISIBLE : GONE);
+        wristForget.setVisibility(name.isEmpty() ? GONE : VISIBLE);
+        if (!name.isEmpty()) wristForget.setText("Забыть часы (" + name + ")");
+    }
+
     private void buildText() {
         final Context c = getContext();
         LinearLayout card = section("Текст на фото");
@@ -1482,6 +1597,7 @@ final class SettingsPanel extends FrameLayout implements Engine.Listener {
     @Override
     public void onEngineChanged() {
         showQuick();
+        showWrist();
         Engine.State st = e.state;
         boolean busy = st == Engine.State.DOWNLOADING || st == Engine.State.LOADING;
         String mv;
@@ -1657,6 +1773,7 @@ final class SettingsPanel extends FrameLayout implements Engine.Listener {
         if (closing) return;
         closing = true;
         e.removeListener(this);
+        WristLink.listen(null);
         animate().translationY(Ui.dp(getContext(), 60)).alpha(0f).setDuration(200).setInterpolator(Ui.EASE).withEndAction(new Runnable() {
             @Override
             public void run() {

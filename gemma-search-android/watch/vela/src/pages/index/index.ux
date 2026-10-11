@@ -1,0 +1,328 @@
+<template>
+  <div class="page">
+    <text class="title">Пульт кистью</text>
+    <text class="state">{{ state }}</text>
+    <text class="hint">Вправо — дальше, влево — назад</text>
+    <input type="button" class="button" value="{{ on ? 'Стоп' : 'Старт' }}" onclick="toggle" />
+  </div>
+</template>
+
+<script>
+/**
+ * The watch's side of «tracks by a turn of the wrist»: finds the phone (SemSearch → Настройки → Часы) by its Bluetooth
+ * LE service, connects, sends the raw accelerometer, vibrates on the phone's answer. The phone recognises the turn.
+ * Vela lets neither the sensor nor Bluetooth run in the background, so the page keeps the screen on while it works;
+ * when the music stops the phone says «pause» and the sensor is switched off until it plays again.
+ */
+import ble from '@system.bluetooth.ble'
+import sensor from '@system.sensor'
+import vibrator from '@system.vibrator'
+import brightness from '@system.brightness'
+import storage from '@system.storage'
+import {
+  SERVICE, SAMPLES, EVENTS, EV_NEXT, EV_PREVIOUS, EV_LEARNED, EV_IGNORED, EV_PAUSE, EV_STREAM,
+  advertises, createPacker
+} from '../../common/proto.js'
+
+export default {
+  data: {
+    on: false,
+    state: 'выключено'
+  },
+
+  onInit() {
+    this.id = 0
+    this.gatt = null
+    this.scanner = null
+    this.findId = -1
+    this.queue = []
+    this.writing = false
+    this.listening = false
+    this.packer = null
+    this.timer = 0
+    const self = this
+    storage.get({
+      key: 'wrist_id',
+      success(v) {
+        self.id = parseInt(v, 10) || 0
+        if (!self.id) {
+          // who this watch is to the phone: random, kept (the phone listens only to the watch it met first)
+          self.id = (Math.floor(Math.random() * 0x7ffffffe) + 1) | 1
+          storage.set({ key: 'wrist_id', value: String(self.id) })
+        }
+        self.start()
+      },
+      fail() {
+        self.id = (Math.floor(Math.random() * 0x7ffffffe) + 1) | 1
+        self.start()
+      }
+    })
+  },
+
+  onDestroy() {
+    this.stop()
+  },
+
+  toggle() {
+    if (this.on) this.stop()
+    else this.start()
+  },
+
+  start() {
+    if (this.on) return
+    this.on = true
+    brightness.setKeepScreenOn({ keepScreenOn: true })
+    this.scan()
+  },
+
+  stop() {
+    this.on = false
+    this.stopScan()
+    this.drop()
+    if (this.timer) clearTimeout(this.timer)
+    this.timer = 0
+    brightness.setKeepScreenOn({ keepScreenOn: false })
+    this.state = 'выключено'
+  },
+
+  // ---------------------------------------------------------------- finding the phone
+
+  scan() {
+    if (!this.on || this.gatt) return
+    const self = this
+    this.state = 'ищу телефон…'
+    this.scanner = ble.createScanner()
+    this.findId = this.scanner.subscribeBLEDeviceFind({
+      callback(results) {
+        if (self.gatt || !results) return
+        for (let i = 0; i < results.length; i++) {
+          if (advertises(results[i].data, SERVICE)) {
+            self.stopScan()
+            self.connect(results[i])
+            return
+          }
+        }
+      },
+      fail(data, code) {
+        self.state = 'поиск не удался (' + code + ')'
+      }
+    })
+    this.scanner.startBLEScan({
+      filters: [{ serviceUuid: SERVICE }],
+      options: { dutyMode: 2 },
+      fail(data, code) {
+        self.state = code === 10001 ? 'Bluetooth выключен' : 'поиск не удался (' + code + ')'
+        self.later(() => self.scan(), 10000)
+      }
+    })
+  },
+
+  stopScan() {
+    if (!this.scanner) return
+    try {
+      this.scanner.stopBLEScan()
+      if (this.findId >= 0) this.scanner.unsubscribeBLEDeviceFind(this.findId)
+      this.scanner.close()
+    } catch (e) {}
+    this.scanner = null
+    this.findId = -1
+  },
+
+  later(fn, ms) {
+    if (this.timer) clearTimeout(this.timer)
+    this.timer = setTimeout(() => {
+      this.timer = 0
+      if (this.on) fn()
+    }, ms)
+  },
+
+  // ---------------------------------------------------------------- the link
+
+  connect(found) {
+    const self = this
+    this.state = 'подключаюсь…'
+    const g = ble.createGattClientDevice(found.deviceId, found.addressType)
+    this.gatt = g
+    g.onBLEConnectionStateChange = function (state) {
+      if (g !== self.gatt) return
+      if (state === 2) self.discover()
+      else if (state === 0) self.lost()
+    }
+    g.onBLECharacteristicChange = function (c) {
+      if (g !== self.gatt || !c || !c.characteristicValue) return
+      const v = new Uint8Array(c.characteristicValue)
+      if (v.length > 0) self.heard(v[0])
+    }
+    g.connect({
+      fail() {
+        if (g === self.gatt) self.lost()
+      }
+    })
+  },
+
+  discover() {
+    const self = this
+    const g = this.gatt
+    g.getServices({
+      success(services) {
+        let ok = false
+        for (let i = 0; services && i < services.length; i++) {
+          if (String(services[i].serviceUuid).toLowerCase() === SERVICE) ok = true
+        }
+        if (!ok) {
+          self.state = 'это не тот телефон'
+          self.lost()
+          return
+        }
+        g.setNotifyCharacteristicChanged({
+          characteristic: { serviceUuid: SERVICE, characteristicUuid: EVENTS, characteristicValue: new ArrayBuffer(0), descriptors: [] },
+          enable: true,
+          complete() {
+            self.linked()
+          }
+        })
+      },
+      fail() {
+        self.lost()
+      }
+    })
+  },
+
+  linked() {
+    const self = this
+    this.state = 'подключено'
+    this.packer = createPacker({
+      id: this.id,
+      platform: 'vela',
+      send(buf) {
+        self.send(buf)
+      }
+    })
+    this.listen(true)
+  },
+
+  lost() {
+    this.drop()
+    if (!this.on) return
+    this.state = 'связь потеряна — ищу'
+    this.later(() => this.scan(), 2000)
+  },
+
+  drop() {
+    this.listen(false)
+    this.queue = []
+    this.writing = false
+    const g = this.gatt
+    this.gatt = null
+    if (g) {
+      try {
+        g.disconnect({})
+        g.close()
+      } catch (e) {}
+    }
+  },
+
+  /** One byte from the phone. */
+  heard(ev) {
+    if (ev === EV_PAUSE) {
+      this.listen(false)
+      this.state = 'музыка не играет'
+    } else if (ev === EV_STREAM) {
+      if (this.packer) this.packer.restart()
+      this.listen(true)
+    } else if (ev === EV_NEXT || ev === EV_PREVIOUS) {
+      vibrator.vibrate({ mode: 'short' })
+    } else if (ev === EV_LEARNED) {
+      vibrator.vibrate({ mode: 'long' })
+    } else if (ev === EV_IGNORED) {
+      // a turn while nothing plays: nothing to feel
+    }
+  },
+
+  // ---------------------------------------------------------------- the samples
+
+  listen(on) {
+    if (on === this.listening) return
+    this.listening = on
+    if (!on) {
+      try {
+        sensor.unsubscribeAccelerometer()
+      } catch (e) {}
+      return
+    }
+    const self = this
+    this.state = 'слушаю повороты кисти'
+    sensor.subscribeAccelerometer({
+      interval: 'game',
+      callback(ret) {
+        if (self.listening && self.packer) self.packer.sample(ret.x, ret.y, ret.z, Date.now())
+      },
+      fail(data, code) {
+        self.state = 'нет доступа к акселерометру (' + code + ')'
+      }
+    })
+  },
+
+  /** One write at a time; a slow link loses the oldest samples, not the newest. */
+  send(buf) {
+    this.queue.push(buf)
+    while (this.queue.length > 20) this.queue.splice(1, 1) // the HELLO in front stays
+    this.pump()
+  },
+
+  pump() {
+    if (this.writing || !this.gatt || this.queue.length === 0) return
+    const self = this
+    const g = this.gatt
+    const buf = this.queue.shift()
+    this.writing = true
+    g.writeCharacteristicValue({
+      characteristic: { serviceUuid: SERVICE, characteristicUuid: SAMPLES, characteristicValue: buf, descriptors: [] },
+      complete() {
+        if (g !== self.gatt) return
+        self.writing = false
+        self.pump()
+      }
+    })
+  }
+}
+</script>
+
+<style>
+.page {
+  flex-direction: column;
+  justify-content: center;
+  align-items: center;
+  width: 480px;
+  height: 480px;
+  background-color: #000000;
+}
+.title {
+  font-size: 36px;
+  color: #e6edf3;
+  text-align: center;
+}
+.state {
+  margin-top: 16px;
+  width: 380px;
+  font-size: 28px;
+  color: #8da6c0;
+  text-align: center;
+}
+.hint {
+  margin-top: 10px;
+  width: 380px;
+  font-size: 24px;
+  color: #8b96a3;
+  text-align: center;
+}
+.button {
+  margin-top: 26px;
+  width: 200px;
+  height: 72px;
+  border-radius: 36px;
+  font-size: 30px;
+  color: #0e1116;
+  background-color: #8da6c0;
+}
+</style>
