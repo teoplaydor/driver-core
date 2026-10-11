@@ -190,7 +190,7 @@ async function vela() {
         createGattClientDevice(id, type) { const g = { id, type,
           connect(o) { W.connecting = g }, disconnect() {}, close() { W.closed++; return true },
           getServices(o) { if (W.hangDiscovery) return; setImmediate(() => o.success([{ serviceUuid: '00001800-0000-1000-8000-00805f9b34fb' }, { serviceUuid: '${SERVICE.toUpperCase()}', isPrimary: true }])) },
-          setNotifyCharacteristicChanged(o) { W.notifies.push(o); setImmediate(() => o.complete && o.complete()) },
+          setNotifyCharacteristicChanged(o) { W.notifies.push(o); if (W.hangNotify) return; setImmediate(() => { o.success && o.success(); o.complete && o.complete() }) },
           writeCharacteristicValue(o) {
             if (W.outstanding) W.overlap = true
             W.outstanding = 1; const v = o.characteristic.characteristicValue
@@ -225,6 +225,7 @@ async function vela() {
   ok(W.notifies.length === 1 && W.notifies[0].enable === true && nc.characteristicUuid === EVENTS && nc.serviceUuid === SERVICE
     && Array.isArray(nc.descriptors) && nc.properties && nc.properties.notify === true,
     'vela: services found, the phone\'s answers switched on (every field of the characteristic given)')
+  ok(page.state === 'слушаю повороты кисти', 'vela: subscribed — «' + page.state + '»')
   ok(W.acc && W.acc.interval === 'game', 'vela: the accelerometer on, «game» rate')
   // the wrist, about 50 a second in m/s², a little uneven
   for (const [x, y, z] of wrist([[0, 2], [70, 0.6], [0, 1], [-70, 0.6], [0, 1]], 50, 1)) {
@@ -254,6 +255,21 @@ async function vela() {
   await advance(2100)
   await flush(); await flush()
   ok(W.scans === scans + 1 && W.scanning && W.starts.length === starts + 1, 'vela: looking for the phone again, at once with the shape that worked')
+  // enabling the phone's answers never completes: after 4 s the watch streams anyway (no vibration/pause), and a turn
+  // still switches the track — the remote does not depend on the answers
+  W.hangNotify = true
+  W.found([{ deviceId: '5A:11:22:33:44:55', rssi: -60, addressType: 'RANDOM', data: new Uint8Array([2, 1, 6, 17, 7, ...le]).buffer }])
+  W.gatts[W.gatts.length - 1].onBLEConnectionStateChange(2)
+  await flush(); await flush()
+  ok(/включаю ответы/.test(page.state), 'vela: discovered, enabling answers («' + page.state + '»)')
+  await advance(4100); await flush(); await flush()
+  ok(page.state === 'слушаю повороты кисти (без отклика)' && W.acc !== null, 'vela: answers did not come — streaming anyway, without feedback («' + page.state + '»)')
+  W.hangNotify = false
+  page.stop()
+  await flush()
+  page.start()
+  await flush(); await flush(); await flush(); await flush()
+
   // the link comes up but service discovery never answers (the user's symptom if it gets past connecting): the step
   // watchdog lets go after 8 s and tries again, and the screen shows which step stalled
   W.hangDiscovery = true

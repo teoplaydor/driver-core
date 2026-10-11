@@ -30,6 +30,9 @@ const CONNECT_MS = 15000
 /** How long each step after connecting (service discovery, enabling answers) may take before a retry. */
 const STEP_MS = 8000
 
+/** If enabling the phone's answers does not complete in this time, stream anyway (the remote works without them). */
+const NOTIFY_MS = 4000
+
 /** Shapes of the search's parameters, most documented first (see startScan). */
 const SCAN_VARIANTS = [
   () => ({ filters: [{ deviceId: '', name: '', serviceUuid: SERVICE }], options: { interval: 0, dutyMode: 1 } }),
@@ -315,13 +318,24 @@ export default {
           return
         }
         self.step('включаю ответы…')
+        // the phone's answers (vibration, pause/stream) are a nice-to-have; the remote itself works without them.
+        // So: try to subscribe, but go on and stream anyway if it does not complete soon.
+        self.notifyDone = false
+        const proceed = function (feedback) {
+          if (g !== self.gatt || self.notifyDone) return
+          self.notifyDone = true
+          self.feedback = feedback
+          if (self.notifyTimer) clearTimeout(self.notifyTimer)
+          self.notifyTimer = 0
+          self.linked()
+        }
         g.setNotifyCharacteristicChanged({
           characteristic: characteristic(EVENTS, new ArrayBuffer(0), { read: true, notify: true }),
           enable: true,
-          complete() {
-            if (g === self.gatt) self.linked()
-          }
+          success() { proceed(true) },
+          complete() { proceed(false) }
         })
+        self.notifyTimer = setTimeout(() => { self.notifyTimer = 0; proceed(false) }, NOTIFY_MS)
       },
       fail() {
         if (g === self.gatt) self.failed()
@@ -334,7 +348,7 @@ export default {
     this.linkedOk = true
     if (this.stepTimer) clearTimeout(this.stepTimer)
     this.stepTimer = 0
-    this.state = 'подключено'
+    this.state = this.feedback === false ? 'подключено (без вибро-отклика)' : 'подключено'
     this.packer = createPacker({
       id: this.id,
       platform: 'vela',
@@ -355,6 +369,8 @@ export default {
   drop() {
     if (this.stepTimer) clearTimeout(this.stepTimer)
     this.stepTimer = 0
+    if (this.notifyTimer) clearTimeout(this.notifyTimer)
+    this.notifyTimer = 0
     this.linkedOk = false
     this.listen(false)
     this.queue = []
@@ -398,7 +414,7 @@ export default {
       return
     }
     const self = this
-    this.state = 'слушаю повороты кисти'
+    this.state = 'слушаю повороты кисти' + (this.feedback === false ? ' (без отклика)' : '')
     sensor.subscribeAccelerometer({
       interval: 'game',
       callback(ret) {

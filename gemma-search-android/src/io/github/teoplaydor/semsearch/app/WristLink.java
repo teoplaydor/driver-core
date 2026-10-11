@@ -462,7 +462,8 @@ public final class WristLink {
             public void onCharacteristicWriteRequest(BluetoothDevice dev, int id, BluetoothGattCharacteristic ch, boolean prepared,
                                                      boolean needsAnswer, int offset, byte[] value) {
                 boolean ok = SAMPLES.equals(ch.getUuid()) && !prepared && offset == 0;
-                if (needsAnswer) respond(dev, id, ok ? BluetoothGatt.GATT_SUCCESS : BluetoothGatt.GATT_REQUEST_NOT_SUPPORTED, null);
+                // a strict central wants the written value echoed in the response
+                if (needsAnswer) respond(dev, id, ok ? BluetoothGatt.GATT_SUCCESS : BluetoothGatt.GATT_REQUEST_NOT_SUPPORTED, ok ? value : null);
                 if (ok) received(dev, value);
             }
 
@@ -476,7 +477,8 @@ public final class WristLink {
                         listening(k);
                     }
                 }
-                if (needsAnswer) respond(dev, id, BluetoothGatt.GATT_SUCCESS, null);
+                // echo the value back: some centrals (Vela) wait on an exact write response before the subscribe completes
+                if (needsAnswer) respond(dev, id, BluetoothGatt.GATT_SUCCESS, value);
             }
 
             @Override
