@@ -192,9 +192,10 @@ async function vela() {
           getServices(o) { if (W.hangDiscovery) return; setImmediate(() => o.success([{ serviceUuid: '00001800-0000-1000-8000-00805f9b34fb' }, { serviceUuid: '${SERVICE.toUpperCase()}', isPrimary: true }])) },
           setNotifyCharacteristicChanged(o) { W.notifies.push(o); if (W.hangNotify) return; setImmediate(() => { o.success && o.success(); o.complete && o.complete() }) },
           writeCharacteristicValue(o) {
-            if (W.outstanding) W.overlap = true
+            if (W.outstanding && !W.hangWrites) W.overlap = true
             W.outstanding = 1; const v = o.characteristic.characteristicValue
             W.writes.push([o.characteristic.serviceUuid, o.characteristic.characteristicUuid, Array.from(new Uint8Array(v)).map((x) => x.toString(16).padStart(2, '0')).join(''), o.characteristic.descriptors])
+            if (W.hangWrites) return  // the completion never comes: the watch's write watchdog must keep the stream going
             setImmediate(() => { W.outstanding = 0; o.success && o.success(); o.complete && o.complete() }) } }
           W.gatts.push(g); return g } }`,
     '@system.sensor': `export default { subscribeAccelerometer(o) { W.acc = o }, unsubscribeAccelerometer() { W.acc = null } }`,
@@ -255,6 +256,18 @@ async function vela() {
   await advance(2100)
   await flush(); await flush()
   ok(W.scans === scans + 1 && W.scanning && W.starts.length === starts + 1, 'vela: looking for the phone again, at once with the shape that worked')
+  // the write completion never comes (what stalled the S5 after HELLO): the watchdog keeps the stream flowing
+  W.hangWrites = true
+  W.found([{ deviceId: '5A:11:22:33:44:55', rssi: -60, addressType: 'RANDOM', data: new Uint8Array([2, 1, 6, 17, 7, ...le]).buffer }])
+  W.gatts[W.gatts.length - 1].onBLEConnectionStateChange(2)
+  await flush(); await flush()
+  const w0 = W.writes.length
+  for (let i = 0; i < 40; i++) { clock += 20; W.acc && W.acc.callback({ x: 0, y: 9.8 * Math.sin(i / 6), z: 9.8 * Math.cos(i / 6) }); await flush(); await advance(30) }
+  const wrote = W.writes.length - w0
+  ok(wrote >= 3, 'vela: writes keep flowing though no completion comes (' + wrote + ' writes)')
+  W.hangWrites = false
+  page.stop(); await flush(); page.start(); await flush(); await flush(); await flush(); await flush()
+
   // enabling the phone's answers never completes: after 4 s the watch streams anyway (no vibration/pause), and a turn
   // still switches the track — the remote does not depend on the answers
   W.hangNotify = true

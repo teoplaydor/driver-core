@@ -33,6 +33,9 @@ const STEP_MS = 8000
 /** If enabling the phone's answers does not complete in this time, stream anyway (the remote works without them). */
 const NOTIFY_MS = 4000
 
+/** A write's completion may not arrive; move on after this long so the sample stream keeps flowing. */
+const WRITE_MS = 150
+
 /** Shapes of the search's parameters, most documented first (see startScan). */
 const SCAN_VARIANTS = [
   () => ({ filters: [{ deviceId: '', name: '', serviceUuid: SERVICE }], options: { interval: 0, dutyMode: 1 } }),
@@ -371,6 +374,9 @@ export default {
     this.stepTimer = 0
     if (this.notifyTimer) clearTimeout(this.notifyTimer)
     this.notifyTimer = 0
+    if (this.writeTimer) clearTimeout(this.writeTimer)
+    this.writeTimer = 0
+    this.writing = false
     this.linkedOk = false
     this.listen(false)
     this.queue = []
@@ -439,14 +445,21 @@ export default {
     const g = this.gatt
     const buf = this.queue.shift()
     this.writing = true
+    // the write's completion comes as a separate event on Vela and may not arrive; don't let that stall the stream —
+    // clear on completion, or after a short time, whichever comes first
+    const done = function () {
+      if (g !== self.gatt || !self.writing) return
+      self.writing = false
+      if (self.writeTimer) clearTimeout(self.writeTimer)
+      self.writeTimer = 0
+      self.pump()
+    }
     g.writeCharacteristicValue({
       characteristic: characteristic(SAMPLES, buf, { write: true, writeNoResponse: true }),
-      complete() {
-        if (g !== self.gatt) return
-        self.writing = false
-        self.pump()
-      }
+      success: done,
+      complete: done
     })
+    this.writeTimer = setTimeout(done, WRITE_MS)
   }
 }
 </script>

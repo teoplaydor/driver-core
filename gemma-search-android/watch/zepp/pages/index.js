@@ -178,6 +178,8 @@ Page({
       if (!this.state.linked) this.linked()
     })
     ble.mstOnCharaWriteComplete(() => {
+      if (this.state.writeTimer) clearTimeout(this.state.writeTimer)
+      this.state.writeTimer = 0
       this.state.writing = false
       this.pump()
     })
@@ -216,6 +218,8 @@ Page({
   drop() {
     this.listen(false)
     this.state.queue = []
+    if (this.state.writeTimer) clearTimeout(this.state.writeTimer)
+    this.state.writeTimer = 0
     this.state.writing = false
     this.state.linked = false
     try {
@@ -277,6 +281,15 @@ Page({
     if (this.state.writing || !this.state.profile || this.state.queue.length === 0) return
     const buf = this.state.queue.shift()
     this.state.writing = true
+    // mstOnCharaWriteComplete may not arrive; don't let that stall the stream — move on after a short time too
+    if (this.state.writeTimer) clearTimeout(this.state.writeTimer)
+    this.state.writeTimer = setTimeout(() => {
+      this.state.writeTimer = 0
+      if (this.state.writing) {
+        this.state.writing = false
+        this.pump()
+      }
+    }, 150)
     ble.mstWriteCharacteristic(this.state.profile, SAMPLES, buf, buf.byteLength)
   }
 })
