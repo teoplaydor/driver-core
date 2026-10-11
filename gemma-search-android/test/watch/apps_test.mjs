@@ -254,6 +254,23 @@ async function vela() {
   await advance(2100)
   await flush(); await flush()
   ok(W.scans === scans + 1 && W.scanning && W.starts.length === starts + 1, 'vela: looking for the phone again, at once with the shape that worked')
+  // the phone found but the link never comes up (the watch's connect has no limit of its own): let go after 15 s and
+  // look again; after three tries — stop and say what usually helps
+  for (let t = 1; t <= 3; t++) {
+    W.found([{ deviceId: '5A:11:22:33:44:55', rssi: -60, addressType: 'RANDOM', data: new Uint8Array([2, 1, 6, 17, 7, ...le]).buffer }])
+    ok(/подключаюсь/.test(page.state) && (t === 1 || page.state.includes('попытка ' + t)), 'vela: connecting, try ' + t + ' — «' + page.state + '»')
+    await advance(15100)
+    if (t < 3) {
+      ok(/ищу снова/.test(page.state), 'vela: no link in 15 s — let go, looking again')
+      await advance(2100)
+      await flush(); await flush()
+    }
+  }
+  ok(page.on === false && /Mi Fitness/.test(page.state) && W.keep === false && !W.scanning,
+    'vela: three tries without a link — stopped, the screen may sleep, the hint shown')
+  page.toggle()
+  await flush(); await flush()
+  ok(page.on === true && W.scanning && W.keep === true, 'vela: «Старт» again — looking for the phone')
   page.toggle()
   ok(W.keep === false && page.on === false, 'vela: «Стоп» — off, the screen may sleep')
   page.onDestroy()

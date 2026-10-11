@@ -434,11 +434,15 @@ public final class WristLink {
                 synchronized (Server.this) {
                     if (state == BluetoothProfile.STATE_CONNECTED) {
                         if (!conns.containsKey(dev.getAddress())) conns.put(dev.getAddress(), new Conn(dev));
+                        // the link reached the phone: the watch's HELLO comes next
+                        if (!trustedConnected()) setStatus("часы подключаются…");
                     } else if (state == BluetoothProfile.STATE_DISCONNECTED) {
                         Conn k = conns.remove(dev.getAddress());
                         if (k != null && k.trusted && !trustedConnected()) {
                             advertise(true);
                             setStatus("часы отключились — ждёт");
+                        } else if (k != null && !trustedConnected()) {
+                            setStatus("подключение оборвалось до приветствия часов — ждёт");
                         }
                     }
                 }

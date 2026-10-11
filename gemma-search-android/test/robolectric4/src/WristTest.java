@@ -104,6 +104,7 @@ public class WristTest {
         ShadowBluetoothGattServer sg = Shadows.shadowOf(server.gatt);
         BluetoothDevice watch = ad.getRemoteDevice("C0:FF:EE:00:00:01");
         sg.notifyConnection(watch);
+        assertEquals("the link reached the phone", "часы подключаются…", WristLink.status());
         // samples before a HELLO: not listened to
         AudioManager am = (AudioManager) app.getSystemService(Context.AUDIO_SERVICE);
         Shadows.shadowOf(am).setIsMusicActive(true);
