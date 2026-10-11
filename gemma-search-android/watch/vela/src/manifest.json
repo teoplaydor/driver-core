@@ -1,8 +1,8 @@
 {
   "package": "io.github.teoplaydor.semsearch.wrist",
   "name": "Пульт кистью",
-  "versionName": "1.0.6",
-  "versionCode": 7,
+  "versionName": "1.0.7",
+  "versionCode": 8,
   "minPlatformVersion": 1000,
   "minAPILevel": 1,
   "icon": "/common/logo.png",

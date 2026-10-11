@@ -414,6 +414,8 @@ export default {
     if (on === this.listening) return
     this.listening = on
     if (!on) {
+      if (this.reSub) clearTimeout(this.reSub)
+      this.reSub = 0
       try {
         sensor.unsubscribeAccelerometer()
       } catch (e) {}
@@ -421,22 +423,46 @@ export default {
     }
     const self = this
     this.state = 'слушаю повороты кисти' + (this.feedback === false ? ' (без отклика)' : '')
-    sensor.subscribeAccelerometer({
-      interval: 'game',
-      callback(ret) {
-        if (!self.listening || !self.packer) return
-        self.packer.sample(ret.x, ret.y, ret.z, Date.now())
-        // show the raw sensor values on the watch now and then, so it is clear whether the sensor delivers live data
-        const now = Date.now()
-        if (now - (self.rawAt || 0) > 400) {
-          self.rawAt = now
-          self.state = 'x' + Math.round(ret.x) + ' y' + Math.round(ret.y) + ' z' + Math.round(ret.z)
-        }
-      },
-      fail(data, code) {
-        self.state = 'нет доступа к акселерометру (' + code + ')'
+    this.sampleN = 0
+    this.firstRaw = null
+    this.moved = false
+    const r = function (v) { return Math.round(Number(v) || 0) }
+    const onSample = function (ret) {
+      if (!self.listening || !self.packer || !ret) return
+      self.packer.sample(ret.x, ret.y, ret.z, Date.now())
+      self.sampleN++
+      if (!self.firstRaw) {
+        self.firstRaw = [ret.x, ret.y, ret.z]
+      } else if (Math.abs(ret.x - self.firstRaw[0]) + Math.abs(ret.y - self.firstRaw[1]) + Math.abs(ret.z - self.firstRaw[2]) > 0.2) {
+        self.moved = true
       }
-    })
+      const now = Date.now()
+      if (now - (self.rawAt || 0) > 400) {
+        self.rawAt = now
+        // the raw values, how many came, and whether any differed from the first — «✓» live, «стоит» static
+        self.state = 'x' + r(ret.x) + ' y' + r(ret.y) + ' z' + r(ret.z) + ' · ' + self.sampleN + (self.moved ? ' ✓' : ' стоит')
+      }
+    }
+    const sub = function () {
+      sensor.subscribeAccelerometer({
+        interval: 'normal',
+        callback: onSample,
+        fail(data, code) {
+          self.state = 'акселерометр: ошибка ' + code
+        }
+      })
+    }
+    sub()
+    // re-arm the sensor every 2 s, in case the stream stalls on one stale reading
+    const rearm = function () {
+      if (!self.listening) return
+      try {
+        sensor.unsubscribeAccelerometer()
+      } catch (e) {}
+      sub()
+      self.reSub = setTimeout(rearm, 2000)
+    }
+    this.reSub = setTimeout(rearm, 2000)
   },
 
   /** One write at a time; a slow link loses the oldest samples, not the newest. */

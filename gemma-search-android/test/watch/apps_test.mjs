@@ -227,7 +227,7 @@ async function vela() {
     && Array.isArray(nc.descriptors) && nc.properties && nc.properties.notify === true,
     'vela: services found, the phone\'s answers switched on (every field of the characteristic given)')
   ok(page.state === 'слушаю повороты кисти', 'vela: subscribed — «' + page.state + '»')
-  ok(W.acc && W.acc.interval === 'game', 'vela: the accelerometer on, «game» rate')
+  ok(W.acc && (W.acc.interval === 'normal' || W.acc.interval === 'game'), 'vela: the accelerometer on')
   // the wrist, about 50 a second in m/s², a little uneven
   for (const [x, y, z] of wrist([[0, 2], [70, 0.6], [0, 1], [-70, 0.6], [0, 1]], 50, 1)) {
     clock += 20 + Math.round((rnd() - 0.5) * 6)
