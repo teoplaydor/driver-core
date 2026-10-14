@@ -520,6 +520,21 @@ public class UiShots {
         sv.scrollTo(0, at[1] - top[1] - 40);
         settle(200);
         shot(a, "09a-settings-speech");
+        // the conversation card (Gemini)
+        android.view.View talkTitle = null;
+        walk.clear();
+        walk.add(sv.getChildAt(0));
+        while (!walk.isEmpty() && talkTitle == null) {
+            android.view.View v = walk.poll();
+            if (v instanceof android.widget.TextView && "Разговор с Gemini через часы".contentEquals(((android.widget.TextView) v).getText())) talkTitle = v;
+            if (v instanceof android.view.ViewGroup) for (int i = 0; i < ((android.view.ViewGroup) v).getChildCount(); i++) walk.add(((android.view.ViewGroup) v).getChildAt(i));
+        }
+        assertNotNull("the conversation card", talkTitle);
+        talkTitle.getLocationInWindow(at);
+        sv.getChildAt(0).getLocationInWindow(top);
+        sv.scrollTo(0, at[1] - top[1] - 40);
+        settle(200);
+        shot(a, "09c-settings-talk");
         sv.scrollTo(0, sv.getChildAt(0).getHeight() / 2);
         settle(200);
         shot(a, "09-settings-middle");

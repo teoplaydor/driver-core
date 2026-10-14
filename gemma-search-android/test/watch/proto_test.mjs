@@ -77,7 +77,12 @@ fs.writeFileSync(path.join(out, 'fixed.hex'), [
   hex(P.voiceEnd(7, 70005, 4321)),
   hex(P.rawPacket(5, [{ t: 100000, x: 0.5, y: -9.81, z: 0.07, h: 2 }, { t: 100150, x: 1, y: 2, z: 3, h: NaN }])),
   hex(P.diagPacket('поворот 61° — отправлен', 244)),
+  hex(P.voiceStart(7, P.CODEC_ADPCM | P.CODEC_LIVE, 16000, 0)),
+  hex(P.voicePlayed(7, 3, true)),
+  hex(P.voicePlayed(7, 4, false)),
 ].join('\n') + '\n')
+
+
 
 // the turn finder over the Java test's streams: what it finds, for WristJsTest to compare with the Java finder
 const inFile = path.join(out, 'finder_in.txt')
@@ -328,5 +333,18 @@ va.end(1000)
 ok(va.codec === P.CODEC_ADPCM && Buffer.from(va.bytes()).equals(encAll) && hex(va.next(200)) === hex(P.voiceStart(3, P.CODEC_ADPCM, 16000, 0)),
   'a voice note from the recorder\'s PCM: START (ADPCM, 16 kHz), the same bytes')
 
+// a conversation's events from the phone, as the watch reads them (the Java side builds the same bytes in GeminiLiveTest)
+{
+  const u8 = (a) => new Uint8Array(a)
+  const cfg = P.parseEvent(u8([6, 2 | 8 | 16, 247, 0]))
+  ok(cfg.talk && cfg.talkWatch && cfg.voice && cfg.mtu === 247, 'config: at the mouth a conversation, the answers on the watch')
+  const au = P.parseEvent(u8([10, 3, 0xe8, 3, 0, 0, 9, 8, 7]))
+  ok(au.ev === P.EV_TALK_AUDIO && au.seg === 3 && au.offset === 1000 && Array.from(au.data).join() === '9,8,7', 'EV_TALK_AUDIO: piece 3 at 1000, its bytes')
+  const sg = P.parseEvent(u8([11, 3, 0x40, 0x20, 0, 0, 21, 0]))
+  ok(sg.ev === P.EV_TALK_SEG && sg.seg === 3 && sg.total === 0x2040 && sg.ms === 2100, 'EV_TALK_SEG: piece 3 whole, 8256 bytes, 2.1 s')
+  const tx = P.parseEvent(u8([12, ...Buffer.from('Готово')]))
+  ok(tx.ev === P.EV_TALK_TEXT && tx.line === 'Готово', 'EV_TALK_TEXT: the line')
+  ok(P.parseEvent(u8([13])).ev === P.EV_TALK_END, 'EV_TALK_END')
+}
 console.log(bad === 0 ? 'WATCH PROTOCOL JS OK' : bad + ' FAILED')
 if (bad) process.exit(1)

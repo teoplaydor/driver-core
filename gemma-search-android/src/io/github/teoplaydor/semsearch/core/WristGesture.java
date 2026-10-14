@@ -56,12 +56,23 @@ public final class WristGesture {
     public static final int VERSION = 1, VERSION_TURNS = 2;
     public static final int KIND_HELLO = 0, KIND_ACCEL = 1, KIND_TURN = 2, KIND_SWING = 3, KIND_ROLL = 4, KIND_VOICE = 5,
             KIND_RAW = 6, KIND_DIAG = 7;
-    public static final int VOICE_START = 0x50, VOICE_DATA = 0x51, VOICE_END = 0x52;
+    /** VOICE packets; VOICE_PLAYED — a piece of a spoken answer played out on the watch ({@link #voicePlayed}). */
+    public static final int VOICE_START = 0x50, VOICE_DATA = 0x51, VOICE_END = 0x52, VOICE_PLAYED = 0x53;
     public static final int CODEC_RECORDED = 1, CODEC_PCM16 = 2, CODEC_WAV = 3, CODEC_OPUS_PACKETS = 4, CODEC_ADPCM = 5;
+    /** With a VOICE start's codec: a conversation as it is said (not a note) — no resends, the phone streams it on. */
+    public static final int CODEC_LIVE = 0x80;
+    /**
+     * Phone → watch: settings, «send again from», a note's outcome; in a conversation the answer's voice for the watch
+     * to play (pieces of a WAV file, then «that piece is whole»), a line of what was said, «the conversation is over».
+     */
     public static final int EV_IGNORED = 0, EV_NEXT = 1, EV_PREVIOUS = 2, EV_LEARNED = 3, EV_PAUSE = 4, EV_STREAM = 5,
-            EV_CONFIG = 6, EV_VOICE_FROM = 8, EV_VOICE_DONE = 9;
-    /** EV_CONFIG's flags: the watch on the left hand, voice notes on, the sensor and the watch's doings to the log. */
-    public static final int CFG_LEFT_HAND = 1, CFG_VOICE = 2, CFG_DEBUG = 4;
+            EV_CONFIG = 6, EV_VOICE_FROM = 8, EV_VOICE_DONE = 9, EV_TALK_AUDIO = 10, EV_TALK_SEG = 11, EV_TALK_TEXT = 12,
+            EV_TALK_END = 13;
+    /**
+     * EV_CONFIG's flags: the watch on the left hand, voice notes on, the sensor and the watch's doings to the log; the
+     * watch at the mouth is a conversation (with Gemini) rather than a note, its answers played on the watch.
+     */
+    public static final int CFG_LEFT_HAND = 1, CFG_VOICE = 2, CFG_DEBUG = 4, CFG_TALK = 8, CFG_TALK_WATCH = 16;
     /**
      * What became of a voice note: a note made (with its reminder…), nothing said in it, kept as a recording without
      * text (no recognition on this phone), a question answered or a search (not a note), the recording not readable.
@@ -361,6 +372,47 @@ public final class WristGesture {
         p[2] = (byte) result;
         System.arraycopy(text, 0, p, 3, n);
         return p;
+    }
+
+    /** EV_TALK_AUDIO: bytes of answer piece {@code seg} (a WAV file) at {@code offset}. */
+    public static byte[] talkAudio(int seg, long offset, byte[] b, int from, int n) {
+        byte[] p = new byte[6 + n];
+        p[0] = (byte) EV_TALK_AUDIO;
+        p[1] = (byte) seg;
+        put32(p, 2, offset);
+        System.arraycopy(b, from, p, 6, n);
+        return p;
+    }
+
+    /** EV_TALK_SEG: answer piece {@code seg} is whole — {@code bytes} long, {@code ms} to play. */
+    public static byte[] talkSeg(int seg, long bytes, int ms) {
+        byte[] p = new byte[8];
+        p[0] = (byte) EV_TALK_SEG;
+        p[1] = (byte) seg;
+        put32(p, 2, bytes);
+        p[6] = (byte) Math.min(255, (ms + 99) / 100);
+        p[7] = 0;
+        return p;
+    }
+
+    /** EV_TALK_TEXT: a line to show (what the answer says, what went wrong), cut to {@code max} bytes on whole letters. */
+    public static byte[] talkText(String line, int max) {
+        byte[] text = line == null ? new byte[0] : line.getBytes(java.nio.charset.StandardCharsets.UTF_8);
+        int n = Math.max(0, Math.min(text.length, max - 1));
+        while (n > 0 && n < text.length && (text[n] & 0xc0) == 0x80) n--;
+        byte[] p = new byte[1 + n];
+        p[0] = (byte) EV_TALK_TEXT;
+        System.arraycopy(text, 0, p, 1, n);
+        return p;
+    }
+
+    public static byte[] talkEnd() {
+        return new byte[]{(byte) EV_TALK_END};
+    }
+
+    /** VOICE_PLAYED (watch → phone): answer piece {@code seg} of conversation {@code id} played (ok) or not. */
+    public static byte[] voicePlayed(int id, int seg, boolean ok) {
+        return new byte[]{(byte) VOICE_PLAYED, (byte) id, (byte) seg, (byte) (ok ? 0 : 1)};
     }
 
     /** VOICE start, data and end (for the tests: the watch's side is in its JavaScript). */

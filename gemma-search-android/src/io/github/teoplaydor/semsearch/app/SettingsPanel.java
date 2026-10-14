@@ -54,6 +54,9 @@ final class SettingsPanel extends FrameLayout implements Engine.Listener {
     private ProgressLine chatProgress;
     private TextView ocrValue, ocrNote, ocrButton, ocrDelete;
     private TextView speechValue, speechNote, speechButton, speechDelete;
+    private TextView talkKey, talkModel, talkNote;
+    private Toggle talkToggle, talkWatchToggle;
+    private View talkWatchRow;
     private Toggle speechToggle;
     private View speechToggleRow;
     private ProgressLine speechProgress;
@@ -116,6 +119,7 @@ final class SettingsPanel extends FrameLayout implements Engine.Listener {
         buildPlaces();
         buildWellbeing();
         buildWrist();
+        buildTalk();
         buildSpeech();
         buildText();
         buildChat();
@@ -1259,6 +1263,172 @@ final class SettingsPanel extends FrameLayout implements Engine.Listener {
         if (!name.isEmpty()) wristForget.setText("Забыть часы (" + name + ")");
     }
 
+    private void buildTalk() {
+        final Context c = getContext();
+        LinearLayout card = section("Разговор с Gemini через часы");
+        TextView about = note(card);
+        about.setText("Поднесите часы ко рту и говорите — голос идёт в Gemini Live (через телефон, по вашему ключу API), ответ "
+                + "звучит голосом в часах или в телефоне. Говорите, пока держите руку; опустили — разговор помнится ещё 45 с. "
+                + "«Запиши…», «напомни…» — Gemini сохранит заметку сам; «что у меня записано про…» — найдёт в заметках.");
+        about.setVisibility(VISIBLE);
+        talkKey = row(card, "Ключ API Gemini", "Google AI Studio → Get API key; хранится только на телефоне", new Runnable() {
+            @Override
+            public void run() {
+                keySheet();
+            }
+        });
+        talkModel = row(card, "Модель", "самая подходящая для живого разговора выбирается сама", new Runnable() {
+            @Override
+            public void run() {
+                modelSheet();
+            }
+        });
+        talkToggle = new Toggle(c, Talk.chosen(c));
+        talkToggle.setListener(new Toggle.Listener() {
+            @Override
+            public void changed(boolean on) {
+                Talk.setOn(getContext(), on);
+                showTalk();
+            }
+        });
+        toggleRow(card, "Часы у рта — разговор", "вместо заметки голосом", talkToggle);
+        talkWatchToggle = new Toggle(c, Talk.onWatch(c));
+        talkWatchToggle.setListener(new Toggle.Listener() {
+            @Override
+            public void changed(boolean on) {
+                Talk.setOnWatch(getContext(), on);
+            }
+        });
+        talkWatchRow = toggleRow(card, "Ответ звучит в часах", "иначе — в телефоне или в наушниках; часам нужна быстрая связь", talkWatchToggle);
+        talkNote = note(card);
+    }
+
+    private void keySheet() {
+        final Context c = getContext();
+        final Sheet s = new Sheet(c, "Ключ API Gemini");
+        final EditText key = field(c, "AIza…");
+        key.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
+        key.setText(Talk.key(c));
+        s.body().addView(key, new LinearLayout.LayoutParams(-1, Ui.dp(c, 50)));
+        final TextView result = Ui.text(c, "Ключ из Google AI Studio (aistudio.google.com → Get API key). Разговор оплачивается по нему.",
+                13, Ui.TEXT2, Ui.REGULAR);
+        result.setPadding(Ui.dp(c, 4), Ui.dp(c, 10), 0, 0);
+        s.body().addView(result);
+        LinearLayout buttons = new LinearLayout(c);
+        buttons.setPadding(0, Ui.dp(c, 16), 0, 0);
+        TextView check = Sheet.button(c, "Проверить", false);
+        check.setOnClickListener(new OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                result.setText("Проверяю…");
+                final String k = key.getText().toString().trim();
+                new Thread(new Runnable() {
+                    @Override
+                    public void run() {
+                        String text;
+                        try {
+                            java.util.List<String> m = io.github.teoplaydor.semsearch.core.GeminiLive.liveModels(Talk.host(), k);
+                            text = m.isEmpty() ? "Ключ принят, но моделей для живого разговора на нём нет"
+                                    : "Ключ работает. Модель: " + m.get(0).replace("models/", "");
+                        } catch (Exception e) {
+                            text = "Не вышло: " + e.getMessage();
+                        }
+                        final String t = text;
+                        post(new Runnable() {
+                            @Override
+                            public void run() {
+                                result.setText(t);
+                            }
+                        });
+                    }
+                }).start();
+            }
+        });
+        TextView save = Sheet.button(c, "Сохранить", true);
+        save.setOnClickListener(new OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                Talk.setKey(getContext(), key.getText().toString());
+                if (!Talk.key(getContext()).isEmpty() && !Talk.chosen(getContext())) Talk.setOn(getContext(), true);
+                s.dismiss();
+                showTalk();
+            }
+        });
+        LinearLayout.LayoutParams b1 = new LinearLayout.LayoutParams(0, Ui.dp(c, 50), 1);
+        LinearLayout.LayoutParams b2 = new LinearLayout.LayoutParams(0, Ui.dp(c, 50), 1);
+        b2.leftMargin = Ui.dp(c, 10);
+        buttons.addView(check, b1);
+        buttons.addView(save, b2);
+        s.body().addView(buttons);
+        s.show(root());
+    }
+
+    private void modelSheet() {
+        final Context c = getContext();
+        if (Talk.key(c).isEmpty()) {
+            keySheet();
+            return;
+        }
+        talkNote.setText("Узнаю модели…");
+        talkNote.setVisibility(VISIBLE);
+        new Thread(new Runnable() {
+            @Override
+            public void run() {
+                java.util.List<String> m = null;
+                String err = null;
+                try {
+                    m = Talk.models(c);
+                } catch (Exception e) {
+                    err = e.getMessage();
+                }
+                final java.util.List<String> list = m;
+                final String error = err;
+                post(new Runnable() {
+                    @Override
+                    public void run() {
+                        showTalk();
+                        if (list == null || list.isEmpty()) {
+                            talkNote.setText(error != null ? "Не вышло: " + error : "На этом ключе нет моделей для живого разговора");
+                            talkNote.setVisibility(VISIBLE);
+                            return;
+                        }
+                        final String[] names = new String[list.size()];
+                        int sel = 0;
+                        for (int i = 0; i < names.length; i++) {
+                            names[i] = list.get(i).replace("models/", "");
+                            if (list.get(i).equals(Talk.model(c))) sel = i;
+                        }
+                        Sheet.choose(root(), "Модель Gemini", names, null, sel, new Sheet.Choice() {
+                            @Override
+                            public void chosen(int i) {
+                                Talk.setModel(c, list.get(i));
+                                showTalk();
+                            }
+                        });
+                    }
+                });
+            }
+        }).start();
+    }
+
+    private void showTalk() {
+        if (talkKey == null) return;
+        Context c = getContext();
+        boolean key = !Talk.key(c).isEmpty();
+        talkKey.setText(key ? "указан" : "не указан");
+        talkKey.setTextColor(key ? Ui.TEXT2 : Ui.ACCENT);
+        String m = Talk.model(c).replace("models/", "");
+        talkModel.setText(m.isEmpty() ? "авто" : m.length() > 22 ? m.substring(0, 21) + "…" : m);
+        rowOf(talkModel).setVisibility(key ? VISIBLE : GONE);
+        if (talkToggle.isOn() != Talk.chosen(c)) talkToggle.setOn(Talk.chosen(c), false);
+        if (talkWatchToggle.isOn() != Talk.onWatch(c)) talkWatchToggle.setOn(Talk.onWatch(c), false);
+        talkWatchRow.setVisibility(Talk.chosen(c) ? VISIBLE : GONE);
+        String last = Talk.last(c);
+        String note = Talk.chosen(c) && !key ? "Нужен ключ API — без него часы делают заметки, как раньше" : last;
+        talkNote.setText(note);
+        talkNote.setVisibility(note.isEmpty() ? GONE : VISIBLE);
+    }
+
     private void buildSpeech() {
         final Context c = getContext();
         LinearLayout card = section("Распознавание речи");
@@ -1454,6 +1624,7 @@ final class SettingsPanel extends FrameLayout implements Engine.Listener {
         showPlaces();
         showWellbeing();
         showSpeech();
+        showTalk();
         showText();
         showChat();
     }

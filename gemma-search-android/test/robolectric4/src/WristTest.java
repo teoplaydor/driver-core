@@ -353,6 +353,140 @@ public class WristTest {
         assertFalse("deleted: the phone's recognizer", e.speechInstalled() || e.speechReady());
     }
 
+    /**
+     * A conversation with Gemini through the watch, against a stand-in Gemini Live held to Google's SDK
+     * (test/gemini/live_mock.py): the watch told «at the mouth — a conversation, answers on the watch»; its live voice
+     * (ADPCM) passed on as it comes; the model found from the list; a note saved by the function Gemini calls; the spoken
+     * answer back to the watch in WAV pieces (IMA ADPCM, 8 kHz) and its text; the piece played; the hand down — the
+     * conversation kept, then closed («over» to the watch). Then answers on the phone: none to the watch.
+     */
+    static void talk(Application app, WristLink.Server server, ShadowBluetoothGattServer sg, BluetoothDevice watch,
+                     BluetoothGattCharacteristic samples) throws Exception {
+        int port = 18800 + new java.util.Random().nextInt(400);
+        File log = File.createTempFile("live", ".jsonl");
+        Process mock = new ProcessBuilder("python3", "test/gemini/live_mock.py", "serve", String.valueOf(port), log.getPath())
+                .redirectErrorStream(true).start();
+        java.io.BufferedReader out = new java.io.BufferedReader(new java.io.InputStreamReader(mock.getInputStream(), StandardCharsets.UTF_8));
+        assertEquals("the stand-in Gemini started", "ready", out.readLine());
+        java.lang.reflect.Field host = Class.forName("io.github.teoplaydor.semsearch.app.Talk").getDeclaredField("hostForTest");
+        host.setAccessible(true);
+        host.set(null, "ws://127.0.0.1:" + port);
+        final Engine e = Engine.get(app);
+        try {
+            e.prefs().edit().putString("gemini_key", "test-key").putBoolean("wrist_talk", true).putBoolean("wrist_talk_watch", true).apply();
+            server.messages = Collections.synchronizedList(new ArrayList<byte[]>());
+            WristLink.setVoiceNotes(app, true); // the watch told again
+            byte[] cfg = server.lastMessage;
+            assertEquals("told: at the mouth — a conversation, answers on the watch (MTU 247)",
+                    WristGesture.CFG_TALK | WristGesture.CFG_TALK_WATCH, cfg[1] & (WristGesture.CFG_TALK | WristGesture.CFG_TALK_WATCH));
+
+            // the watch at the mouth: its live voice, ADPCM as the watch makes it, in writes as it is said
+            float[] x = new float[16000 * 13 / 10];
+            for (int i = 0; i < x.length; i++) x[i] = (float) (0.3 * Math.sin(2 * Math.PI * 200 * i / 16000.0));
+            byte[] voice = adpcm(x);
+            BluetoothGattServerCallback cb = sg.getGattServerCallback();
+            cb.onCharacteristicWriteRequest(watch, 400, samples, false, true, 0,
+                    WristGesture.voiceStart(20, WristGesture.CODEC_ADPCM | WristGesture.CODEC_LIVE, 16000, 0));
+            for (int o = 0; o < voice.length; o += 238) {
+                cb.onCharacteristicWriteRequest(watch, 401, samples, false, true, 0,
+                        WristGesture.voiceData(20, o, voice, o, Math.min(238, voice.length - o)));
+                Thread.sleep(10);
+            }
+            // the note Gemini saved by calling save_note
+            Robo.waitFor("the note Gemini saved", () -> {
+                for (IndexStore.Item n : e.store().notes()) if (n.body.toLowerCase().contains("купить хлеб") && n.remind > System.currentTimeMillis()
+                        && n.id > 0 && n.body.length() < 20) return true;
+                return e.store().notes().size() > 0 && textTold(server).contains("Готово");
+            });
+            Robo.waitFor("the answer's text to the watch", () -> textTold(server).contains("Готово, напомню завтра в девять."));
+            // the spoken answer: WAV pieces for the watch
+            java.util.Map<Integer, java.io.ByteArrayOutputStream> pieces = new java.util.TreeMap<Integer, java.io.ByteArrayOutputStream>();
+            java.util.Map<Integer, Long> whole = new java.util.TreeMap<Integer, Long>();
+            synchronized (server.messages) {
+                for (byte[] m : server.messages) {
+                    if (m[0] == WristGesture.EV_TALK_AUDIO) {
+                        int sg2 = m[1] & 0xff;
+                        long off = (m[2] & 0xffL) | (m[3] & 0xffL) << 8 | (m[4] & 0xffL) << 16 | (m[5] & 0xffL) << 24;
+                        java.io.ByteArrayOutputStream b = pieces.computeIfAbsent(sg2, k -> new java.io.ByteArrayOutputStream());
+                        assertEquals("in order", b.size(), off);
+                        b.write(m, 6, m.length - 6);
+                        assertTrue("within the MTU", m.length <= 244);
+                    } else if (m[0] == WristGesture.EV_TALK_SEG) {
+                        whole.put(m[1] & 0xff, (m[2] & 0xffL) | (m[3] & 0xffL) << 8 | (m[4] & 0xffL) << 16 | (m[5] & 0xffL) << 24);
+                    }
+                }
+            }
+            assertFalse("pieces of the answer", pieces.isEmpty());
+            int total = 0;
+            for (java.util.Map.Entry<Integer, java.io.ByteArrayOutputStream> p : pieces.entrySet()) {
+                byte[] wav = p.getValue().toByteArray();
+                assertEquals("piece " + p.getKey() + " whole", Long.valueOf(wav.length), whole.get(p.getKey()));
+                assertEquals("a WAV file", "RIFF", new String(wav, 0, 4, StandardCharsets.US_ASCII));
+                total += io.github.teoplaydor.semsearch.core.Adpcm.fromImaWav(wav).length;
+            }
+            System.out.println("Gemini's answer to the watch: " + pieces.size() + " piece(s), " + total + " samples at 8 kHz");
+            assertTrue("0.9 s of answer at 8 kHz: " + total, Math.abs(total - 7200) < 200);
+            WristLog.flush();
+            String wlog = new String(java.nio.file.Files.readAllBytes(WristLog.file(app).toPath()), StandardCharsets.UTF_8);
+            assertTrue(wlog, wlog.contains("TALK connecting models/gemini-3-flash-native-audio-preview-2026-03-02"));
+            assertTrue(wlog, wlog.contains("TALK call save_note") && wlog.contains("TALK turn: you «Напомни завтра в 9 купить хлеб» — Gemini «Готово, напомню завтра в девять.»"));
+            // played on the watch; the hand down: kept a while, then closed and the watch told
+            for (int sgn : pieces.keySet()) cb.onCharacteristicWriteRequest(watch, 402, samples, false, true, 0, WristGesture.voicePlayed(20, sgn, true));
+            cb.onCharacteristicWriteRequest(watch, 403, samples, false, true, 0, WristGesture.voiceEnd(20, voice.length, 1300));
+            Robo.settle(300);
+            assertFalse("kept for a while", told(server, WristGesture.EV_TALK_END));
+            // (what was said after the first answer is answered too; then the quiet, then «over»)
+            long until = System.currentTimeMillis() + 15000;
+            while (!told(server, WristGesture.EV_TALK_END) && System.currentTimeMillis() < until) {
+                ShadowLooper.idleMainLooper(10, java.util.concurrent.TimeUnit.SECONDS);
+                Thread.sleep(100);
+            }
+            assertTrue("closed, the watch told", told(server, WristGesture.EV_TALK_END));
+            String sent = new String(java.nio.file.Files.readAllBytes(log.toPath()), StandardCharsets.UTF_8);
+            assertTrue("every message the SDK's; the voice went up", sent.contains("\"realtimeInput\"") && sent.contains("toolResponse")
+                    && sent.contains("audioStreamEnd") && !sent.contains("test-key"));
+
+            // answers on the phone now: nothing to the watch but the text
+            e.prefs().edit().putBoolean("wrist_talk_watch", false).apply();
+            WristLink.setVoiceNotes(app, true);
+            server.messages.clear();
+            cb.onCharacteristicWriteRequest(watch, 404, samples, false, true, 0,
+                    WristGesture.voiceStart(21, WristGesture.CODEC_ADPCM | WristGesture.CODEC_LIVE, 16000, 0));
+            for (int o = 0; o < voice.length; o += 238) {
+                cb.onCharacteristicWriteRequest(watch, 405, samples, false, true, 0,
+                        WristGesture.voiceData(21, o, voice, o, Math.min(238, voice.length - o)));
+                Thread.sleep(10);
+            }
+            cb.onCharacteristicWriteRequest(watch, 406, samples, false, true, 0, WristGesture.voiceEnd(21, voice.length, 1300));
+            Robo.waitFor("answered on the phone", () -> textTold(server).length() > 0);
+            assertFalse("no voice to the watch", told(server, WristGesture.EV_TALK_AUDIO));
+            System.out.println("on the phone: «" + textTold(server) + "»");
+        } finally {
+            java.lang.reflect.Method stop = Class.forName("io.github.teoplaydor.semsearch.app.Talk").getDeclaredMethod("stop");
+            stop.setAccessible(true);
+            stop.invoke(null);
+            host.set(null, null);
+            server.messages = null;
+            e.prefs().edit().putBoolean("wrist_talk", false).apply();
+            mock.destroy();
+        }
+    }
+
+    static boolean told(WristLink.Server server, int ev) {
+        synchronized (server.messages) {
+            for (byte[] m : server.messages) if ((m[0] & 0xff) == ev) return true;
+        }
+        return false;
+    }
+
+    static String textTold(WristLink.Server server) {
+        StringBuilder b = new StringBuilder();
+        synchronized (server.messages) {
+            for (byte[] m : server.messages) if (m[0] == WristGesture.EV_TALK_TEXT) b.append(new String(m, 1, m.length - 1, StandardCharsets.UTF_8)).append('|');
+        }
+        return b.toString();
+    }
+
     /** The watch's IMA ADPCM (createAdpcm in proto.js) of samples −1…1, for the tests. */
     static byte[] adpcm(float[] x) {
         int[] step = {7, 8, 9, 10, 11, 12, 13, 14, 16, 17, 19, 21, 23, 25, 28, 31, 34, 37, 41, 45, 50, 55, 60, 66, 73, 80, 88, 97, 107, 118, 130,
@@ -572,6 +706,7 @@ public class WristTest {
 
         voiceNotes(app, server, sg, other, samples, cccd);
         gigaam(app, server, sg, other, samples);
+        talk(app, server, sg, other, samples);
         debugLog(app, server, sg, other, samples);
 
         // off: the service and the link are gone

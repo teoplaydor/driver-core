@@ -20,9 +20,19 @@ export const EV_STREAM = 5
 export const EV_CONFIG = 6
 export const EV_VOICE_FROM = 8
 export const EV_VOICE_DONE = 9
+/** A conversation (with Gemini): the answer's voice for the watch (a WAV file in pieces), «that piece is whole», a line, «over». */
+export const EV_TALK_AUDIO = 10
+export const EV_TALK_SEG = 11
+export const EV_TALK_TEXT = 12
+export const EV_TALK_END = 13
 export const CFG_LEFT_HAND = 1
 export const CFG_VOICE = 2
 export const CFG_DEBUG = 4
+/** The watch at the mouth is a conversation rather than a note; its answers are played on the watch. */
+export const CFG_TALK = 8
+export const CFG_TALK_WATCH = 16
+/** With a VOICE start's codec: a conversation as it is said — the phone streams it on, nothing is sent again. */
+export const CODEC_LIVE = 0x80
 export const VOICE_SAVED = 0
 export const VOICE_SILENT = 1
 export const VOICE_KEPT = 2
@@ -92,6 +102,11 @@ export function rollPacket(seq, twist, took, source, slope, slopeChange) {
 function put32(b, o, v) {
   put16(b, o, v & 0xffff)
   put16(b, o + 2, (v >>> 16) & 0xffff)
+}
+
+/** VOICE played: a piece of a conversation's answer played out on the watch (ok false — it would not play). */
+export function voicePlayed(id, seg, ok) {
+  return new Uint8Array([0x53, id & 0xff, seg & 0xff, ok ? 0 : 1]).buffer
 }
 
 /** VOICE start: the note's id, its codec (1 — as recorded), samples a second, bytes in all (0 — not known yet). */
@@ -236,6 +251,8 @@ export function parseEvent(v) {
     e.leftHand = (v[1] & CFG_LEFT_HAND) !== 0
     e.voice = (v[1] & CFG_VOICE) !== 0
     e.debug = (v[1] & CFG_DEBUG) !== 0
+    e.talk = (v[1] & CFG_TALK) !== 0
+    e.talkWatch = (v[1] & CFG_TALK_WATCH) !== 0
     e.mtu = v.length >= 4 ? v[2] | (v[3] << 8) : 0
   } else if (ev === EV_VOICE_FROM && v.length >= 6) {
     e.id = v[1]
@@ -244,6 +261,16 @@ export function parseEvent(v) {
     e.id = v[1]
     e.result = v[2]
     e.line = utf8(v, 3)
+  } else if (ev === EV_TALK_AUDIO && v.length >= 6) {
+    e.seg = v[1]
+    e.offset = (v[2] | (v[3] << 8) | (v[4] << 16) | (v[5] << 24)) >>> 0
+    e.data = v.subarray(6)
+  } else if (ev === EV_TALK_SEG && v.length >= 7) {
+    e.seg = v[1]
+    e.total = (v[2] | (v[3] << 8) | (v[4] << 16) | (v[5] << 24)) >>> 0
+    e.ms = v[6] * 100
+  } else if (ev === EV_TALK_TEXT) {
+    e.line = utf8(v, 1)
   }
   return e
 }
@@ -344,10 +371,12 @@ export function createAdpcm() {
  * there; again(): the link was new, all of it again. The codec is told by the first frame: the recorder's own Ogg file
  * goes as it is, Opus packets without one each after its length (u16), so the phone can still take them apart.
  */
-export function createVoice(id, format, rate) {
-  // kept in pieces of 16 KB: a long note never needs one big block, nor a copy of all of it to grow (the watch's memory)
+export function createVoice(id, format, rate, live) {
+  // kept in pieces of 16 KB: a long note never needs one big block, nor a copy of all of it to grow (the watch's memory);
+  // live (a conversation, minutes long): the pieces already sent let go — nothing is sent again
   const CHUNK = 16384
   const chunks = []
+  let freed = 0
   function write(bytes, at) {
     let o = 0
     while (o < bytes.length) {
@@ -425,12 +454,15 @@ export function createVoice(id, format, rate) {
       if (!v.codec) return null
       if (!v.startSent) {
         v.startSent = true
-        return voiceStart(v.id, v.codec, v.rate, 0)
+        return voiceStart(v.id, v.codec | (live ? CODEC_LIVE : 0), v.rate, 0)
       }
       if (v.sent < v.len) {
         const n = Math.max(1, Math.min(room, v.len - v.sent))
         const p = voiceData(v.id, v.sent, read(v.sent, n))
         v.sent += n
+        if (live) {
+          while ((freed + 1) * CHUNK <= v.sent) chunks[freed++] = null
+        }
         return p
       }
       if (v.ended && !v.endSent) {
@@ -439,18 +471,25 @@ export function createVoice(id, format, rate) {
       }
       return null
     },
+    live: !!live,
     from(offset) {
+      if (live) return // nothing is kept to send again
       v.sent = Math.max(0, Math.min(offset, v.len))
       v.endSent = false
     },
     again() {
+      if (live) {
+        // a new link: the conversation's voice goes on from here (what was said meanwhile is gone)
+        v.startSent = false
+        return
+      }
       v.startSent = false
       v.sent = 0
       v.endSent = false
     },
-    /** The bytes kept (for the tests). */
+    /** The bytes kept (for the tests; live — those not yet let go). */
     bytes() {
-      return read(0, v.len)
+      return read(freed * CHUNK, v.len - freed * CHUNK)
     }
   }
   return v
@@ -482,6 +521,8 @@ export function createTalk() {
   const AWAY_MS = 450
   const MIN_MS = 900
   const MAX_MS = 30000
+  const TALK_MAX_MS = 300000 // a conversation: five minutes at the mouth at most
+  let maxMs = MAX_MS
   const REST_MS = 1500
   const SMOOTH_MS = 150
   const LEARN_S = 20
@@ -560,6 +601,10 @@ export function createTalk() {
     }
   }
   return {
+    /** A conversation (true) rather than a note: held at the mouth up to five minutes, not thirty seconds. */
+    setTalk(on) {
+      maxMs = on ? TALK_MAX_MS : MAX_MS
+    },
     setHand(leftHand) {
       if (!learnt) side = leftHand ? 1 : -1
     },
@@ -709,7 +754,7 @@ export function createTalk() {
         const away = poses.length ? near > CONE_STOP : f < AWAY_FINGERS || Math.abs(uz) > AWAY_UPRIGHT
         if (!away) awaySince = NaN
         else if (Number.isNaN(awaySince)) awaySince = t
-        if ((!Number.isNaN(awaySince) && t - awaySince >= AWAY_MS) || t - startAt >= MAX_MS) {
+        if ((!Number.isNaN(awaySince) && t - awaySince >= AWAY_MS) || t - startAt >= maxMs) {
           state = 3
           restAt = t
           return Number.isNaN(awaySince) || awaySince - startAt >= MIN_MS ? 'stop' : 'cancel'

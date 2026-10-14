@@ -31,8 +31,10 @@ const flush = () => new Promise((r) => setImmediate(r))
 let clock = 1_000_000
 Date.now = () => clock
 let timers = []
+let timerIds = 0
 globalThis.setTimeout = (fn, ms) => {
-  const t = { fn, at: clock + (ms || 0), id: timers.length + 1 }
+  // ids never reused (as on the watch): clearing one timer never clears another
+  const t = { fn, at: clock + (ms || 0), id: ++timerIds }
   timers.push(t)
   return t.id
 }
@@ -220,7 +222,9 @@ async function vela() {
           setImmediate(() => { R.onframerecorded && R.onframerecorded({ frameBuffer: new Uint8Array(W.lastFrame || [1]).buffer, isLastFrame: true })
             o && o.success && o.success({}); o && o.complete && o.complete() }) } }
       W.record = R; export default R`,
-    '@system.file': `export default { readArrayBuffer(o) { o.fail && o.fail(null, 300) } }`,
+    '@system.file': `export default { readArrayBuffer(o) { o.fail && o.fail(null, 300) },
+        writeArrayBuffer(o) { W.files = W.files || {}; if (W.failFile) { setImmediate(() => o.fail && o.fail(null, 300)); return }
+          W.files[o.uri] = Buffer.from(o.buffer); setImmediate(() => o.success && o.success()) } }`,
     // like the S5 seems to: a source set while playing is not taken (the old one goes on, with the new «loop») — so the
     // page must stop the player before it changes the sound
     '@system.audio': `const A = { _src: '', get src() { return A._src }, set src(v) { if (!W.audioOn) A._src = v },
@@ -755,6 +759,93 @@ async function vela() {
   p9.stop()
   p10.stop()
   ok(W.storage.get('wrist_trail') === 'чисто: выключено', 'vela (safety): «Стоп» — the run marked clean')
+
+  // a conversation with Gemini: the watch told so; at the mouth its voice goes live (ADPCM, marked, nothing kept to
+  // send again); lowered — the end, no bells over the answer to come; the answer's pieces put together, written to
+  // files and played one after another, each told played; a spoilt piece told not played; the answer's line shown
+  const p11 = newLink()
+  await flush(); await flush(); await flush(); await flush()
+  W.found([{ deviceId: '5A:11:22:33:44:55', rssi: -60, addressType: 'RANDOM', data: new Uint8Array([2, 1, 6, 17, 7, ...le]).buffer }])
+  const g11 = W.gatts[W.gatts.length - 1]
+  g11.onBLEConnectionStateChange(2)
+  await flush(); await flush(); await flush()
+  const say11 = (b) => g11.onBLECharacteristicChange({ serviceUuid: SERVICE, characteristicUuid: EVENTS, characteristicValue: new Uint8Array(b).buffer })
+  say11([6, 3 | 8 | 16, 247, 0])
+  ok(p11.talkMode && p11.talkWatch, 'vela (talk): told — at the mouth a conversation, the answers on the watch')
+  const pose11 = (u) => { const m = Math.hypot(...u); return u.map((c) => (c / m) * 9.81 + (rnd() - 0.5) * 0.2) }
+  const step11 = async (u) => { await advance(50); const [x, y, z] = pose11(u); W.acc && W.acc.callback({ x, y, z }); await flush() }
+  const HANG11 = [-1, 0.05, 0.1]
+  const MOUTH11 = [0.85, 0.35, 0.12]
+  for (let i = 0; i < 40; i++) await step11(HANG11)
+  const w11 = W.writes.length
+  for (let i = 0; i <= 10; i++) await step11(HANG11.map((h, j) => h + (MOUTH11[j] - h) * (i / 10)))
+  let fed = 0
+  for (let i = 0; i < 40; i++) {
+    await step11(MOUTH11)
+    if (W.recording) {
+      // 0.1 s of the recorder's PCM a step (3200 bytes): 80 KB in all — more than a kept piece of 16 KB of ADPCM
+      for (let r = 0; r < 2; r++) {
+        const f = new Uint8Array(3200)
+        for (let k = 0; k < f.length; k += 2) {
+          const v = Math.round(8000 * Math.sin((2 * Math.PI * 250 * (fed * 1600 + k / 2)) / 16000))
+          f[k] = v & 0xff
+          f[k + 1] = (v >> 8) & 0xff
+        }
+        fed++
+        W.record.onframerecorded({ frameBuffer: f.buffer, isLastFrame: false })
+        await flush()
+      }
+    }
+  }
+  const lv = p11.voices[0]
+  const tw = W.writes.slice(w11).filter((w) => w[1] === SAMPLES).map((w) => w[2])
+  ok(/Gemini/.test(p11.note) && tw.some((w) => w.startsWith('50') && w.slice(4, 6) === '85'), 'vela (talk): at the mouth — «' + p11.note + '», the voice marked live (codec 0x85: ADPCM | live)')
+  ok(lv && lv.live && lv.len > 30000 && lv.bytes().length < lv.len - 16000, 'vela (talk): what was sent let go (' + lv.len + ' bytes said, ' + lv.bytes().length + ' kept)')
+  const sentLive = tw.filter((w) => w.startsWith('51')).length
+  for (let i = 0; i <= 20; i++) await step11(MOUTH11.map((m, j) => m + (HANG11[j] - m) * Math.min(1, i / 10)))
+  await advance(800)
+  const tw2 = W.writes.slice(w11).filter((w) => w[1] === SAMPLES).map((w) => w[2])
+  ok(tw2[tw2.length - 1].startsWith('52') && p11.voices.length === 0 && /Gemini отвечает/.test(p11.note) && sentLive > 100,
+    'vela (talk): lowered — the end sent, nothing waited for («' + p11.note + '»), ' + sentLive + ' writes of voice')
+  ok(!W.played.slice(-3).some((x) => x[0] === '/common/end.mp3'), 'vela (talk): no falling bells over the answer to come')
+  const liveId = parseInt(tw.find((w) => w.startsWith('50')).slice(2, 4), 16)
+  // the answer: two pieces, the second while the first plays
+  const wav = (n, seed) => { const b = Buffer.alloc(n); b.write('RIFF', 0); for (let i = 4; i < n; i++) b[i] = (i * seed) & 0xff; return b }
+  const sendPiece = (seg, b, skip) => {
+    for (let o = 0; o < b.length; o += 238) {
+      if (skip && o === 238) continue
+      const n = Math.min(238, b.length - o)
+      say11([10, seg, o & 0xff, (o >> 8) & 0xff, 0, 0, ...b.subarray(o, o + n)])
+    }
+    say11([11, seg, b.length & 0xff, (b.length >> 8) & 0xff, 0, 0, 9, 0])
+  }
+  const a1 = wav(1500, 7)
+  const a2 = wav(900, 13)
+  const w12 = W.writes.length
+  sendPiece(1, a1)
+  await flush(); await flush()
+  sendPiece(2, a2)
+  await flush(); await flush()
+  ok(W.files['internal://files/talk1.wav'] && W.files['internal://files/talk1.wav'].equals(a1) && W.files['internal://files/talk2.wav'].equals(a2),
+    'vela (talk): the pieces put together and written to files')
+  ok(W.audio.src === 'internal://files/talk1.wav' && W.audio.loop === false && W.audioOn, 'vela (talk): the first piece plays (the silence stopped for it)')
+  await advance(350); await flush()
+  ok(W.audio.src === 'internal://files/talk2.wav', 'vela (talk): …then the second')
+  await advance(350); await flush(); await advance(100); await flush()
+  const pl = W.writes.slice(w12).filter((w) => w[1] === SAMPLES && w[2].startsWith('53')).map((w) => w[2])
+  const idh = (liveId < 16 ? '0' : '') + liveId.toString(16)
+  ok(pl.join() === '53' + idh + '0100,53' + idh + '0200', 'vela (talk): each told played (' + pl.join() + ')')
+  ok(W.audio.src === '/common/quiet.mp3' && W.audio.loop === true && W.audioOn, 'vela (talk): then the silence again')
+  // a spoilt piece (a write lost): told not played, nothing played
+  const w13 = W.writes.length
+  sendPiece(3, wav(800, 3), true)
+  await flush(); await advance(100); await flush()
+  const pl3 = W.writes.slice(w13).filter((w) => w[1] === SAMPLES && w[2].startsWith('53')).map((w) => w[2])
+  ok(pl3.join() === '53' + idh + '0301' && W.audio.src === '/common/quiet.mp3', 'vela (talk): a spoilt piece — told not played (' + pl3.join() + ')')
+  say11([12, ...Buffer.from('Готово, напомню завтра в девять.')])
+  ok(p11.note === 'Готово, напомню завтра в девять.', 'vela (talk): the answer\'s line shown — «' + p11.note + '»')
+  say11([13])
+  p11.stop()
 }
 
 await zepp()

@@ -11,7 +11,8 @@
 import {
   SERVICE, SAMPLES, EVENTS, EV_NEXT, EV_PREVIOUS, EV_LEARNED, EV_IGNORED, EV_PAUSE, EV_STREAM, EV_CONFIG, EV_VOICE_FROM,
   EV_VOICE_DONE, VOICE_SAVED, VOICE_SILENT, VOICE_KEPT, VOICE_ANSWER, SOURCE_COMPASS, RAW_MAX, advertises, createPacker,
-  parseEvent, createTalk, createVoice, rawPacket, diagPacket, diagPackets
+  parseEvent, createTalk, createVoice, rawPacket, diagPacket, diagPackets, EV_TALK_AUDIO, EV_TALK_SEG, EV_TALK_TEXT, EV_TALK_END,
+  voicePlayed
 } from './proto.js'
 
 /** The silence that keeps the app running in the background, and how soon it is started again when stopped. */
@@ -56,6 +57,11 @@ const RAW_MIN_MTU = 100
  */
 const PCM_REC = { format: 'pcm', sampleRate: 16000, numberOfChannels: 1, encodeBitRate: 256000, frameSize: 3200, voice: 'adpcm' }
 const OPUS = { format: 'opus', sampleRate: 16000, numberOfChannels: 1, encodeBitRate: 22000, frameSize: 512 }
+
+/** A conversation's answer: its pieces kept as files (a few, in turn), played one after another. */
+const TALK_FILES = 4
+/** A piece that does not say it ended is taken for played this long after its own length. */
+const TALK_SLACK_MS = 3000
 
 /** The phone's answer about a note may take a while (recognition): after this long the end is said again. */
 const DONE_MS = 40000
@@ -258,18 +264,18 @@ export function createLink(sys) {
         }, ALIVE_RETRY_MS)
       }
       audio.onplay = safe('звук play', function () {
-        if (self.chiming) return
+        if (self.chiming || self.talkPlaying) return
         if (!self.audioPlaying) self.logLine('фон: тишина играет')
         self.audioPlaying = true
         self.aliveErrors = 0
         self.bg = 'работает и в фоне — можно выйти из приложения'
       })
       audio.onpause = safe('звук pause', function () {
-        if (self.chiming || Date.now() < (self.quietSwitchUntil || 0)) return
+        if (self.chiming || self.talkPlaying || Date.now() < (self.quietSwitchUntil || 0)) return
         again('фон: звук приостановлен — включаю снова')
       })
       audio.onstop = safe('звук stop', function () {
-        if (self.chiming || Date.now() < (self.quietSwitchUntil || 0)) return
+        if (self.chiming || self.talkPlaying || Date.now() < (self.quietSwitchUntil || 0)) return
         self.logLine('фон: звук остановлен')
         again('фон: звук остановлен — включаю снова')
       })
@@ -278,12 +284,20 @@ export function createLink(sys) {
           self.chimed()
           return
         }
+        if (self.talkPlaying) {
+          self.talkEnded(self.talkPlaying, true)
+          return
+        }
         if (Date.now() < (self.quietSwitchUntil || 0)) return
         again('')
       })
       audio.onerror = safe('звук error', function () {
         if (self.chiming) {
           self.chimed()
+          return
+        }
+        if (self.talkPlaying) {
+          self.talkEnded(self.talkPlaying, false)
           return
         }
         self.logLine('фон: ошибка звука')
@@ -303,7 +317,7 @@ export function createLink(sys) {
      * and then(). Without a player, then() at once.
      */
     chime(src, then) {
-      if (!audio || !this.sounds) {
+      if (!audio || !this.sounds || this.talkPlaying) {
         if (then) then()
         return
       }
@@ -347,7 +361,8 @@ export function createLink(sys) {
       this.chimeTimer = 0
       this.audioPlaying = false
       this.halt()
-      if (this.alive) this.play()
+      if (this.talkQueue && this.talkQueue.length) this.playTalk()
+      else if (this.alive) this.play()
       if (c.then) c.then()
     },
 
@@ -403,6 +418,12 @@ export function createLink(sys) {
       this.rawBuf = []
       this.rawOut = []
       this.diagOut = []
+      this.talkMode = false
+      this.talkWatch = false
+      this.talkIn = null
+      this.talkQueue = []
+      this.talkPlaying = null
+      this.talkTimer = 0
       this.sounds = true
       storage.get({
         key: 'wrist_sounds',
@@ -935,7 +956,11 @@ export function createLink(sys) {
         if (e.mtu > 23) this.mtu = e.mtu
         this.chunk = this.mtu ? Math.max(CHUNK_MIN, Math.min(this.mtu, 512) - 3 - 6) : CHUNK_UNKNOWN
         this.setDebug(e.debug)
-        this.logLine('настройки: ' + (e.leftHand ? 'левая' : 'правая') + ' рука, заметки ' + (e.voice ? 'вкл' : 'выкл') + ', MTU ' + e.mtu)
+        this.talkMode = e.talk
+        this.talkWatch = e.talkWatch
+        this.talk.setTalk(e.talk)
+        this.logLine('настройки: ' + (e.leftHand ? 'левая' : 'правая') + ' рука, заметки ' + (e.voice ? 'вкл' : 'выкл') + (e.talk
+          ? ', у рта — разговор с Gemini (ответ ' + (e.talkWatch ? 'в часах' : 'в телефоне') + ')' : '') + ', MTU ' + e.mtu)
         if (e.voice !== this.voiceOn) {
           this.voiceOn = e.voice
           storage.set({ key: 'wrist_voice', value: e.voice ? '1' : '0' })
@@ -962,6 +987,20 @@ export function createLink(sys) {
         return
       } else if (ev === EV_VOICE_DONE) {
         this.voiceDone(e)
+        return
+      } else if (ev === EV_TALK_AUDIO) {
+        this.talkAudio(e)
+        return
+      } else if (ev === EV_TALK_SEG) {
+        this.talkSegment(e)
+        return
+      } else if (ev === EV_TALK_TEXT) {
+        this.note = e.line
+        this.logLine('Gemini: ' + e.line, true)
+        return
+      } else if (ev === EV_TALK_END) {
+        this.logLine('разговор окончен')
+        this.phase('разговор окончен')
         return
       } else if (ev === EV_NEXT || ev === EV_PREVIOUS) {
         this.ev = ev === EV_NEXT ? 'вперёд' : 'назад'
@@ -1252,14 +1291,15 @@ export function createLink(sys) {
       if (this.rec || this.pending) return
       this.noteId = (this.noteId + 1) & 0xff
       vibrator.vibrate({ mode: 'short' })
-      this.note = 'говорите… опустите руку — отправлю'
+      const live = !!this.talkMode
+      this.note = live ? 'говорите с Gemini… опустите руку — конец' : 'говорите… опустите руку — отправлю'
       const pending = { at: now }
       this.pending = pending
       const self = this
       this.chime(CHIME_START, function () {
         if (self.pending !== pending) return // taken away before the bells ended
         self.pending = null
-        self.record(PCM_REC, Date.now())
+        self.record(PCM_REC, Date.now(), live)
       })
     },
 
@@ -1301,10 +1341,10 @@ export function createLink(sys) {
     },
 
     /** Recording in one format; PCM not taken (202 — wrong parameters) — Opus. */
-    record(opts, now) {
+    record(opts, now, live) {
       const self = this
-      const v = createVoice(this.noteId, opts.voice || opts.format, opts.sampleRate)
-      const rec = { v, opts, at: now, ms: 0, stopping: false, cancel: false, frames: 0, raw: 0 }
+      const v = createVoice(this.noteId, opts.voice || opts.format, opts.sampleRate, live)
+      const rec = { v, opts, at: now, ms: 0, stopping: false, cancel: false, frames: 0, raw: 0, live: !!live }
       this.rec = rec
       this.voices.push(v)
       record.onframerecorded = safe('кадр записи', function (res) {
@@ -1344,7 +1384,7 @@ export function createLink(sys) {
           self.dropVoice(v)
           self.rec = null
           if (code === 202 && opts === PCM_REC) {
-            self.record(OPUS, now)
+            self.record(OPUS, now, live)
             return
           }
           self.note = 'запись не началась (' + code + ')'
@@ -1416,6 +1456,13 @@ export function createLink(sys) {
       }
       rec.v.end(rec.ms)
       rec.v.endAt = 0
+      if (rec.live) {
+        // a conversation: the end said, the answer comes as it is made (no bells over it)
+        this.note = 'Gemini отвечает…'
+        this.pump()
+        this.resumeAlive()
+        return
+      }
       this.note = 'отправляю заметку…'
       this.pump()
       // the falling bells: the recording is over (played now, so they are not in it)
@@ -1424,7 +1471,92 @@ export function createLink(sys) {
 
     /** After a recording: the background's sound again, if the recorder stopped it. */
     resumeAlive() {
-      if (this.alive && !this.audioPlaying && !this.aliveTimer && !this.chiming && audio) this.play()
+      if (this.alive && !this.audioPlaying && !this.aliveTimer && !this.chiming && !this.talkPlaying && audio) this.play()
+    },
+
+    // ---------------------------------------------------------------- a conversation's answer
+
+    /** A piece of the answer's WAV file: kept in order (anything else — a lost write — spoils the piece). */
+    talkAudio(e) {
+      let t = this.talkIn
+      if (!t || t.seg !== e.seg) {
+        t = { seg: e.seg, parts: [], len: 0, bad: false }
+        this.talkIn = t
+      }
+      if (e.offset !== t.len) {
+        t.bad = true
+        return
+      }
+      t.parts.push(new Uint8Array(e.data))
+      t.len += e.data.length
+    },
+
+    /** A piece whole: written to a file and played after those before it; spoilt — told so (the phone moves on). */
+    talkSegment(e) {
+      const t = this.talkIn
+      this.talkIn = null
+      if (!t || t.seg !== e.seg || t.bad || t.len !== e.total) {
+        this.logLine('ответ: кусок ' + e.seg + ' не целый (' + (t ? t.len : 0) + ' из ' + e.total + ')', true)
+        this.send(voicePlayed(this.noteId, e.seg, false))
+        return
+      }
+      const buf = new Uint8Array(t.len)
+      let o = 0
+      for (const p of t.parts) {
+        buf.set(p, o)
+        o += p.length
+      }
+      const uri = 'internal://files/talk' + (e.seg % TALK_FILES) + '.wav'
+      const self = this
+      const seg = e.seg
+      const ms = e.ms
+      file.writeArrayBuffer({
+        uri,
+        buffer: buf,
+        success: safe('ответ: файл', function () {
+          self.talkQueue.push({ seg, uri, ms })
+          self.playTalk()
+        }),
+        fail: safe('ответ: файл', function (data, code) {
+          self.logLine('ответ: файл не записан (' + code + ')', true)
+          self.send(voicePlayed(self.noteId, seg, false))
+        })
+      })
+    },
+
+    /** The next piece of the answer, if none plays (the bells first, if they ring). */
+    playTalk() {
+      if (this.talkPlaying || this.chiming || !audio) return
+      const next = this.talkQueue.shift()
+      if (!next) {
+        this.resumeAlive()
+        return
+      }
+      this.talkPlaying = next
+      this.phase('ответ: кусок ' + next.seg)
+      const self = this
+      // a piece that never says it ended is taken for played a little after its length
+      this.talkTimer = setTimeout(() => self.talkEnded(next, true), next.ms + TALK_SLACK_MS)
+      try {
+        this.halt()
+        this.audioPlaying = false
+        audio.src = next.uri
+        audio.loop = false
+        audio.play()
+      } catch (e) {
+        this.talkEnded(next, false)
+      }
+    },
+
+    /** A piece played (or not): the phone told, the next one played. */
+    talkEnded(piece, ok) {
+      if (!piece || this.talkPlaying !== piece) return
+      this.talkPlaying = null
+      if (this.talkTimer) clearTimeout(this.talkTimer)
+      this.talkTimer = 0
+      if (!ok) this.logLine('ответ: кусок ' + piece.seg + ' не сыгран', true)
+      this.send(voicePlayed(this.noteId, piece.seg, ok))
+      this.playTalk()
     },
 
     dropVoice(v) {
@@ -1435,6 +1567,11 @@ export function createLink(sys) {
     /** The next write of the first note on its way; after the end, the phone's answer is waited for (and asked again). */
     voiceNext(v) {
       const p = v.next(this.chunk)
+      if (v.live) {
+        // a conversation: no outcome waited for — once its end is out, it is done here
+        if (!p && v.ended && v.endSent) this.dropVoice(v)
+        return p
+      }
       if (p) {
         if (v.ended && v.endSent && !v.endAt) v.endAt = Date.now()
         if (v.len) this.note = this.rec && this.rec.v === v ? 'говорите… опустите руку — отправлю'

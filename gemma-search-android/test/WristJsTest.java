@@ -89,6 +89,9 @@ public class WristJsTest {
                 && "поворот 61° — отправлен".equals(WristGesture.diagText(fixed.get(9))),
                 "RAW and DIAG (the log): read by the phone as the watch wrote them");
         ok(Arrays.equals(fixed.get(8), WristGesture.rawPacket(5, raw)), "RAW: the same bytes as the phone's");
+        ok(Arrays.equals(fixed.get(10), WristGesture.voiceStart(7, WristGesture.CODEC_ADPCM | WristGesture.CODEC_LIVE, 16000, 0))
+                && Arrays.equals(fixed.get(11), WristGesture.voicePlayed(7, 3, true)) && Arrays.equals(fixed.get(12), WristGesture.voicePlayed(7, 4, false)),
+                "a conversation: the live voice's start and «played» — the same bytes as the phone's");
         ok(Arrays.equals(fixed.get(5), WristGesture.voiceStart(7, WristGesture.CODEC_RECORDED, 16000, 0))
                 && Arrays.equals(fixed.get(6), WristGesture.voiceData(7, 70000, new byte[]{1, 2, 3, (byte) 250, (byte) 255}, 0, 5))
                 && Arrays.equals(fixed.get(7), WristGesture.voiceEnd(7, 70005, 4321)), "VOICE: the same bytes as the phone's");

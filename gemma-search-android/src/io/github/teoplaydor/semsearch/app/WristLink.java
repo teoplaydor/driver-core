@@ -30,6 +30,7 @@ import java.io.ByteArrayOutputStream;
 import java.util.HashMap;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.UUID;
@@ -297,6 +298,8 @@ public final class WristLink {
         public volatile int lastEvent = -1;
         /** The last longer message sent to the watch (config, voice), for the tests. */
         public volatile byte[] lastMessage;
+        /** Tests: every longer message sent to the watch (null — not kept). */
+        public volatile List<byte[]> messages;
         /**
          * Voice notes heard lately, by watch, note id, length and duration: the same note sent again (its end said again,
          * or all of it after a new link) is answered as before, not made a second note. Null result: still being made.
@@ -325,6 +328,20 @@ public final class WristLink {
             long askedFrom = -1, askedAt;
             /** A long write in parts (prepared writes) until it is executed. */
             ByteArrayOutputStream prepared;
+            /** The conversation (with Gemini) this watch is in: its voice's id; -1 — none. */
+            int liveId = -1;
+            /** The conversation's way to this watch. */
+            final Talk.Watch talk = new Talk.Watch() {
+                @Override
+                public void send(byte[] packet) {
+                    message(Conn.this, packet);
+                }
+
+                @Override
+                public int room() {
+                    return mtu - 3;
+                }
+            };
 
             Conn(BluetoothDevice dev) {
                 this.dev = dev;
@@ -503,9 +520,11 @@ public final class WristLink {
         /** The watch's settings: which hand, voice notes on, and the link's MTU (how big its writes may be). */
         private void sendConfig(Conn k) {
             boolean debug = debug(c);
+            boolean talk = Talk.on(c), talkWatch = talk && Talk.onWatch(c) && k.mtu - 3 >= Talk.MIN_ROOM;
             int flags = (leftHand(c) ? WristGesture.CFG_LEFT_HAND : 0) | (voiceNotes(c) ? WristGesture.CFG_VOICE : 0)
-                    | (debug ? WristGesture.CFG_DEBUG : 0);
-            log("CFG", "left=" + leftHand(c) + " voice=" + voiceNotes(c) + " debug=" + debug + " mtu=" + k.mtu);
+                    | (debug ? WristGesture.CFG_DEBUG : 0) | (talk ? WristGesture.CFG_TALK : 0) | (talkWatch ? WristGesture.CFG_TALK_WATCH : 0);
+            log("CFG", "left=" + leftHand(c) + " voice=" + voiceNotes(c) + " debug=" + debug + " talk=" + talk + (talk ? " answers on the "
+                    + (talkWatch ? "watch" : "phone") : "") + " mtu=" + k.mtu);
             message(k, WristGesture.config(flags, k.mtu));
             tick.removeCallbacks(debugOver);
             if (debug) tick.postDelayed(debugOver, debugUntil(c) - System.currentTimeMillis() + 500);
@@ -575,6 +594,7 @@ public final class WristLink {
                         if (!trustedConnected()) setStatus("часы подключаются…");
                     } else if (state == BluetoothProfile.STATE_DISCONNECTED) {
                         Conn k = conns.remove(dev.getAddress());
+                        if (k != null && k.liveId >= 0) Talk.stop();
                         if (k != null && k.trusted && !trustedConnected()) {
                             advertise(true);
                             setStatus("часы отключились — ждёт");
@@ -857,6 +877,29 @@ public final class WristLink {
 
         /** A voice note's packet: a gap asked for again (at most once a second), the whole note made a note. */
         private void voice(final Conn k, byte[] p) {
+            int type = p[0] & 0xff;
+            // a conversation (with Gemini): its voice streamed on as it comes, no note made
+            if (type == WristGesture.VOICE_START && p.length >= 5 && (p[2] & WristGesture.CODEC_LIVE) != 0) {
+                k.liveId = p[1] & 0xff;
+                log("VOICE", "live id=" + k.liveId + " codec=" + (p[2] & 0x7f) + " rate=" + ((p[3] & 0xff) | (p[4] & 0xff) << 8));
+                Talk.start(c, k.talk, k.liveId, p[2] & 0xff, (p[3] & 0xff) | (p[4] & 0xff) << 8);
+                return;
+            }
+            if (type == WristGesture.VOICE_PLAYED && p.length >= 4) {
+                Talk.played(p[1] & 0xff, p[2] & 0xff, p[3] == 0);
+                return;
+            }
+            if (k.liveId >= 0 && (p[1] & 0xff) == k.liveId && (type == WristGesture.VOICE_DATA || type == WristGesture.VOICE_END)) {
+                if (type == WristGesture.VOICE_DATA && p.length > 6) {
+                    long offset = (p[2] & 0xffL) | (p[3] & 0xffL) << 8 | (p[4] & 0xffL) << 16 | (p[5] & 0xffL) << 24;
+                    Talk.data(k.liveId, offset, p, 6, p.length - 6);
+                } else if (type == WristGesture.VOICE_END) {
+                    log("VOICE", "live end id=" + k.liveId);
+                    Talk.end(k.liveId);
+                }
+                return;
+            }
+            if (type == WristGesture.VOICE_START) k.liveId = -1; // a note now, not the conversation
             int r = k.voice.packet(p);
             if (r == VoiceNote.STARTED) {
                 log("VOICE", "start id=" + k.voice.id() + " codec=" + k.voice.codec() + " rate=" + k.voice.rate());
@@ -958,6 +1001,8 @@ public final class WristLink {
         /** A longer message to the watch (settings, voice notes), if it listens. */
         private void message(Conn k, byte[] v) {
             lastMessage = v;
+            List<byte[]> m = messages;
+            if (m != null) m.add(v);
             notifyWatch(k, v);
         }
 

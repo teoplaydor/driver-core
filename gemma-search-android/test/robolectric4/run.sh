@@ -14,7 +14,9 @@
 #                     previous while music plays, pause / stream with the music, another watch turned away, the
 #                     direction taught, off; voice notes from the watch, GigaAM downloaded from a stand-in Hub and
 #                     recognizing them (needs build/test/gigaam from test/run_tests.sh), a broken model → the phone's
-#                     recognizer
+#                     recognizer; a conversation with Gemini (a stand-in Live server held to Google's SDK): the live
+#                     voice passed on, a note saved by Gemini's function call, the spoken answer to the watch in WAV
+#                     pieces, kept a while then closed; answers on the phone
 #   WristWatchTest  — the Wear OS watch app and the phone end to end: scan, connect, HELLO, the accelerometer streamed,
 #                     next / previous and the watch's buzz, paused with the music, reconnecting
 #   ScanTest        — a document photo offered as a scan for printing: the sheet cut out, black and white, saved;
