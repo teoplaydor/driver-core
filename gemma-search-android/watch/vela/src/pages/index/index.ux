@@ -3,6 +3,7 @@
     <text class="title">Пульт кистью</text>
     <text class="state">{{ state }}</text>
     <text class="note" show="{{ note !== '' }}">{{ note }}</text>
+    <text class="err" show="{{ err !== '' }}">{{ err }}</text>
     <text class="diag">{{ diag }}</text>
     <text class="bg" show="{{ on && bg !== '' }}">{{ bg }}</text>
     <text class="hint">{{ voiceOn ? 'Вправо — дальше, влево — назад · ко рту — заметка' : 'Вправо — дальше, влево — назад' }}</text>
@@ -30,7 +31,8 @@ export default {
     voiceOn: true,
     screenOn: false,
     poses: 0,
-    soundsOn: true
+    soundsOn: true,
+    err: ''
   },
 
   onInit() {
@@ -46,6 +48,7 @@ export default {
       self.screenOn = v.screenOn
       self.poses = v.poses
       self.soundsOn = v.soundsOn
+      self.err = v.err
     })
     this.link.visible(true)
   },
@@ -124,6 +127,13 @@ export default {
   width: 400px;
   font-size: 22px;
   color: #6f7d8c;
+  text-align: center;
+}
+.err {
+  margin-top: 6px;
+  width: 400px;
+  font-size: 20px;
+  color: #e57373;
   text-align: center;
 }
 .bg {

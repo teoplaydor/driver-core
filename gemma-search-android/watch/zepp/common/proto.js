@@ -179,6 +179,27 @@ export function diagPacket(text, max) {
   return b.buffer
 }
 
+/**
+ * A long line in as many DIAG packets as it takes (each max bytes in all, cut on whole letters; at most parts of them):
+ * on a small MTU a line would otherwise be its first twenty bytes.
+ */
+export function diagPackets(text, max, parts) {
+  const bytes = utf8Bytes(String(text))
+  const room = Math.max(4, (max || 20) - 1)
+  const out = []
+  let o = 0
+  while (o < bytes.length && out.length < (parts || 20)) {
+    let n = Math.min(room, bytes.length - o)
+    while (n > 0 && o + n < bytes.length && (bytes[o + n] & 0xc0) === 0x80) n--
+    const b = new Uint8Array(1 + n)
+    b[0] = 0x70
+    for (let i = 0; i < n; i++) b[1 + i] = bytes[o + i]
+    out.push(b.buffer)
+    o += n
+  }
+  return out
+}
+
 /** UTF-8 bytes (a Uint8Array, from..to) as a string (the watch's JavaScript may have no TextDecoder). */
 export function utf8(b, from, to) {
   let s = ''
@@ -324,7 +345,33 @@ export function createAdpcm() {
  * goes as it is, Opus packets without one each after its length (u16), so the phone can still take them apart.
  */
 export function createVoice(id, format, rate) {
-  let buf = new Uint8Array(8192)
+  // kept in pieces of 16 KB: a long note never needs one big block, nor a copy of all of it to grow (the watch's memory)
+  const CHUNK = 16384
+  const chunks = []
+  function write(bytes, at) {
+    let o = 0
+    while (o < bytes.length) {
+      const c = Math.floor(at / CHUNK)
+      while (chunks.length <= c) chunks.push(new Uint8Array(CHUNK))
+      const off = at % CHUNK
+      const n = Math.min(bytes.length - o, CHUNK - off)
+      chunks[c].set(bytes.subarray(o, o + n), off)
+      o += n
+      at += n
+    }
+  }
+  function read(from, n) {
+    const out = new Uint8Array(n)
+    let o = 0
+    while (o < n) {
+      const at = from + o
+      const off = at % CHUNK
+      const k = Math.min(n - o, CHUNK - off)
+      out.set(chunks[Math.floor(at / CHUNK)].subarray(off, off + k), o)
+      o += k
+    }
+    return out
+  }
   // PCM from the recorder goes as IMA ADPCM (a quarter of the bytes, a format the phone surely reads)
   const enc = format === 'adpcm' ? createAdpcm() : null
   const v = {
@@ -358,18 +405,11 @@ export function createVoice(id, format, rate) {
         v.codec = ogg || riff ? CODEC_RECORDED : format === 'pcm' ? CODEC_PCM16 : format === 'opus' ? CODEC_OPUS_PACKETS : CODEC_RECORDED
       }
       const extra = v.codec === CODEC_OPUS_PACKETS ? 2 : 0
-      if (v.len + extra + f.length > buf.length) {
-        let n = buf.length * 2
-        while (n < v.len + extra + f.length) n *= 2
-        const b = new Uint8Array(n)
-        b.set(buf.subarray(0, v.len))
-        buf = b
-      }
       if (extra) {
-        buf[v.len++] = f.length & 0xff
-        buf[v.len++] = (f.length >> 8) & 0xff
+        write(new Uint8Array([f.length & 0xff, (f.length >> 8) & 0xff]), v.len)
+        v.len += 2
       }
-      buf.set(f, v.len)
+      write(f, v.len)
       v.len += f.length
     },
     end(ms) {
@@ -389,7 +429,7 @@ export function createVoice(id, format, rate) {
       }
       if (v.sent < v.len) {
         const n = Math.max(1, Math.min(room, v.len - v.sent))
-        const p = voiceData(v.id, v.sent, buf.subarray(v.sent, v.sent + n))
+        const p = voiceData(v.id, v.sent, read(v.sent, n))
         v.sent += n
         return p
       }
@@ -410,7 +450,7 @@ export function createVoice(id, format, rate) {
     },
     /** The bytes kept (for the tests). */
     bytes() {
-      return buf.slice(0, v.len)
+      return read(0, v.len)
     }
   }
   return v
@@ -441,7 +481,7 @@ export function createTalk() {
   const AWAY_UPRIGHT = 0.8
   const AWAY_MS = 450
   const MIN_MS = 900
-  const MAX_MS = 60000
+  const MAX_MS = 30000
   const REST_MS = 1500
   const SMOOTH_MS = 150
   const LEARN_S = 20

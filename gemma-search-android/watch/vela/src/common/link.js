@@ -11,7 +11,7 @@
 import {
   SERVICE, SAMPLES, EVENTS, EV_NEXT, EV_PREVIOUS, EV_LEARNED, EV_IGNORED, EV_PAUSE, EV_STREAM, EV_CONFIG, EV_VOICE_FROM,
   EV_VOICE_DONE, VOICE_SAVED, VOICE_SILENT, VOICE_KEPT, VOICE_ANSWER, SOURCE_COMPASS, RAW_MAX, advertises, createPacker,
-  parseEvent, createTalk, createVoice, rawPacket, diagPacket
+  parseEvent, createTalk, createVoice, rawPacket, diagPacket, diagPackets
 } from './proto.js'
 
 /** The silence that keeps the app running in the background, and how soon it is started again when stopped. */
@@ -38,6 +38,12 @@ const WRITE_MS = 150
 /** The same for a voice note's bytes (many writes in a row: the link's own queue keeps them in order). */
 const VOICE_WRITE_MS = 60
 
+/** Between one write's end and the next: a breath for the watch (at most ~100 writes a second). */
+const WRITE_GAP_MS = 8
+
+/** The sensor's samples go to the log only on a link that takes them in big writes (else ~20 tiny writes a second). */
+const RAW_MIN_MTU = 100
+
 /**
  * A voice note as the S5 records it: Opus, 16 kHz mono at 22 kbit/s (the top of the range the docs give for it — the
  * clearer the consonants, the better the recognition), ~2.7 KB a second; its frames handed over as they are recorded
@@ -46,8 +52,9 @@ const VOICE_WRITE_MS = 60
  * But what the S5 hands over in Opus frames is not documented, and the phone could not read it («запись с часов не
  * разобрать»); so the recorder gives plain 16-bit PCM (16 kHz mono — the format there is no doubt about) and the watch
  * makes it IMA ADPCM itself (createAdpcm: a quarter of the bytes, 8 KB a second). Opus only if the watch takes no PCM.
+ * Its frames 100 ms each (frameSize is bytes of PCM): ten callbacks a second, not twenty-five — less for the watch to do.
  */
-const PCM_REC = { format: 'pcm', sampleRate: 16000, numberOfChannels: 1, encodeBitRate: 256000, frameSize: 1280, voice: 'adpcm' }
+const PCM_REC = { format: 'pcm', sampleRate: 16000, numberOfChannels: 1, encodeBitRate: 256000, frameSize: 3200, voice: 'adpcm' }
 const OPUS = { format: 'opus', sampleRate: 16000, numberOfChannels: 1, encodeBitRate: 22000, frameSize: 512 }
 
 /** The phone's answer about a note may take a while (recognition): after this long the end is said again. */
@@ -99,7 +106,8 @@ function characteristic(uuid, value, props) {
  */
 export function createLink(sys) {
   const { ble, sensor, vibrator, brightness, storage, record, file, audio } = sys
-  const view = { on: false, state: 'выключено', diag: '', note: '', voiceOn: true, screenOn: false, bg: '', poses: 0, soundsOn: true }
+  const view = { on: false, state: 'выключено', diag: '', note: '', voiceOn: true, screenOn: false, bg: '', poses: 0, soundsOn: true,
+    err: '' }
   let onChange = null
   function changed() {
     if (onChange) onChange(view)
@@ -118,7 +126,77 @@ export function createLink(sys) {
       enumerable: true
     }
   }
+  /**
+   * A callback the watch's system calls (Bluetooth, the sensor, the recorder, the player): an error in it shown, kept and
+   * logged like one in a method (see oops) — never let out into the system, which would end the app.
+   */
+  function safe(where, fn) {
+    return function () {
+      try {
+        return fn.apply(this, arguments)
+      } catch (e) {
+        L.oops(where, e)
+        return undefined
+      }
+    }
+  }
   const L = {
+    /** An error in a method: on the screen, in storage (seen after a restart), in the phone's log. */
+    oops(where, e) {
+      this.errors = (this.errors || 0) + 1
+      const msg = where + ': ' + (e && e.message ? e.message : String(e))
+      if (this.errors <= 3 || Date.now() - (this.errorAt || 0) > 10000) {
+        this.errorAt = Date.now()
+        view.err = 'ошибка ' + this.errors + ' — ' + msg
+        changed()
+        try {
+          storage.set({ key: 'wrist_error', value: new Date().toISOString() + ' ' + msg })
+        } catch (x) {}
+        try {
+          this.sendLine('ошибка ' + msg + (e && e.stack ? ' | ' + String(e.stack).split('\n').slice(0, 3).join(' / ') : ''))
+        } catch (x) {}
+      }
+    },
+
+    /** A line to the phone's log even without the log asked for (an error, how the last run ended). */
+    sendLine(text) {
+      const room = (this.mtu ? Math.min(this.mtu, 512) : 23) - 3
+      for (const p of diagPackets(text, room, 20)) this.diagOut.push(p)
+      while (this.diagOut.length > 40) this.diagOut.shift()
+      this.forceLines = true
+      this.pump()
+    },
+
+    /**
+     * What the link was doing, kept every few seconds: after a crash or a restart of the watch the next run tells it (on
+     * the screen and to the phone's log) — the last thing seen before it went.
+     */
+    trail(now, force) {
+      if (!force && now - (this.trailAt || 0) < 5000) return
+      this.trailAt = now
+      const t = (this.on ? 'вкл' : 'выкл') + ', связь ' + (this.linkedOk ? 'есть' : 'нет') + ', датчик ' + (this.listening ? PACES[this.pace] : 'выкл')
+        + ', отсчётов ' + (this.n ? this.n.s : 0) + ', записей ' + (this.n ? this.n.w : 0) + ', ' + (this.rec ? 'идёт запись ' + this.rec.v.len + ' байт'
+        : this.pending ? 'колокольчик перед записью' : 'не пишет') + ', заметок в очереди ' + this.voices.length + ', журнал ' + (this.debug ? 'вкл' : 'выкл')
+        + ', MTU ' + this.mtu + ', звук фона ' + (this.audioPlaying ? 'играет' : 'нет') + ', ошибок ' + (this.errors || 0)
+        + (this.phaseNow ? '; шаг: ' + this.phaseNow : '')
+      try {
+        storage.set({ key: 'wrist_trail', value: new Date(now).toISOString() + ' ' + t })
+      } catch (e) {}
+      // and to the phone's log, with no log asked for too: every 5 s for the first minute on the link, then each minute
+      // (a step at most once a second) — if the watch hangs, the phone has its last word
+      const every = force ? 1000 : now - (this.linkedAt || 0) < 60000 ? 5000 : 60000
+      if (this.linkedOk && now - (this.trailSentAt || 0) >= every) {
+        this.trailSentAt = now
+        this.sendLine('сейчас: ' + t)
+      }
+    },
+
+    /** Where the run is now (the search, the link, the sensor, a chime, a recording…): kept at once (see trail). */
+    phase(what) {
+      this.phaseNow = what
+      this.trail(Date.now(), true)
+    },
+
     /** The screen: fn(view) on every change (null — none now). */
     watch(fn) {
       onChange = fn
@@ -179,31 +257,31 @@ export function createLink(sys) {
           else self.play()
         }, ALIVE_RETRY_MS)
       }
-      audio.onplay = function () {
+      audio.onplay = safe('звук play', function () {
         if (self.chiming) return
         if (!self.audioPlaying) self.logLine('фон: тишина играет')
         self.audioPlaying = true
         self.aliveErrors = 0
         self.bg = 'работает и в фоне — можно выйти из приложения'
-      }
-      audio.onpause = function () {
+      })
+      audio.onpause = safe('звук pause', function () {
         if (self.chiming || Date.now() < (self.quietSwitchUntil || 0)) return
         again('фон: звук приостановлен — включаю снова')
-      }
-      audio.onstop = function () {
+      })
+      audio.onstop = safe('звук stop', function () {
         if (self.chiming || Date.now() < (self.quietSwitchUntil || 0)) return
         self.logLine('фон: звук остановлен')
         again('фон: звук остановлен — включаю снова')
-      }
-      audio.onended = function () {
+      })
+      audio.onended = safe('звук ended', function () {
         if (self.chiming) {
           self.chimed()
           return
         }
         if (Date.now() < (self.quietSwitchUntil || 0)) return
         again('')
-      }
-      audio.onerror = function () {
+      })
+      audio.onerror = safe('звук error', function () {
         if (self.chiming) {
           self.chimed()
           return
@@ -216,7 +294,7 @@ export function createLink(sys) {
           return
         }
         again('фон: ошибка звука — пробую снова')
-      }
+      })
       this.play()
     },
 
@@ -232,6 +310,7 @@ export function createLink(sys) {
       if (this.chiming) this.chimed()
       const self = this
       this.chiming = { then }
+      this.phase(src === CHIME_START ? 'звук перед записью' : src === CHIME_END ? 'звук после записи' : 'звук')
       this.chimeTimer = setTimeout(() => self.chimed(), CHIME_MS)
       try {
         // the player stopped first: a source changed while playing was kept looping on the S5 (a beep without end)
@@ -343,6 +422,23 @@ export function createLink(sys) {
           self.poses = self.talk.poses.length
         }
       })
+      // how the last run ended: a trail not marked clean — it was cut off (a crash, the watch restarted)
+      storage.get({
+        key: 'wrist_trail',
+        success(v) {
+          if (v && v.indexOf('чисто') !== 0) {
+            self.lastRun = 'прошлый запуск оборвался: ' + v
+            storage.get({
+              key: 'wrist_error',
+              success(err) {
+                if (err) self.lastRun += '; последняя ошибка: ' + err
+                self.note = self.lastRun
+              }
+            })
+          }
+          storage.set({ key: 'wrist_trail', value: 'запущено ' + new Date().toISOString() })
+        }
+      })
       storage.get({
         key: 'wrist_screen',
         success(v) {
@@ -400,6 +496,7 @@ export function createLink(sys) {
     start() {
       if (this.on) return
       this.on = true
+      this.phase('старт: фоновый звук')
       this.keepAlive(true)
       this.screen()
       this.scan()
@@ -407,6 +504,9 @@ export function createLink(sys) {
 
     stop() {
       this.on = false
+      try {
+        storage.set({ key: 'wrist_trail', value: 'чисто: выключено' })
+      } catch (e) {}
       this.stopScan()
       this.drop()
       if (this.timer) clearTimeout(this.timer)
@@ -424,9 +524,10 @@ export function createLink(sys) {
       this.seen = 0
       this.seenAt = 0
       this.state = 'ищу телефон…'
+      this.phase('ищу телефон')
       this.scanner = ble.createScanner()
       this.findId = this.scanner.subscribeBLEDeviceFind({
-        callback(results) {
+        callback: safe('поиск', function (results) {
           if (self.gatt || !results) return
           for (let i = 0; i < results.length; i++) {
             self.seen++
@@ -442,7 +543,7 @@ export function createLink(sys) {
             self.seenAt = now
             self.state = 'ищу телефон… рядом устройств: ' + self.seen
           }
-        },
+        }),
         fail() {
           self.state = 'поиск прервался — повторю'
           self.stopScan()
@@ -524,6 +625,7 @@ export function createLink(sys) {
 
     connect(found) {
       const self = this
+      this.phase('подключаюсь')
       const g = ble.createGattClientDevice(found.deviceId, found.addressType)
       this.gatt = g
       this.up = false
@@ -537,16 +639,16 @@ export function createLink(sys) {
         self.step('подключено, узнаю сервисы…')
         self.discover()
       }
-      g.onBLEConnectionStateChange = function (state) {
+      g.onBLEConnectionStateChange = safe('связь', function (state) {
         if (g !== self.gatt) return
         if (state === 2) up()
         else if (state === 0) self.up ? self.lost() : self.failed()
-      }
-      g.onBLECharacteristicChange = function (c) {
+      })
+      g.onBLECharacteristicChange = safe('ответ телефона', function (c) {
         if (g !== self.gatt || !c || !c.characteristicValue) return
         const v = new Uint8Array(c.characteristicValue)
         if (v.length > 0) self.heard(v)
-      }
+      })
       // the watch's connect waits for the link with no limit of its own: 15 s, then let go and look again
       this.later(() => {
         if (g !== self.gatt || self.up) return
@@ -633,6 +735,7 @@ export function createLink(sys) {
 
     linked() {
       this.linkedOk = true
+      this.linkedAt = Date.now()
       if (this.stepTimer) clearTimeout(this.stepTimer)
       this.stepTimer = 0
       this.state = this.feedback === false ? 'подключено (без вибро-отклика)' : 'подключено'
@@ -641,6 +744,11 @@ export function createLink(sys) {
       this.ev = ''
       this.turn = ''
       this.playing = true
+      if (this.lastRun) {
+        // to the phone's log, so the reason can be seen there
+        this.sendLine(this.lastRun)
+        this.lastRun = ''
+      }
       // the link's MTU is told again by the phone (CONFIG)
       this.mtu = 0
       this.chunk = CHUNK_UNKNOWN
@@ -710,6 +818,13 @@ export function createLink(sys) {
     },
 
     rawSample(t, x, y, z, h) {
+      if (this.mtu < RAW_MIN_MTU) {
+        if (!this.rawRefused) {
+          this.rawRefused = true
+          this.logLine('отсчёты в журнал не шлю: MTU связи ' + (this.mtu || 23) + ' — каждая запись по одному отсчёту, часам тяжело')
+        }
+        return
+      }
       const b = this.rawBuf
       b.push({ t, x: Number(x) || 0, y: Number(y) || 0, z: Number(z) || 0, h })
       if (b.length >= this.rawN() || t - b[0].t >= 1000) {
@@ -740,8 +855,8 @@ export function createLink(sys) {
         text = '(потеряно отсчётных пакетов: ' + this.rawLost + ') ' + text
         this.rawLost = 0
       }
-      this.diagOut.push(diagPacket(text, room))
-      while (this.diagOut.length > 30) this.diagOut.shift()
+      for (const p of diagPackets(text, room, 6)) this.diagOut.push(p)
+      while (this.diagOut.length > 40) this.diagOut.shift()
       this.pump()
     },
 
@@ -764,6 +879,7 @@ export function createLink(sys) {
       this.drop()
       if (!this.on) return
       this.state = 'связь потеряна — ищу'
+      this.phase('связь потеряна')
       this.later(() => this.scan(), 2000)
     },
 
@@ -908,6 +1024,7 @@ export function createLink(sys) {
       this.paceN = 0
       this.subAt = Date.now()
       this.lastSampleAt = Date.now()
+      this.phase('датчик ' + PACES[this.pace])
       sensor.subscribeAccelerometer({
         interval: PACES[this.pace],
         callback(ret) {
@@ -931,14 +1048,14 @@ export function createLink(sys) {
       this.compassCode = ''
       try {
         sensor.subscribeCompass({
-          callback(ret) {
+          callback: safe('компас', function (ret) {
             if (!ret || typeof ret.direction !== 'number') return
             self.headingN++
             // accuracy −1: the sensor is gone; the rest (even «unreliable, reason unknown») still turns with the watch
             if (ret.accuracy === -1) return
             self.heading = ret.direction
             self.headingAt = Date.now()
-          },
+          }),
           fail(data, code) {
             self.compassCode = String(code)
             self.logLine('компас: ошибка ' + code)
@@ -987,6 +1104,7 @@ export function createLink(sys) {
       }
       if (this.voiceOn) this.talked(this.talk.sample(ret.x, ret.y, ret.z, now), now)
       this.mute()
+      this.trail(now)
       if (this.debug) this.rawSample(now, ret.x, ret.y, ret.z, this.headingNow(now))
       this.packer.sample(ret.x, ret.y, ret.z, now, this.headingNow(now))
       if (now - (this.rawAt || 0) > 400) {
@@ -1020,7 +1138,10 @@ export function createLink(sys) {
       let buf = null
       let voice = null
       if (this.queue.length) buf = this.queue.shift()
-      else if (this.debug && this.diagOut.length) buf = this.diagOut.shift()
+      else if ((this.debug || this.forceLines) && this.diagOut.length) {
+        buf = this.diagOut.shift()
+        if (!this.diagOut.length) this.forceLines = false
+      }
       else {
         if (this.voices[0]) {
           buf = this.voiceNext(this.voices[0])
@@ -1043,7 +1164,9 @@ export function createLink(sys) {
         self.writing = false
         if (self.writeTimer) clearTimeout(self.writeTimer)
         self.writeTimer = 0
-        self.pump()
+        // the next write a moment later, never from inside this one's callback (a completion told at once would
+        // otherwise call write in write in write — a deep stack and a busy watch)
+        setTimeout(() => self.pump(), WRITE_GAP_MS)
       }
       let settled = false
       const settle = function (bad, code) {
@@ -1066,18 +1189,23 @@ export function createLink(sys) {
         }
         next()
       }
-      g.writeCharacteristicValue({
-        characteristic: characteristic(SAMPLES, buf, { write: true, writeNoResponse: true }),
-        success() {
-          settle(false)
-        },
-        fail(data, code) {
-          settle(true, code)
-        },
-        complete() {
-          settle(false)
-        }
-      })
+      try {
+        g.writeCharacteristicValue({
+          characteristic: characteristic(SAMPLES, buf, { write: true, writeNoResponse: true }),
+          success() {
+            settle(false)
+          },
+          fail(data, code) {
+            settle(true, code)
+          },
+          complete() {
+            settle(false)
+          }
+        })
+      } catch (e) {
+        // refused at once: a failed write, and the next one after the usual pause
+        settle(true, 'исключение ' + (e && e.message ? e.message : e))
+      }
       if (id === this.writeId && this.writing) {
         this.writeTimer = setTimeout(() => {
           if (!settled && n) n.to++
@@ -1179,7 +1307,7 @@ export function createLink(sys) {
       const rec = { v, opts, at: now, ms: 0, stopping: false, cancel: false, frames: 0, raw: 0 }
       this.rec = rec
       this.voices.push(v)
-      record.onframerecorded = function (res) {
+      record.onframerecorded = safe('кадр записи', function (res) {
         if (self.rec !== rec || !res) return
         if (res.frameBuffer && !rec.cancel) {
           const f = res.frameBuffer instanceof Uint8Array ? res.frameBuffer : new Uint8Array(res.frameBuffer)
@@ -1195,8 +1323,9 @@ export function createLink(sys) {
           self.pump()
         }
         if (res.isLastFrame) self.endNote(rec)
-      }
+      })
       this.logLine('запись: ' + opts.format + ' ' + opts.sampleRate + ' Гц')
+      this.phase('запись ' + opts.format)
       const params = {
         format: opts.format,
         sampleRate: opts.sampleRate,
@@ -1273,6 +1402,7 @@ export function createLink(sys) {
       if (this.rec !== rec) return
       this.rec = null
       if (!rec.ms) rec.ms = Date.now() - rec.at
+      this.phase('запись кончилась: ' + rec.v.len + ' байт к отправке')
       this.talk.done(Date.now())
       this.mute()
       if (this.packer) this.packer.restart()
@@ -1350,5 +1480,19 @@ export function createLink(sys) {
     }
   }
   for (const k of Object.keys(view)) Object.defineProperty(L, k, shown(k))
+  // every method guarded: an error in one (a sensor's or Bluetooth's callback, a timer) is shown, kept and logged, and
+  // the app goes on — an uncaught error here would end the whole app (it lives in app.ux, not in the page)
+  for (const k of Object.keys(L)) {
+    const f = L[k]
+    if (typeof f !== 'function' || k === 'oops') continue
+    L[k] = function () {
+      try {
+        return f.apply(this, arguments)
+      } catch (e) {
+        L.oops(k, e)
+        return undefined
+      }
+    }
+  }
   return L
 }

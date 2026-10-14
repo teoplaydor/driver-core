@@ -14,6 +14,10 @@ fs.mkdirSync(out, { recursive: true })
 const SERVICE = 'a7b7e001-9ca3-4574-a1f0-3c9840e24d01'
 const SAMPLES = 'a7b7e002-9ca3-4574-a1f0-3c9840e24d01'
 const EVENTS = 'a7b7e003-9ca3-4574-a1f0-3c9840e24d01'
+/** A write that is not the watch's line for the phone's log (DIAG). */
+const notDiag = (w) => !w[2].startsWith('70')
+/** The watch's lines for the log among these writes, their parts put together. */
+const diagText = (ws) => ws.filter((w) => w[1] === SAMPLES && w[2].startsWith('70')).map((w) => Buffer.from(w[2].slice(2), 'hex').toString('utf8')).join('')
 let bad = 0
 const ok = (c, what) => {
   if (!c) bad++
@@ -193,10 +197,14 @@ async function vela() {
           getServices(o) { if (W.hangDiscovery) return; setImmediate(() => o.success([{ serviceUuid: '00001800-0000-1000-8000-00805f9b34fb' }, { serviceUuid: '${SERVICE.toUpperCase()}', isPrimary: true }])) },
           setNotifyCharacteristicChanged(o) { W.notifies.push(o); if (W.hangNotify) return; setImmediate(() => { o.success && o.success(); o.complete && o.complete() }) },
           writeCharacteristicValue(o) {
+            if (W.throwWrites) { W.throwWrites--; W.thrown = (W.thrown || 0) + 1; throw new Error('занято') }
             if (W.outstanding && !W.hangWrites) W.overlap = true
             W.outstanding = 1; const v = o.characteristic.characteristicValue
             W.writes.push([o.characteristic.serviceUuid, o.characteristic.characteristicUuid, Array.from(new Uint8Array(v)).map((x) => x.toString(16).padStart(2, '0')).join(''), o.characteristic.descriptors])
             if (W.hangWrites) return  // the completion never comes: the watch's write watchdog must keep the stream going
+            if (W.syncWrites) { // the completion told at once, inside the write
+              W.depth = (W.depth || 0) + 1; W.maxDepth = Math.max(W.maxDepth || 0, W.depth)
+              W.outstanding = 0; o.success && o.success(); o.complete && o.complete(); W.depth--; return }
             if (W.failVoice && new Uint8Array(v)[0] === 0x51) { W.failVoice--; W.writes.pop(); W.failed = (W.failed || 0) + 1
               setImmediate(() => { W.outstanding = 0; o.fail && o.fail(null, 10004); o.complete && o.complete() }); return }
             setImmediate(() => { W.outstanding = 0; o.success && o.success(); o.complete && o.complete() }) },
@@ -206,7 +214,7 @@ async function vela() {
       subscribeCompass(o) { W.compass = o }, unsubscribeCompass() { W.compass = null } }`,
     '@system.vibrator': `export default { vibrate(o) { W.buzz.push(o.mode) } }`,
     '@system.brightness': `export default { setKeepScreenOn(o) { W.keep = o.keepScreenOn } }`,
-    '@system.storage': `const m = new Map(); W.storage = m; export default { get(o) { o.success(m.get(o.key) || '') }, set(o) { m.set(o.key, o.value) } }`,
+    '@system.storage': `const m = new Map(); W.storage = m; export default { get(o) { o.success(m.get(o.key) || '') }, set(o) { m.set(o.key, String(o.value)) } }`,
     '@system.record': `const R = { start(o) { W.recording = o; W.recStarts = (W.recStarts || 0) + 1; W.recAt = Date.now() },
         stop() { const o = W.recording; W.recording = null; W.recStops = (W.recStops || 0) + 1
           setImmediate(() => { R.onframerecorded && R.onframerecorded({ frameBuffer: new Uint8Array(W.lastFrame || [1]).buffer, isLastFrame: true })
@@ -289,10 +297,12 @@ async function vela() {
   await flush()
   ok(!W.overlap, 'vela: one write at a time')
   ok(W.acc && W.acc.interval === 'ui' && page.paceKnown, 'vela: «ui» gave live numbers — kept')
-  const sent = W.writes.filter((w) => w[1] === SAMPLES)
+  // (the watch's lines for the phone's log — how far it got, every few seconds — aside: the turns' own packets)
+  const all = W.writes.filter((w) => w[1] === SAMPLES)
+  const sent = all.filter(notDiag)
   page.showDiag() // (the screen itself is refreshed at most every 0.4 s)
   const d = page.diag.match(/^поворот \d+° за [\d,]+ с · датчик (\d+) \(ui\) · компас ждёт · повороты (\d+) · записи (\d+): ✓(\d+) ✗(\d+) ⏱(\d+)/)
-  ok(d && +d[1] > 200 && +d[2] === sent.length - 1 && +d[3] === sent.length && +d[4] === sent.length && +d[5] === 0,
+  ok(d && +d[1] > 200 && +d[2] === sent.length - 1 && +d[3] === all.length && +d[4] === all.length && +d[5] === 0,
     'vela: the counters on the screen — the last turn, sensor, turns, writes and how they ended («' + page.diag + '»)')
   ok(sent.length === 3 && sent[0][2].startsWith('0002') && Buffer.from(sent[0][2].slice(20), 'hex').toString() === 'vela'
     && sent.slice(1).every((w) => w[2].startsWith('40')),
@@ -329,7 +339,7 @@ async function vela() {
     await flush()
     await advance(20)
   }
-  const wrote = W.writes.length - w0
+  const wrote = W.writes.slice(w0).filter(notDiag).length
   ok(wrote === 4, 'vela: writes keep flowing though no completion comes (' + wrote + ' writes: HELLO and three turns)')
   W.hangWrites = false
   page.stop(); await flush(); page.start(); await flush(); await flush(); await flush(); await flush()
@@ -425,7 +435,7 @@ async function vela() {
     await flush()
   }
   await advance(300)
-  const s5w = W.writes.slice(w3).filter((w) => w[1] === SAMPLES)
+  const s5w = W.writes.slice(w3).filter((w) => w[1] === SAMPLES).filter(notDiag)
   ok(s5w.length === 3 && s5w[0][2].startsWith('0002') && s5w[1][2].startsWith('40') && s5w[2][2].startsWith('40')
     && /повороты 2/.test(p3.diag), 'vela (S5: whole m/s², samples in batches): HELLO and both turns — «' + p3.diag + '»')
   fs.writeFileSync(path.join(out, 'vela_s5_app.hex'), s5w.map((w) => w[2]).join('\n') + '\n')
@@ -454,7 +464,7 @@ async function vela() {
     }
   }
   await advance(300)
-  const hw = W.writes.slice(w4).filter((w) => w[1] === SAMPLES)
+  const hw = W.writes.slice(w4).filter((w) => w[1] === SAMPLES).filter(notDiag)
   p4.showDiag()
   ok(hw.length === 3 && hw[1][2].startsWith('40') && hw[2][2].startsWith('40') && /компас \d+°/.test(p4.diag) && /\(компас\)/.test(p4.diag),
     'vela (arm hanging): both twists found by the compass — «' + p4.diag + '»')
@@ -554,9 +564,9 @@ async function vela() {
   for (let i = 0; i < 16; i++) await step(MOUTH)
   for (let i = 0; i <= 20; i++) await step(MOUTH.map((m, j) => m + (HANG[j] - m) * Math.min(1, i / 4)))
   await advance(2000)
-  ok(W.recStarts === W.recStops && W.writes.slice(n1).filter((w) => w[1] === SAMPLES).length === 0 && p5.voices.length === 0,
+  ok(W.recStarts === W.recStops && W.writes.slice(n1).filter((w) => w[1] === SAMPLES).filter(notDiag).length === 0 && p5.voices.length === 0,
     'vela (voice): held a moment and away — the recording dropped, nothing sent (' + W.recStarts + ' ' + W.recStops + ' '
-    + W.writes.slice(n1).filter((w) => w[1] === SAMPLES).map((w) => w[2].slice(0, 6)).join(',') + ')')
+    + W.writes.slice(n1).filter((w) => w[1] === SAMPLES).filter(notDiag).map((w) => w[2].slice(0, 6)).join(',') + ')')
 
   // taught: tapped «Запомнить положение у рта» while looking at the watch, held it to the mouth the way this hand does
   // (the forearm level across the chest — the usual rule does not take it) — remembered; then a note starts from there
@@ -617,7 +627,7 @@ async function vela() {
     await flush()
   }
   await advance(300)
-  const b6 = W.writes.slice(w6).filter((w) => w[1] === SAMPLES)
+  const b6 = W.writes.slice(w6).filter((w) => w[1] === SAMPLES).filter(notDiag)
   ok(b6.length === 3 && b6[0][2].startsWith('0002') && b6[1][2].startsWith('40') && b6[2][2].startsWith('40'),
     'vela (background): no page — HELLO and both turns still sent')
   const plays6 = W.audioPlays
@@ -667,8 +677,84 @@ async function vela() {
     W.acc && W.acc.callback({ x: 0, y: 0, z: 10 })
     await flush()
   }
-  ok(W.writes.slice(w9).filter((w) => w[1] === SAMPLES && /^(60|70)/.test(w[2])).length === 0, 'vela (log): off — no more samples or lines')
+  const off9 = diagText(W.writes.slice(w9))
+  ok(W.writes.slice(w9).filter((w) => w[1] === SAMPLES && w[2].startsWith('60')).length === 0 && (off9 === '' || off9.startsWith('сейчас: ')),
+    'vela (log): off — no more samples, of the lines only how far it got («' + off9.slice(0, 60) + '…»)')
   p8.stop()
+
+  // safety: an error in a callback does not end the app — it is shown, kept and told to the phone (even with no log
+  // asked for); how far a run got is kept, and the next run tells it if this one was cut off; the log on a small MTU
+  // sends no samples (each would be a write); a write's completion told at once does not make write call write
+  W.storage.delete('wrist_trail')
+  const p9 = newLink()
+  await flush(); await flush(); await flush(); await flush()
+  W.found([{ deviceId: '5A:11:22:33:44:55', rssi: -60, addressType: 'RANDOM', data: new Uint8Array([2, 1, 6, 17, 7, ...le]).buffer }])
+  const gS = W.gatts[W.gatts.length - 1]
+  const wS = W.writes.length
+  gS.onBLEConnectionStateChange(2)
+  await flush(); await flush(); await flush()
+  for (let i = 0; i < 140; i++) {
+    await advance(50)
+    W.acc && W.acc.callback({ x: 0, y: 1, z: 9.8 })
+    await flush()
+  }
+  ok(/вкл, связь есть, датчик \w+, отсчётов \d+/.test(W.storage.get('wrist_trail') || ''), 'vela (safety): how far the run got, kept: «' + W.storage.get('wrist_trail') + '»')
+  const told = diagText(W.writes.slice(wS)).split('сейчас: ').length - 1
+  ok(told >= 2 && /сейчас: .*вкл, связь есть.*шаг: датчик/.test(diagText(W.writes.slice(wS))),
+    'vela (safety): …and told to the phone every few seconds with no log asked for (' + told + ' times in 7 s)')
+  const wE = W.writes.length
+  const realSample = p9.packer.sample
+  p9.packer.sample = () => { throw new Error('проверка') }
+  W.acc && W.acc.callback({ x: 0, y: 1, z: 9.8 })
+  p9.packer.sample = realSample
+  for (let i = 0; i < 30; i++) { await advance(50); await flush() }
+  const errLines = [W.writes.slice(wE).filter((w) => w[1] === SAMPLES && w[2].startsWith('70')).map((w) => Buffer.from(w[2].slice(2), 'hex').toString('utf8')).join('')]
+  ok(p9.err.includes('проверка') && /проверка/.test(W.storage.get('wrist_error') || '') && errLines.some((l) => /ошибка sampled: проверка/.test(l)) && p9.on,
+    'vela (safety): an error in the sensor\'s callback — shown («' + p9.err + '»), kept, told to the phone, the app goes on')
+  W.acc && W.acc.callback({ x: 0, y: 1, z: 9.8 })
+  ok(p9.n.s > 140, 'vela (safety): the samples keep coming after it')
+  // the log asked on a link with MTU 23: lines, but no samples
+  const wR = W.writes.length
+  gS.onBLECharacteristicChange({ serviceUuid: SERVICE, characteristicUuid: EVENTS, characteristicValue: new Uint8Array([6, 7, 23, 0]).buffer })
+  for (let i = 0; i < 40; i++) {
+    await advance(50)
+    W.acc && W.acc.callback({ x: 0, y: 1, z: 9.8 })
+    await flush()
+  }
+  const sR = W.writes.slice(wR).filter((w) => w[1] === SAMPLES).map((w) => w[2])
+  ok(!sR.some((w) => w.startsWith('60')) && sR.some((w) => w.startsWith('70')), 'vela (safety): the log on MTU 23 — lines, no samples')
+  // completions told at once, inside the write: the next write still a moment later, never write in write in write
+  W.syncWrites = true
+  W.maxDepth = 0
+  const wD = W.writes.length
+  for (let i = 0; i < 10; i++) p9.sendLine('строка для проверки номер ' + i + ' — длинная, чтобы разошлась на много записей')
+  for (let i = 0; i < 40; i++) { await advance(20); await flush() }
+  W.syncWrites = false
+  ok(W.writes.length - wD > 30 && W.maxDepth === 1, 'vela (safety): completions told at once — ' + (W.writes.length - wD) + ' writes, never one inside another (depth ' + W.maxDepth + ')')
+  // a write refused with an exception: counted as failed, the stream goes on
+  W.throwWrites = 2
+  const wT = W.writes.length
+  const bad0 = p9.n.bad
+  p9.sendLine('после отказа: эта строка пропадёт, следующая дойдёт')
+  for (let i = 0; i < 20; i++) { await advance(20); await flush() }
+  p9.sendLine('дошла')
+  for (let i = 0; i < 20; i++) { await advance(20); await flush() }
+  ok(W.thrown === 2 && p9.n.bad === bad0 + 2 && /дошла/.test(diagText(W.writes.slice(wT))) && p9.on && !p9.writing,
+    'vela (safety): a write refused with an exception — the stream goes on (' + (W.writes.length - wT) + ' writes after)')
+  // the run cut off (no «Стоп»): the next one says so, and tells the phone
+  const p10 = newLink()
+  await flush(); await flush(); await flush(); await flush()
+  ok(/прошлый запуск оборвался: .*вкл, связь есть.*последняя ошибка: .*проверка/.test(p10.note), 'vela (safety): the next run — «' + p10.note.slice(0, 90) + '…»')
+  W.found([{ deviceId: '5A:11:22:33:44:55', rssi: -60, addressType: 'RANDOM', data: new Uint8Array([2, 1, 6, 17, 7, ...le]).buffer }])
+  const wL = W.writes.length
+  W.gatts[W.gatts.length - 1].onBLEConnectionStateChange(2)
+  await flush(); await flush(); await flush()
+  await advance(100)
+  ok(/прошлый запуск оборвался/.test(W.writes.slice(wL).filter((w) => w[1] === SAMPLES && w[2].startsWith('70')).map((w) => Buffer.from(w[2].slice(2), 'hex').toString('utf8')).join('')),
+    'vela (safety): …and tells the phone\'s log')
+  p9.stop()
+  p10.stop()
+  ok(W.storage.get('wrist_trail') === 'чисто: выключено', 'vela (safety): «Стоп» — the run marked clean')
 }
 
 await zepp()
