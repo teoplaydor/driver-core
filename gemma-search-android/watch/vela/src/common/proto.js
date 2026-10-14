@@ -22,6 +22,7 @@ export const EV_VOICE_FROM = 8
 export const EV_VOICE_DONE = 9
 export const CFG_LEFT_HAND = 1
 export const CFG_VOICE = 2
+export const CFG_DEBUG = 4
 export const VOICE_SAVED = 0
 export const VOICE_SILENT = 1
 export const VOICE_KEPT = 2
@@ -123,6 +124,60 @@ export function voiceEnd(id, bytes, ms) {
   return b.buffer
 }
 
+/** RAW samples in one packet at most (10 bytes each after a 7-byte head). */
+export const RAW_MAX = 23
+
+/**
+ * RAW (for the phone's log, while it asks — CFG_DEBUG): the sensor's samples as they came, with the watch's own times:
+ * [{ t (ms, Date.now()), x, y, z (its units), h (the compass heading, radians; NaN — none) }…]. The times are the
+ * callbacks' (a batch of samples shares one), so the phone can play the stream through the finder exactly as the watch.
+ */
+export function rawPacket(seq, samples) {
+  const n = Math.min(samples.length, RAW_MAX)
+  const b = new Uint8Array(7 + 10 * n)
+  const t0 = n ? samples[0].t : 0
+  b[0] = 0x60
+  b[1] = seq & 0xff
+  put32(b, 2, t0 >>> 0)
+  b[6] = n
+  for (let i = 0; i < n; i++) {
+    const s = samples[i]
+    const o = 7 + 10 * i
+    put16(b, o, Math.max(0, Math.min(65535, Math.round(s.t - t0))))
+    put16(b, o + 2, clamp16(s.x * 100))
+    put16(b, o + 4, clamp16(s.y * 100))
+    put16(b, o + 6, clamp16(s.z * 100))
+    const h = Number(s.h)
+    put16(b, o + 8, Number.isNaN(h) ? -32768 : Math.round(((((h * 180) / Math.PI) % 360) + 360) % 360 * 10))
+  }
+  return b.buffer
+}
+
+/** UTF-8 bytes of a string. */
+export function utf8Bytes(s) {
+  const out = []
+  for (let i = 0; i < s.length; i++) {
+    let c = s.charCodeAt(i)
+    if (c >= 0xd800 && c < 0xdc00 && i + 1 < s.length) c = 0x10000 + ((c - 0xd800) << 10) + (s.charCodeAt(++i) - 0xdc00)
+    if (c < 0x80) out.push(c)
+    else if (c < 0x800) out.push(0xc0 | (c >> 6), 0x80 | (c & 63))
+    else if (c < 0x10000) out.push(0xe0 | (c >> 12), 0x80 | ((c >> 6) & 63), 0x80 | (c & 63))
+    else out.push(0xf0 | (c >> 18), 0x80 | ((c >> 12) & 63), 0x80 | ((c >> 6) & 63), 0x80 | (c & 63))
+  }
+  return out
+}
+
+/** DIAG (for the phone's log): a line about what the watch did, UTF-8, cut to max bytes in all (whole letters). */
+export function diagPacket(text, max) {
+  let bytes = utf8Bytes(String(text))
+  let n = Math.min(bytes.length, Math.max(0, (max || 20) - 1))
+  while (n > 0 && n < bytes.length && (bytes[n] & 0xc0) === 0x80) n--
+  const b = new Uint8Array(1 + n)
+  b[0] = 0x70
+  for (let i = 0; i < n; i++) b[1 + i] = bytes[i]
+  return b.buffer
+}
+
 /** UTF-8 bytes (a Uint8Array, from..to) as a string (the watch's JavaScript may have no TextDecoder). */
 export function utf8(b, from, to) {
   let s = ''
@@ -158,6 +213,7 @@ export function parseEvent(v) {
   if (ev === EV_CONFIG && v.length >= 2) {
     e.leftHand = (v[1] & CFG_LEFT_HAND) !== 0
     e.voice = (v[1] & CFG_VOICE) !== 0
+    e.debug = (v[1] & CFG_DEBUG) !== 0
     e.mtu = v.length >= 4 ? v[2] | (v[3] << 8) : 0
   } else if (ev === EV_VOICE_FROM && v.length >= 6) {
     e.id = v[1]
@@ -527,7 +583,7 @@ export function createTalk() {
  * to be still before. sample(x, y, z, t, heading) gives { twist, took, source, slope, slopeChange } when a turn has
  * just ended, otherwise null (heading in radians, from north toward east; NaN or omitted — none). Any units.
  */
-export function createFinder() {
+export function createFinder(trace) {
   const START_DEG = 14
   const CALM_DEG = 10
   const BACK_DEG = 15
@@ -560,8 +616,13 @@ export function createFinder() {
   }
 
   // one number watched for a swing away and back
-  function track() {
-    return { good: false, baseSet: false, goodT: 0, raw: 0, theta: 0, base: 0, calm: 0, state: 0, b0: 0, peak: 0, startT: 0, endT: 0, slope0: 0, slopeMax: 0 }
+  function track(name) {
+    return { name, good: false, baseSet: false, goodT: 0, raw: 0, theta: 0, base: 0, calm: 0, state: 0, b0: 0, peak: 0, startT: 0, endT: 0, slope0: 0, slopeMax: 0, told: false }
+  }
+
+  // what the finder saw but did not count, for a log (trace is given only when someone looks)
+  function why(k, what, t, more) {
+    if (trace) trace(Object.assign({ what, ch: k.name, t, peak: k.peak, took: t - k.startT }, more || {}))
   }
 
   function lose(k) {
@@ -601,6 +662,16 @@ export function createFinder() {
     }
     if (k.state === 0) {
       const d = k.theta - k.base
+      if (trace) {
+        // away as far as a turn, but not allowed to start one: why (once for each time away)
+        if (Math.abs(d) > START_DEG && !(k.calm <= CALM_DEG && t - k.goodT >= SETTLE_MS && t >= quietUntil)) {
+          if (!k.told) {
+            k.told = true
+            why(k, k.calm > CALM_DEG ? 'restless' : t < quietUntil ? 'quiet-after-turn' : 'settling', t,
+              { d, calm: k.calm, peak: d, took: 0 })
+          }
+        } else if (Math.abs(d) < START_DEG) k.told = false
+      }
       if (Math.abs(d) > START_DEG && k.calm <= CALM_DEG && t - k.goodT >= SETTLE_MS && t >= quietUntil) {
         k.state = 1
         k.b0 = k.base
@@ -625,11 +696,13 @@ export function createFinder() {
     if (k.state === 1) {
       if (t - k.startT > MAX_MS) {
         // turned and stayed: a new position, not a gesture
+        why(k, 'not-back-in-time', t, { d })
         settle(k)
         return false
       }
       if (Math.abs(d) <= Math.max(BACK_DEG, BACK_FRAC * Math.abs(k.peak))) {
         if (Math.abs(k.peak) < MIN_DEG) {
+          why(k, 'small', t)
           k.state = 0 // a wobble
           return false
         }
@@ -641,6 +714,7 @@ export function createFinder() {
     // state 2: back; a further swing would have made state 1 above
     if (t - k.endT < GRACE_MS) return false
     settle(k)
+    if (k.endT - k.startT < MIN_MS) why(k, 'too-quick', t, { took: k.endT - k.startT })
     return k.endT - k.startT >= MIN_MS
   }
 
@@ -649,8 +723,8 @@ export function createFinder() {
   let lastT = 0
   let g = 0
   let gSeen = false
-  const grav = track()
-  const comp = track()
+  const grav = track('gravity')
+  const comp = track('compass')
   let quietUntil = -Infinity
   let tilt = 0
   // the orientation: rows east, north, up — the world's axes in the watch's own
@@ -736,6 +810,7 @@ export function createFinder() {
     }
     if (mm > KNOCK_HI * g || mm < KNOCK_LO * g) {
       // a knock or a throw: not a turn
+      if (trace && (grav.state || comp.state)) why(grav.state ? grav : comp, 'knock', t)
       grav.state = 0
       comp.state = 0
       return null
@@ -756,7 +831,7 @@ export function createFinder() {
       if (doneAlready(grav)) {
         found = true
         by = SOURCE_GRAVITY
-      }
+      } else if (grav.state) why(grav, 'forearm-upright', t)
       lose(grav)
     }
     // the compass's number
@@ -771,7 +846,7 @@ export function createFinder() {
       if (doneAlready(comp) && !found) {
         found = true
         by = SOURCE_COMPASS
-      }
+      } else if (comp.state && !doneAlready(comp)) why(comp, Number.isNaN(h) ? 'compass-silent' : 'dial-sideways', t)
       lose(comp)
     }
     let tr = by === SOURCE_COMPASS ? comp : grav
@@ -849,7 +924,7 @@ export function advertises(data, uuid) {
 export function createPacker(opts) {
   const target = opts.target || 25
   const perPacket = opts.perPacket || 3
-  const finder = opts.turns ? createFinder() : null
+  const finder = opts.turns ? createFinder(opts.trace) : null
   // the samples' times for the finder: a watch may hand several over at once, all with the same Date.now() (the
   // Xiaomi Watch S5 does), so they are spread back over the pace measured — never later than now, never far behind it
   let tFirst = -1
@@ -922,9 +997,11 @@ export function createPacker(opts) {
       }
       if (finder) {
         const turn = finder.sample(x, y, z, retime(now), heading)
-        if (turn && !mute) {
-          if (ready) opts.send(rollPacket(seq++, turn.twist, turn.took, turn.source, turn.slope, turn.slopeChange))
-          if (opts.onTurn) opts.onTurn(turn)
+        if (turn) {
+          // found; sent unless muted (the music paused, a voice note) — told either way, with whether it went
+          if (ready && !mute) opts.send(rollPacket(seq++, turn.twist, turn.took, turn.source, turn.slope, turn.slopeChange))
+          if (opts.onTurn && !mute) opts.onTurn(turn)
+          if (opts.onFound) opts.onFound(turn, ready && !mute)
         }
         return
       }

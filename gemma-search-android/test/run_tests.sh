@@ -171,4 +171,7 @@ java -Dhttp.nonProxyHosts=127.0.0.1 -cp "$T/cls" HfRepoTest http://127.0.0.1:187
 
 echo "== 4. app on Robolectric 4.14 (Android 14): screens, flows, indexing, background jobs"
 test/robolectric4/run.sh
+# the watch's log as the phone wrote it in WristTest, played back through the watch's own finder: the turn found again
+node watch/vela/tools/replay.mjs "$T/watch/robo_wrist_log.txt" 2>/dev/null | tee "$T/watch/replay.txt" | grep -q "найден поворот 61.4°" \
+  && echo "ok   the log played back: the watch's turn found again" || { echo "FAIL the log played back"; exit 1; }
 echo "ALL TESTS PASSED"

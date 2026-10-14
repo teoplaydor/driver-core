@@ -39,6 +39,7 @@ import java.util.UUID;
 import io.github.teoplaydor.semsearch.app.Engine;
 import io.github.teoplaydor.semsearch.app.IndexStore;
 import io.github.teoplaydor.semsearch.app.WristLink;
+import io.github.teoplaydor.semsearch.app.WristLog;
 import io.github.teoplaydor.semsearch.app.WristService;
 import io.github.teoplaydor.semsearch.core.Pcm;
 import io.github.teoplaydor.semsearch.core.WristGesture;
@@ -206,6 +207,58 @@ public class WristTest {
         assertTrue(both, both.toLowerCase().contains("купить молоко и хлеб"));
     }
 
+    /**
+     * The log: what happened is written (HELLO, the settings, ROLL with what the phone made of it, PRESS, the music,
+     * the voice notes); asked for, the watch is told (CFG_DEBUG) and its samples (RAW, with its own times, in batches as
+     * the S5 gives them) and its lines (DIAG) are written too; then it is put in Documents and offered to send. The log
+     * goes to build/test/watch/robo_wrist_log.txt for the replay tool's test.
+     */
+    static void debugLog(Application app, WristLink.Server server, ShadowBluetoothGattServer sg, BluetoothDevice watch,
+                         BluetoothGattCharacteristic samples) throws Exception {
+        WristLink.setDebug(app, true);
+        assertTrue("the log asked for", WristLink.debug(app));
+        assertEquals("the watch told", WristGesture.EV_CONFIG, server.lastMessage[0]);
+        assertTrue("…with the debug flag", (server.lastMessage[1] & WristGesture.CFG_DEBUG) != 0);
+        // the S5's stream: 20 a second in batches of 3 (one time each), whole m/s²; a turn right after 2 s
+        java.util.List<double[]> ss = new java.util.ArrayList<double[]>();
+        int n = 100;
+        for (int k = 0; k < n; k++) {
+            double t = k / 20.0, th = t > 2 && t < 2.4 ? Math.toRadians(65) * Math.pow(Math.sin(Math.PI * (t - 2) / 0.4), 2) : 0;
+            ss.add(new double[]{100000 + (k / 3) * 150, 0, Math.round(G * Math.sin(th)), Math.round(G * Math.cos(th)), 123.4});
+        }
+        BluetoothGattServerCallback cb = sg.getGattServerCallback();
+        for (int o = 0, seq = 0; o < n; o += 23, seq++) {
+            double[][] part = ss.subList(o, Math.min(n, o + 23)).toArray(new double[0][]);
+            cb.onCharacteristicWriteRequest(watch, 400 + seq, samples, false, true, 0, WristGesture.rawPacket(seq, part));
+        }
+        byte[] line = "поворот 61.4° за 243 мс гравитация — отправлен".getBytes(StandardCharsets.UTF_8);
+        byte[] diag = new byte[1 + line.length];
+        diag[0] = 0x70;
+        System.arraycopy(line, 0, diag, 1, line.length);
+        cb.onCharacteristicWriteRequest(watch, 420, samples, false, true, 0, diag);
+        cb.onCharacteristicWriteRequest(watch, 421, samples, false, true, 0, WristGesture.rollPacket(2, 61.4f, 240, WristGesture.SOURCE_GRAVITY, 0, 2));
+        WristLog.flush();
+        String log = new String(java.nio.file.Files.readAllBytes(WristLog.file(app).toPath()), StandardCharsets.UTF_8);
+        for (String want : new String[]{" HELLO ", " SETTINGS turn=", " CCCD ", " MUSIC ", " EV next", " PRESS next", " VOICE start",
+                " VOICE phrases", " CFG left=", "debug=true", " S wt=100000 x=0.00 y=0.00 z=10.00 h=123.4", " W поворот 61.4°",
+                " ROLL seq=2 twist=61.4 took=240 src=gravity"}) {
+            assertTrue("the log has «" + want + "»", log.contains(want));
+        }
+        assertTrue("the turn's decision", log.matches("(?s).* ROLL seq=2 [^\n]*-> RIGHT why=ok turn=40 .*"));
+        int sLines = log.split(" S wt=", -1).length - 1;
+        assertEquals("every sample", n, sLines);
+        java.io.File out = new java.io.File("build/test/watch/robo_wrist_log.txt");
+        out.getParentFile().mkdirs();
+        java.nio.file.Files.write(out.toPath(), log.getBytes(StandardCharsets.UTF_8));
+        // put in Documents and offered to send
+        android.app.Activity a = Robolectric.buildActivity(android.app.Activity.class).setup().get();
+        android.net.Uri u = WristLog.share(a);
+        assertNotNull("the log saved to send", u);
+        WristLink.setDebug(app, false);
+        assertFalse(WristLink.debug(app));
+        assertEquals("the watch told: no more", 0, server.lastMessage[1] & WristGesture.CFG_DEBUG);
+    }
+
     @Test
     public void wrist() throws Exception {
         Application app = RuntimeEnvironment.getApplication();
@@ -333,6 +386,7 @@ public class WristTest {
         assertTrue(WristLink.last(app), WristLink.last(app).contains("следующий") && WristLink.last(app).contains("64°"));
 
         voiceNotes(app, server, sg, other, samples, cccd);
+        debugLog(app, server, sg, other, samples);
 
         // off: the service and the link are gone
         WristLink.setOn(c, false);

@@ -59,8 +59,9 @@ final class SettingsPanel extends FrameLayout implements Engine.Listener {
     private Toggle stretchToggle, quietToggle;
     private TextView stretchAccess, stretchAfter;
     private View quietRow, afterRow;
-    private Toggle wristToggle, wristVoice, wristOnline;
-    private View wristVoiceRow, wristOnlineRow;
+    private Toggle wristToggle, wristVoice, wristOnline, wristDebug;
+    private View wristVoiceRow, wristOnlineRow, wristDebugRow;
+    private TextView wristShare;
     private TextView wristState, wristHand, wristDir, wristTurn, wristForget;
     private final Runnable wristShow = new Runnable() {
         @Override
@@ -1193,6 +1194,23 @@ final class SettingsPanel extends FrameLayout implements Engine.Listener {
         });
         wristOnlineRow = toggleRow(card, "Распознавать заметки через сеть", "точнее; звук уходит в распознавание телефона "
                 + "(обычно Google). Выключено — на самом телефоне, если он умеет", wristOnline);
+        wristDebug = new Toggle(c, WristLink.debug(c));
+        wristDebug.setListener(new Toggle.Listener() {
+            @Override
+            public void changed(boolean on) {
+                WristLink.setDebug(c, on);
+                showWrist();
+            }
+        });
+        wristDebugRow = toggleRow(card, "Журнал для отладки", "30 минут часы шлют телефону все показания датчика и свои "
+                + "действия; попробуйте поворачивать, потом «Отправить журнал часов»", wristDebug);
+        wristShare = quiet(card, "Отправить журнал часов", Ui.TEXT2, new Runnable() {
+            @Override
+            public void run() {
+                android.net.Uri u = WristLog.share(a);
+                a.toast(u == null ? "Журнал не сохранился" : "Журнал сохранён в Документы/SemSearch");
+            }
+        });
         wristForget = quiet(card, "Забыть часы", Ui.TEXT2, new Runnable() {
             @Override
             public void run() {
@@ -1225,6 +1243,13 @@ final class SettingsPanel extends FrameLayout implements Engine.Listener {
         if (wristVoice != null && wristVoice.isOn() != WristLink.voiceNotes(c)) wristVoice.setOn(WristLink.voiceNotes(c), false);
         if (wristVoiceRow != null) wristVoiceRow.setVisibility(on ? VISIBLE : GONE);
         if (wristOnlineRow != null) wristOnlineRow.setVisibility(on && WristLink.voiceNotes(c) ? VISIBLE : GONE);
+        if (wristDebug != null && wristDebug.isOn() != WristLink.debug(c)) wristDebug.setOn(WristLink.debug(c), false);
+        if (wristDebugRow != null) wristDebugRow.setVisibility(on ? VISIBLE : GONE);
+        if (wristShare != null) {
+            long kb = WristLog.size(c) / 1024;
+            wristShare.setVisibility(kb > 0 ? VISIBLE : GONE);
+            wristShare.setText("Отправить журнал часов (" + (kb >= 1024 ? kb / 1024 + " МБ" : kb + " КБ") + ")");
+        }
         wristForget.setVisibility(name.isEmpty() ? GONE : VISIBLE);
         if (!name.isEmpty()) wristForget.setText("Забыть часы (" + name + ")");
     }

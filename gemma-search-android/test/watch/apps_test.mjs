@@ -616,6 +616,46 @@ async function vela() {
   ok(/не работает/.test(p6.bg), 'vela (background): the sound fails again and again — said so («' + p6.bg + '»)')
   p6.stop()
   ok(!W.audioOn, 'vela: «Стоп» — the silence stopped')
+
+  // the log: the phone asks for it (CONFIG with the debug flag) — the watch sends its sensor sample by sample with its
+  // own times (RAW) and its doings (DIAG), after the turns, which still go first
+  const p8 = newLink()
+  await flush(); await flush(); await flush(); await flush()
+  W.found([{ deviceId: '5A:11:22:33:44:55', rssi: -60, addressType: 'RANDOM', data: new Uint8Array([2, 1, 6, 17, 7, ...le]).buffer }])
+  const g8 = W.gatts[W.gatts.length - 1]
+  g8.onBLEConnectionStateChange(2)
+  await flush(); await flush(); await flush()
+  const w8 = W.writes.length
+  g8.onBLECharacteristicChange({ serviceUuid: SERVICE, characteristicUuid: EVENTS, characteristicValue: new Uint8Array([6, 7, 247, 0]).buffer })
+  const s8 = wrist([[0, 2], [65, 0.4], [0, 1], [-65, 0.4], [0, 1]], 20, 1)
+  for (let i = 0; i < s8.length; i++) {
+    if (i % 3 === 0) await advance(150)
+    const [x, y, z] = s8[i]
+    W.acc && W.acc.callback({ x: Math.round(x), y: Math.round(y), z: Math.round(z) })
+    await flush()
+  }
+  await advance(1500)
+  const d8 = W.writes.slice(w8).filter((w) => w[1] === SAMPLES).map((w) => w[2])
+  const raws = d8.filter((w) => w.startsWith('60'))
+  const lines = d8.filter((w) => w.startsWith('70')).map((w) => Buffer.from(w.slice(2), 'hex').toString('utf8'))
+  const rolls = d8.filter((w) => w.startsWith('40'))
+  const rawCount = raws.reduce((n, w) => n + parseInt(w.slice(12, 14), 16), 0)
+  ok(rolls.length === 2 && raws.length > 0 && rawCount >= s8.length - 23 && rawCount <= s8.length,
+    'vela (log): both turns, and the sensor sample by sample (' + rawCount + ' of ' + s8.length + ' in ' + raws.length + ' writes)')
+  ok(lines.some((l) => /журнал: включён/.test(l)) && lines.filter((l) => /^поворот .*отправлен/.test(l)).length === 2,
+    'vela (log): the watch\'s lines — «' + lines.slice(0, 3).join('» «') + '»…')
+  ok(raws.every((w) => w.length / 2 <= 244), 'vela (log): every write within the MTU')
+  fs.writeFileSync(path.join(out, 'vela_debug_app.hex'), d8.join('\n') + '\n')
+  // the log no longer asked for: nothing more of it
+  g8.onBLECharacteristicChange({ serviceUuid: SERVICE, characteristicUuid: EVENTS, characteristicValue: new Uint8Array([6, 3, 247, 0]).buffer })
+  const w9 = W.writes.length
+  for (let i = 0; i < 40; i++) {
+    await advance(50)
+    W.acc && W.acc.callback({ x: 0, y: 0, z: 10 })
+    await flush()
+  }
+  ok(W.writes.slice(w9).filter((w) => w[1] === SAMPLES && /^(60|70)/.test(w[2])).length === 0, 'vela (log): off — no more samples or lines')
+  p8.stop()
 }
 
 await zepp()

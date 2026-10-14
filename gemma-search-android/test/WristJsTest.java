@@ -71,6 +71,12 @@ public class WristJsTest {
                 && vn.packet(fixed.get(6)) == VoiceNote.MISSING && vn.missingFrom() == 0
                 && vn.packet(fixed.get(7)) == VoiceNote.MISSING && vn.missingFrom() == 0 && vn.millis() == 4321;
         ok(voice, "VOICE: start, bytes at 70000, end at 70005 — the first 70000 asked for again");
+        double[][] raw = WristGesture.rawSamples(fixed.get(8));
+        ok(raw != null && raw.length == 2 && raw[0][0] == 100000 && raw[1][0] == 100150 && Math.abs(raw[0][1] - 0.5) < 1e-9
+                && Math.abs(raw[0][2] + 9.81) < 1e-9 && Math.abs(raw[0][4] - Math.toDegrees(2)) < 0.06 && Double.isNaN(raw[1][4])
+                && "поворот 61° — отправлен".equals(WristGesture.diagText(fixed.get(9))),
+                "RAW and DIAG (the log): read by the phone as the watch wrote them");
+        ok(Arrays.equals(fixed.get(8), WristGesture.rawPacket(5, raw)), "RAW: the same bytes as the phone's");
         ok(Arrays.equals(fixed.get(5), WristGesture.voiceStart(7, WristGesture.CODEC_RECORDED, 16000, 0))
                 && Arrays.equals(fixed.get(6), WristGesture.voiceData(7, 70000, new byte[]{1, 2, 3, (byte) 250, (byte) 255}, 0, 5))
                 && Arrays.equals(fixed.get(7), WristGesture.voiceEnd(7, 70005, 4321)), "VOICE: the same bytes as the phone's");

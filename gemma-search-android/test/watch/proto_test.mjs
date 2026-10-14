@@ -75,6 +75,8 @@ fs.writeFileSync(path.join(out, 'fixed.hex'), [
   hex(P.voiceStart(7, P.CODEC_RECORDED, 16000, 0)),
   hex(P.voiceData(7, 70000, new Uint8Array([1, 2, 3, 250, 255]))),
   hex(P.voiceEnd(7, 70005, 4321)),
+  hex(P.rawPacket(5, [{ t: 100000, x: 0.5, y: -9.81, z: 0.07, h: 2 }, { t: 100150, x: 1, y: 2, z: 3, h: NaN }])),
+  hex(P.diagPacket('поворот 61° — отправлен', 244)),
 ].join('\n') + '\n')
 
 // the turn finder over the Java test's streams: what it finds, for WristJsTest to compare with the Java finder

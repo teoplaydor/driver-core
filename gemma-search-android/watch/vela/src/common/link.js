@@ -10,8 +10,8 @@
  */
 import {
   SERVICE, SAMPLES, EVENTS, EV_NEXT, EV_PREVIOUS, EV_LEARNED, EV_IGNORED, EV_PAUSE, EV_STREAM, EV_CONFIG, EV_VOICE_FROM,
-  EV_VOICE_DONE, VOICE_SAVED, VOICE_SILENT, VOICE_KEPT, VOICE_ANSWER, SOURCE_COMPASS, advertises, createPacker,
-  parseEvent, createTalk, createVoice
+  EV_VOICE_DONE, VOICE_SAVED, VOICE_SILENT, VOICE_KEPT, VOICE_ANSWER, SOURCE_COMPASS, RAW_MAX, advertises, createPacker,
+  parseEvent, createTalk, createVoice, rawPacket, diagPacket
 } from './proto.js'
 
 /** The silence that keeps the app running in the background, and how soon it is started again when stopped. */
@@ -180,6 +180,7 @@ export function createLink(sys) {
       }
       audio.onplay = function () {
         if (self.chiming) return
+        if (!self.audioPlaying) self.logLine('фон: тишина играет')
         self.audioPlaying = true
         self.aliveErrors = 0
         self.bg = 'работает и в фоне — можно выйти из приложения'
@@ -190,6 +191,7 @@ export function createLink(sys) {
       }
       audio.onstop = function () {
         if (self.chiming) return
+        self.logLine('фон: звук остановлен')
         again('фон: звук остановлен — включаю снова')
       }
       audio.onended = function () {
@@ -204,6 +206,7 @@ export function createLink(sys) {
           self.chimed()
           return
         }
+        self.logLine('фон: ошибка звука')
         self.aliveErrors = (self.aliveErrors || 0) + 1
         if (self.aliveErrors >= 3) {
           self.audioPlaying = false
@@ -302,6 +305,10 @@ export function createLink(sys) {
       this.chiming = null
       this.chimeTimer = 0
       this.pending = null
+      this.debug = false
+      this.rawBuf = []
+      this.rawOut = []
+      this.diagOut = []
       storage.get({
         key: 'wrist_poses',
         success(v) {
@@ -639,8 +646,80 @@ export function createLink(sys) {
           self.turn = Math.round(Math.abs(t.twist)) + '° за ' + String(Math.round(t.took / 100) / 10).replace('.', ',') + ' с'
             + (t.source === SOURCE_COMPASS ? ' (компас)' : '')
           self.showDiag()
+        },
+        onFound(t, sent) {
+          self.logLine('поворот ' + t.twist.toFixed(1) + '° за ' + Math.round(t.took) + ' мс ' + (t.source === SOURCE_COMPASS ? 'компас' : 'гравитация')
+            + ' наклон ' + t.slope.toFixed(2) + ' Δ' + Math.round(t.slopeChange) + '°'
+            + (sent ? ' — отправлен' : ' — не отправлен: ' + (!self.playing ? 'музыка на паузе' : 'заметка у рта')))
+        },
+        trace(e) {
+          // what the finder saw but did not count (only while the phone keeps a log)
+          if (!self.debug) return
+          self.logLine('не поворот: ' + e.what + ' (' + e.ch + ') ' + Number(e.peak).toFixed(1) + '° за ' + Math.round(e.took) + ' мс'
+            + (e.calm !== undefined ? ' неспокойно ' + Number(e.calm).toFixed(1) + '°' : ''), true)
         }
       })
+    },
+
+    // ---------------------------------------------------------------- the log (while the phone asks)
+
+    /** The phone keeps a log: the sensor's samples and the watch's doings go to it (RAW, DIAG). */
+    setDebug(on) {
+      on = !!on
+      if (on === !!this.debug) return
+      this.debug = on
+      this.rawBuf = []
+      this.rawOut = []
+      this.diagOut = []
+      this.rawSeq = 0
+      this.rawLost = 0
+      if (on) {
+        this.logLine('журнал: включён; темп ' + PACES[this.pace] + (this.paceKnown ? '' : ' (проверяется)') + ', компас '
+          + (this.compassCode ? 'нет (' + this.compassCode + ')' : this.headingN ? 'есть' : 'ждёт') + ', заметки '
+          + (this.voiceOn ? 'вкл' : 'выкл') + ', положений у рта ' + this.talk.poses.length + ', MTU ' + this.mtu)
+      }
+    },
+
+    /** How many samples fit one RAW write on this link. */
+    rawN() {
+      const room = (this.mtu ? Math.min(this.mtu, 512) : 23) - 3
+      return Math.max(1, Math.min(RAW_MAX, Math.floor((room - 7) / 10)))
+    },
+
+    rawSample(t, x, y, z, h) {
+      const b = this.rawBuf
+      b.push({ t, x: Number(x) || 0, y: Number(y) || 0, z: Number(z) || 0, h })
+      if (b.length >= this.rawN() || t - b[0].t >= 1000) {
+        this.rawOut.push(rawPacket(this.rawSeq++, b))
+        this.rawBuf = []
+        // the link slower than the sensor: the oldest dropped (told in the next line)
+        while (this.rawOut.length > 40) {
+          this.rawOut.shift()
+          this.rawLost++
+        }
+        this.pump()
+      }
+    },
+
+    /** A line for the phone's log (only while it keeps one); a finder's line at most a few a second. */
+    logLine(text, chatty) {
+      if (!this.debug) return
+      const now = Date.now()
+      if (chatty) {
+        if (now - (this.chattyAt || 0) > 1000) {
+          this.chattyAt = now
+          this.chattyN = 0
+        }
+        if (++this.chattyN > 4) return
+      }
+      const room = (this.mtu ? Math.min(this.mtu, 512) : 23) - 3
+      if (this.rawLost) {
+        text = '(потеряно отсчётных пакетов: ' + this.rawLost + ') ' + text
+        this.rawLost = 0
+      }
+      this.diagOut.push(diagPacket(text, room))
+      while (this.diagOut.length > 30) this.diagOut.shift()
+      this.pump()
     },
 
     /**
@@ -716,6 +795,8 @@ export function createLink(sys) {
         this.talk.setHand(e.leftHand)
         if (e.mtu > 23) this.mtu = e.mtu
         this.chunk = this.mtu ? Math.max(CHUNK_MIN, Math.min(this.mtu, 512) - 3 - 6) : CHUNK_UNKNOWN
+        this.setDebug(e.debug)
+        this.logLine('настройки: ' + (e.leftHand ? 'левая' : 'правая') + ' рука, заметки ' + (e.voice ? 'вкл' : 'выкл') + ', MTU ' + e.mtu)
         if (e.voice !== this.voiceOn) {
           this.voiceOn = e.voice
           storage.set({ key: 'wrist_voice', value: e.voice ? '1' : '0' })
@@ -753,6 +834,7 @@ export function createLink(sys) {
         // a turn while nothing plays: nothing to feel
         this.ev = 'поворот без музыки'
       }
+      this.logLine('телефон сказал: ' + this.ev)
       this.showDiag()
     },
 
@@ -784,6 +866,7 @@ export function createLink(sys) {
         if (!self.paceKnown && self.paceN === 0 && now - self.subAt >= PROBE_MS && self.pace < PACES.length - 1) {
           self.switchPace()
         } else if (now - self.lastSampleAt > 1500) {
+          self.logLine('датчик молчал ' + (now - self.lastSampleAt) + ' мс — подписываюсь заново')
           try {
             sensor.unsubscribeAccelerometer()
           } catch (e) {}
@@ -835,6 +918,7 @@ export function createLink(sys) {
           },
           fail(data, code) {
             self.compassCode = String(code)
+            self.logLine('компас: ошибка ' + code)
           }
         })
       } catch (e) {
@@ -850,6 +934,7 @@ export function createLink(sys) {
     /** The pace's values never changed (or none came): the next, slower pace, measured again with a new HELLO. */
     switchPace() {
       this.pace = Math.min(this.pace + 1, PACES.length - 1)
+      this.logLine('темп датчика: ' + PACES[this.pace] + ' — прежний не отдавал живых чисел')
       try {
         sensor.unsubscribeAccelerometer()
       } catch (e) {}
@@ -879,6 +964,7 @@ export function createLink(sys) {
       }
       if (this.voiceOn) this.talked(this.talk.sample(ret.x, ret.y, ret.z, now), now)
       this.mute()
+      if (this.debug) this.rawSample(now, ret.x, ret.y, ret.z, this.headingNow(now))
       this.packer.sample(ret.x, ret.y, ret.z, now, this.headingNow(now))
       if (now - (this.rawAt || 0) > 400) {
         this.rawAt = now
@@ -906,9 +992,19 @@ export function createLink(sys) {
       if (this.writing || !this.gatt || !this.linkedOk) return
       const self = this
       const g = this.gatt
-      // the turns first (short, now or never), then a voice note's next bytes
-      const voice = this.queue.length === 0 ? this.voices[0] : null
-      const buf = voice ? this.voiceNext(voice) : this.queue.shift()
+      // the turns first (short, now or never), the watch's lines for the log, a voice note's next bytes, the sensor's
+      // samples for the log
+      let buf = null
+      let voice = null
+      if (this.queue.length) buf = this.queue.shift()
+      else if (this.debug && this.diagOut.length) buf = this.diagOut.shift()
+      else {
+        if (this.voices[0]) {
+          buf = this.voiceNext(this.voices[0])
+          if (buf) voice = this.voices[0]
+        }
+        if (!buf && this.debug && this.rawOut.length) buf = this.rawOut.shift()
+      }
       if (!buf) return
       const head = new Uint8Array(buf)
       const at = head[0] === 0x51 ? (head[2] | (head[3] << 8) | (head[4] << 16) | (head[5] << 24)) >>> 0 : -1
@@ -933,6 +1029,7 @@ export function createLink(sys) {
         if (n && bad) {
           n.bad++
           n.code = code === undefined ? '?' : code
+          self.logLine('запись в Bluetooth не прошла: код ' + n.code + ' (' + head[0].toString(16) + ')', true)
         } else if (n) {
           n.ok++
         }
@@ -975,6 +1072,7 @@ export function createLink(sys) {
 
     /** What the hand did (createTalk): held to the mouth — record; taken away — the note goes to the phone. */
     talked(what, now) {
+      if (what) this.logLine('у рта: ' + what + (this.talk.poses.length ? ' (по запомненному положению)' : ''))
       if (what === 'start') this.startNote(now)
       else if (what === 'stop') this.stopNote(false)
       else if (what === 'cancel') this.stopNote(true)
@@ -1056,6 +1154,7 @@ export function createLink(sys) {
         }
         if (res.isLastFrame) self.endNote(rec)
       }
+      this.logLine('запись: ' + opts.format + ' ' + opts.sampleRate + ' Гц')
       const params = {
         format: opts.format,
         sampleRate: opts.sampleRate,
@@ -1070,6 +1169,7 @@ export function createLink(sys) {
         },
         fail(data, code) {
           if (self.rec !== rec) return
+          self.logLine('запись не началась: код ' + code)
           self.dropVoice(v)
           self.rec = null
           if (code === 202 && opts === OPUS) {
@@ -1134,6 +1234,7 @@ export function createLink(sys) {
       this.talk.done(Date.now())
       this.mute()
       if (this.packer) this.packer.restart()
+      this.logLine('запись кончилась: ' + rec.v.len + ' байт, ' + rec.ms + ' мс' + (rec.cancel ? ', отменена (коротко)' : rec.stopping ? '' : ', прервана часами'))
       if (rec.cancel || rec.v.len === 0) {
         this.resumeAlive()
         this.dropVoice(rec.v)
@@ -1194,6 +1295,7 @@ export function createLink(sys) {
     voiceDone(e) {
       const v = this.voices[0]
       if (!v || v.id !== e.id) return
+      this.logLine('заметка ' + e.id + ': итог ' + e.result)
       this.dropVoice(v)
       if (e.result === VOICE_SAVED || e.result === VOICE_KEPT || e.result === VOICE_ANSWER) {
         vibrator.vibrate({ mode: 'long' })

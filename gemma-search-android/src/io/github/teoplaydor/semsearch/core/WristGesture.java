@@ -32,11 +32,15 @@ package io.github.teoplaydor.semsearch.core;
  *                          [3..4]=samples per second (u16) [5..8]=bytes (u32, 0 — not known yet)
  *          [0]=0x51 data:  [1]=note id [2..5]=offset (u32) then the bytes (as many as the link takes in one write)
  *          [0]=0x52 end:   [1]=note id [2..5]=bytes in all (u32) [6..9]=how long, ms (u32)
+ *   RAW    [0]=0x60 [1]=sequence (u8) [2..5]=the watch's time of the first sample, ms (u32) [6]=n, then n × 10 bytes:
+ *          ms after the first (u16), x, y, z × 100 (int16, the watch's units), compass heading, 0.1° (int16, −32768 none)
+ *          — the sensor as it came, sent only while the phone asks ({@link #CFG_DEBUG}), for the log
+ *   DIAG   [0]=0x70 then a line about what the watch did, UTF-8 — for the log, while the phone asks
  * </pre>
  * The phone answers on {@link #EVENTS}: one byte {@link #EV_NEXT}, {@link #EV_PREVIOUS}, {@link #EV_LEARNED},
  * {@link #EV_IGNORED} (a turn while no music is playing) — the watch vibrates; {@link #EV_PAUSE} when the music stops,
  * {@link #EV_STREAM} when it plays again (the watch sends no turns in between); and longer ones ({@link #config},
- * {@link #voiceFrom}, {@link #voiceDone}): {@link #EV_CONFIG} [1]=flags ({@link #CFG_LEFT_HAND}, {@link #CFG_VOICE})
+ * {@link #voiceFrom}, {@link #voiceDone}): {@link #EV_CONFIG} [1]=flags ({@link #CFG_LEFT_HAND}, {@link #CFG_VOICE}, {@link #CFG_DEBUG})
  * [2..3]=the link's MTU (u16, 0 — not known); {@link #EV_VOICE_FROM} [1]=note id [2..5]=offset to send again from;
  * {@link #EV_VOICE_DONE} [1]=note id [2]=what became of it ({@link #VOICE_SAVED}, {@link #VOICE_SILENT},
  * {@link #VOICE_KEPT}, {@link #VOICE_ANSWER}, {@link #VOICE_FAILED}) [3..]=a line about it, UTF-8, for the watch's
@@ -49,12 +53,14 @@ public final class WristGesture {
             EVENTS = "a7b7e003-9ca3-4574-a1f0-3c9840e24d01";
     /** HELLO versions: the watch streams samples / the watch finds the turns itself. */
     public static final int VERSION = 1, VERSION_TURNS = 2;
-    public static final int KIND_HELLO = 0, KIND_ACCEL = 1, KIND_TURN = 2, KIND_SWING = 3, KIND_ROLL = 4, KIND_VOICE = 5;
+    public static final int KIND_HELLO = 0, KIND_ACCEL = 1, KIND_TURN = 2, KIND_SWING = 3, KIND_ROLL = 4, KIND_VOICE = 5,
+            KIND_RAW = 6, KIND_DIAG = 7;
     public static final int VOICE_START = 0x50, VOICE_DATA = 0x51, VOICE_END = 0x52;
     public static final int CODEC_RECORDED = 1, CODEC_PCM16 = 2, CODEC_WAV = 3, CODEC_OPUS_PACKETS = 4;
     public static final int EV_IGNORED = 0, EV_NEXT = 1, EV_PREVIOUS = 2, EV_LEARNED = 3, EV_PAUSE = 4, EV_STREAM = 5,
             EV_CONFIG = 6, EV_VOICE_FROM = 8, EV_VOICE_DONE = 9;
-    public static final int CFG_LEFT_HAND = 1, CFG_VOICE = 2;
+    /** EV_CONFIG's flags: the watch on the left hand, voice notes on, the sensor and the watch's doings to the log. */
+    public static final int CFG_LEFT_HAND = 1, CFG_VOICE = 2, CFG_DEBUG = 4;
     /**
      * What became of a voice note: a note made (with its reminder…), nothing said in it, kept as a recording without
      * text (no recognition on this phone), a question answered or a search (not a note), the recording not readable.
@@ -384,6 +390,48 @@ public final class WristGesture {
         put32(p, 2, bytes);
         put32(p, 6, ms);
         return p;
+    }
+
+    /** RAW: the samples {watch time ms, x, y, z, heading degrees (NaN: none)}; null — not a RAW packet. */
+    public static double[][] rawSamples(byte[] p) {
+        if (p == null || p.length < 7 || ((p[0] & 0xff) >>> 4) != KIND_RAW) return null;
+        long t0 = u32(p, 2);
+        int n = Math.min(p[6] & 0xff, (p.length - 7) / 10);
+        double[][] out = new double[n][];
+        for (int i = 0; i < n; i++) {
+            int o = 7 + 10 * i;
+            int h = (short) u16(p, o + 8);
+            out[i] = new double[]{t0 + u16(p, o), (short) u16(p, o + 2) / 100.0, (short) u16(p, o + 4) / 100.0,
+                    (short) u16(p, o + 6) / 100.0, h == -32768 ? Double.NaN : h / 10.0};
+        }
+        return out;
+    }
+
+    /** A RAW packet (for the tests: the watch builds them in its JavaScript). */
+    public static byte[] rawPacket(int seq, double[][] samples) {
+        int n = samples.length;
+        byte[] p = new byte[7 + 10 * n];
+        long t0 = n > 0 ? (long) samples[0][0] : 0;
+        p[0] = (byte) (KIND_RAW << 4);
+        p[1] = (byte) seq;
+        put32(p, 2, t0);
+        p[6] = (byte) n;
+        for (int i = 0; i < n; i++) {
+            int o = 7 + 10 * i;
+            double[] s = samples[i];
+            put16(p, o, (int) Math.max(0, Math.min(32767, Math.round(s[0] - t0))));
+            put16(p, o + 2, (int) Math.round(s[1] * 100));
+            put16(p, o + 4, (int) Math.round(s[2] * 100));
+            put16(p, o + 6, (int) Math.round(s[3] * 100));
+            put16(p, o + 8, Double.isNaN(s[4]) ? -32768 : (int) Math.round(((s[4] % 360) + 360) % 360 * 10));
+        }
+        return p;
+    }
+
+    /** DIAG's line; null — not a DIAG packet. */
+    public static String diagText(byte[] p) {
+        if (p == null || p.length < 1 || ((p[0] & 0xff) >>> 4) != KIND_DIAG) return null;
+        return new String(p, 1, p.length - 1, java.nio.charset.StandardCharsets.UTF_8);
     }
 
     static void put32(byte[] p, int o, long v) {

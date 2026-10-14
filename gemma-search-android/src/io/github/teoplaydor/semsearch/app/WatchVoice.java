@@ -76,6 +76,9 @@ final class WatchVoice {
                     android.util.Log.w("SemSearch", "watch voice", e);
                     x = null;
                 }
+                WristLog.add(app, "VOICE", "decoded codec=" + codec + " bytes=" + bytes.length + " head=" + WristLink.Server.hex(
+                        java.util.Arrays.copyOf(bytes, Math.min(8, bytes.length))) + (x == null ? " -> not readable" : String.format(Locale.ROOT,
+                        " -> %.2f s, loudest %.3f", x.length / (float) Pcm.RATE, loudest(x))));
                 if (x == null || x.length < Pcm.RATE / 4) {
                     finish(app, done, WristGesture.VOICE_FAILED, "Запись с часов не разобрать", null);
                     return;
@@ -95,6 +98,10 @@ final class WatchVoice {
                     return;
                 }
                 final boolean local = !WristLink.voiceOnline(app) && onDeviceAvailable(app);
+                StringBuilder ps = new StringBuilder();
+                for (int[] q : phrases) ps.append(String.format(Locale.ROOT, " %.2f-%.2f", q[0] / (float) Pcm.RATE, q[1] / (float) Pcm.RATE));
+                WristLog.add(app, "VOICE", "phrases " + phrases.size() + ":" + ps + (local ? " on the phone" : " usual recognizer")
+                        + (WristLink.voiceOnline(app) ? " (online)" : ""));
                 MAIN.post(new Runnable() {
                     @Override
                     public void run() {
@@ -112,6 +119,7 @@ final class WatchVoice {
 
     /** What was recognised (or not) becomes a note, an answer, or nothing. */
     private static void made(final Context c, String words, int error, final byte[] wav, float seconds, final Done done) {
+        WristLog.add(c, "VOICE", "heard " + (words != null ? "«" + words + "»" : "nothing") + " error=" + error);
         if (words != null && !words.trim().isEmpty()) {
             Spoken.Result r = Spoken.parse(words, System.currentTimeMillis(), TimeZone.getDefault());
             final boolean answer = r.query != null || r.question != null;
@@ -309,6 +317,7 @@ final class WatchVoice {
         recognize(c, pcm, seconds, local, false, new Words() {
             @Override
             public void heard(String words, int error) {
+                WristLog.add(c, "VOICE", "phrase " + (i + 1) + " -> " + (words != null ? "«" + words + "»" : "no words") + " error=" + error);
                 if (words != null && !words.trim().isEmpty()) {
                     if (text.length() > 0) text.append(' ');
                     text.append(words.trim());
@@ -442,7 +451,8 @@ final class WatchVoice {
             public void onResults(Bundle b) {
                 ArrayList<String> list = b == null ? null : b.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION);
                 String best = list != null && !list.isEmpty() ? list.get(0) : null;
-                end.heard(best != null && !best.trim().isEmpty() ? best : partial[0].isEmpty() ? null : partial[0], SpeechRecognizer.ERROR_NO_MATCH);
+                String words = best != null && !best.trim().isEmpty() ? best : partial[0].isEmpty() ? null : partial[0];
+                end.heard(words, words != null ? 0 : SpeechRecognizer.ERROR_NO_MATCH);
             }
 
             @Override

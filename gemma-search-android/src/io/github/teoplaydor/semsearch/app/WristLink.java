@@ -55,7 +55,9 @@ import io.github.teoplaydor.semsearch.core.WristGesture;
 public final class WristLink {
     static final String PREF_ON = "wrist_on", PREF_LEFT = "wrist_left_hand", PREF_TURN = "wrist_turn", PREF_AXIS = "wrist_axis",
             PREF_WATCH = "wrist_watch", PREF_WATCH_NAME = "wrist_watch_name", PREF_LAST = "wrist_last", PREF_LAST_AT = "wrist_last_at",
-            PREF_VOICE = "wrist_voice", PREF_VOICE_ONLINE = "wrist_voice_online";
+            PREF_VOICE = "wrist_voice", PREF_VOICE_ONLINE = "wrist_voice_online", PREF_DEBUG_UNTIL = "wrist_debug_until";
+    /** How long the watch sends its sensor to the log once asked. */
+    static final long DEBUG_MS = 30 * 60_000L;
     static final UUID SERVICE = UUID.fromString(WristGesture.SERVICE), SAMPLES = UUID.fromString(WristGesture.SAMPLES),
             EVENTS = UUID.fromString(WristGesture.EVENTS);
     /** The standard «Client Characteristic Configuration» descriptor (notifications on/off). */
@@ -98,6 +100,24 @@ public final class WristLink {
 
     public static void setVoiceOnline(Context c, boolean on) {
         prefs(c).edit().putBoolean(PREF_VOICE_ONLINE, on).apply();
+    }
+
+    /**
+     * The log asked for (until a time): the watch sends its sensor sample by sample and its own doings, for
+     * {@link WristLog}. On for half an hour, then off by itself (it costs the watch's battery).
+     */
+    public static boolean debug(Context c) {
+        return debugUntil(c) > System.currentTimeMillis();
+    }
+
+    static long debugUntil(Context c) {
+        return prefs(c).getLong(PREF_DEBUG_UNTIL, 0);
+    }
+
+    public static void setDebug(Context c, boolean on) {
+        prefs(c).edit().putLong(PREF_DEBUG_UNTIL, on ? System.currentTimeMillis() + DEBUG_MS : 0).apply();
+        WristLog.add(c, "DEBUG", on ? "on for 30 min: the watch sends its sensor and its doings" : "off");
+        reconfigure(c);
     }
 
     /** How far to turn, degrees: 30, 40 or 55. */
@@ -340,6 +360,7 @@ public final class WristLink {
             int playing = musicPlaying(c) ? 1 : 0;
             if (k.told == playing) return;
             k.told = playing;
+            log("MUSIC", playing == 1 ? "playing" : "not playing");
             if (playing == 1) k.d.restart();
             answer(k, playing == 1 ? WristGesture.EV_STREAM : WristGesture.EV_PAUSE);
             // said on the screen too: a paused watch sends nothing, and without this the line just stops changing
@@ -481,8 +502,32 @@ public final class WristLink {
 
         /** The watch's settings: which hand, voice notes on, and the link's MTU (how big its writes may be). */
         private void sendConfig(Conn k) {
-            int flags = (leftHand(c) ? WristGesture.CFG_LEFT_HAND : 0) | (voiceNotes(c) ? WristGesture.CFG_VOICE : 0);
+            boolean debug = debug(c);
+            int flags = (leftHand(c) ? WristGesture.CFG_LEFT_HAND : 0) | (voiceNotes(c) ? WristGesture.CFG_VOICE : 0)
+                    | (debug ? WristGesture.CFG_DEBUG : 0);
+            log("CFG", "left=" + leftHand(c) + " voice=" + voiceNotes(c) + " debug=" + debug + " mtu=" + k.mtu);
             message(k, WristGesture.config(flags, k.mtu));
+            tick.removeCallbacks(debugOver);
+            if (debug) tick.postDelayed(debugOver, debugUntil(c) - System.currentTimeMillis() + 500);
+        }
+
+        /** The half hour of the log is over: the watch told to stop sending its sensor. */
+        private final Runnable debugOver = new Runnable() {
+            @Override
+            public void run() {
+                log("DEBUG", "over");
+                WristLink.reconfigure(c);
+            }
+        };
+
+        private void log(String tag, String text) {
+            WristLog.add(c, tag, text);
+        }
+
+        /** A device's address for the log: its last two bytes are enough to tell one from another. */
+        private static String who(BluetoothDevice dev) {
+            String a = dev == null ? null : dev.getAddress();
+            return a == null ? "?" : "…" + a.substring(Math.max(0, a.length() - 5));
         }
 
         synchronized boolean learn() {
@@ -520,6 +565,8 @@ public final class WristLink {
             @Override
             public void onConnectionStateChange(BluetoothDevice dev, int st, int state) {
                 synchronized (Server.this) {
+                    log("CONN", who(dev) + (state == BluetoothProfile.STATE_CONNECTED ? " connected" : state == BluetoothProfile.STATE_DISCONNECTED
+                            ? " disconnected" : " state " + state) + " status " + st);
                     if (state == BluetoothProfile.STATE_CONNECTED) {
                         if (!conns.containsKey(dev.getAddress())) conns.put(dev.getAddress(), new Conn(dev));
                         // a watch connected: stop announcing (the radio is freer for the watch's service discovery)
@@ -584,6 +631,7 @@ public final class WristLink {
                 synchronized (Server.this) {
                     Conn k = conn(dev);
                     k.mtu = Math.max(23, mtu);
+                    log("MTU", who(dev) + " " + mtu);
                     if (k.trusted && k.notify) sendConfig(k);
                 }
             }
@@ -595,6 +643,7 @@ public final class WristLink {
                     synchronized (Server.this) {
                         Conn k = conn(dev);
                         k.notify = value != null && value.length > 0 && (value[0] & 1) != 0;
+                        log("CCCD", who(dev) + " answers " + (k.notify ? "on" : "off"));
                         listening(k);
                     }
                 }
@@ -653,17 +702,53 @@ public final class WristLink {
                     // while no watch is listened to (so «nothing arrives» and «arrives unannounced» look different)
                     k.unheard++;
                     long now = System.currentTimeMillis();
+                    if (k.unheard == 1 || k.unheard % 100 == 0) log("UNHEARD", who(dev) + " " + k.unheard + " packets before a HELLO, kind " + ((p[0] & 0xff) >>> 4));
                     if (!trustedConnected() && now - k.shownAt > 900) {
                         k.shownAt = now;
                         setStatus("часы шлют отсчёты без приветствия (" + k.unheard + ") — «Стоп» и «Старт» на часах");
                     }
                     return;
                 }
-                if (((p[0] & 0xff) >>> 4) == WristGesture.KIND_VOICE) {
+                int kind = (p[0] & 0xff) >>> 4;
+                if (kind == WristGesture.KIND_VOICE) {
                     voice(k, p);
                     return;
                 }
+                if (kind == WristGesture.KIND_RAW) {
+                    // the watch's sensor as it came, with its own times (only while the log is asked for)
+                    double[][] ss = WristGesture.rawSamples(p);
+                    if (ss != null) for (double[] q : ss) log("S", sample(q[0], q[1], q[2], q[3], q[4]));
+                    return;
+                }
+                if (kind == WristGesture.KIND_DIAG) {
+                    log("W", WristGesture.diagText(p));
+                    return;
+                }
                 r = k.d.packet(p);
+                if (kind == WristGesture.KIND_ACCEL && debug(c) && k.d.hasHello()) {
+                    // a watch that streams: its samples (the times by its pace)
+                    int n = p[0] & 0x0f;
+                    long first = k.d.samples() - n;
+                    for (int i = 0; i < n && 2 + 6 * i + 5 < p.length; i++) {
+                        log("S", sample((first + i) * 1000.0 / k.d.rate(), (short) ((p[2 + 6 * i] & 0xff) | (p[3 + 6 * i] << 8)),
+                                (short) ((p[4 + 6 * i] & 0xff) | (p[5 + 6 * i] << 8)), (short) ((p[6 + 6 * i] & 0xff) | (p[7 + 6 * i] << 8)),
+                                Double.NaN));
+                    }
+                }
+                if (kind == WristGesture.KIND_ROLL && p.length >= 8) {
+                    log("ROLL", String.format(Locale.ROOT, "seq=%d twist=%.1f took=%d src=%s slope=%.2f dslope=%d -> %s why=%s turn=%.0f sign=%s learnt=%s music=%s",
+                            p[1] & 0xff, (short) ((p[2] & 0xff) | (p[3] << 8)) / 10f, (p[4] & 0xff) * 10,
+                            p[5] == WristGesture.SOURCE_COMPASS ? "compass" : "gravity", p[6] / 100f, p[7] & 0xff,
+                            r == WristGesture.RIGHT ? "RIGHT" : r == WristGesture.LEFT ? "LEFT" : r == WristGesture.LEARNED ? "LEARNED" : "NONE",
+                            whyName(k.d.why()), k.d.turn, k.d.lastAxis()[0] > 0 ? "+" : "-", k.d.learnt(), musicPlaying(c)));
+                } else if (kind == WristGesture.KIND_TURN || kind == WristGesture.KIND_SWING) {
+                    log("OLD", "a packet of the first watch apps (kind " + kind + "): the watch app wants updating");
+                } else if (kind != WristGesture.KIND_ACCEL && kind != WristGesture.KIND_HELLO) {
+                    log("?", "kind " + kind + " " + hex(p));
+                } else if (kind == WristGesture.KIND_ACCEL && r != WristGesture.NONE) {
+                    log("TURN", "found by the phone in the streamed samples -> " + (r == WristGesture.RIGHT ? "RIGHT" : r == WristGesture.LEFT
+                            ? "LEFT" : "LEARNED") + String.format(Locale.ROOT, " twist=%.1f took=%.0f", k.d.lastPeak(), k.d.lastTook()));
+                }
                 if (hello) {
                     if (!k.d.hasHello()) return;
                     int known = watch(c);
@@ -672,6 +757,13 @@ public final class WristLink {
                     // remembered one is not currently streaming (so a re-installed watch with a new id is welcomed, not
                     // turned away). Only a different watch while one is actively connected is refused.
                     boolean accept = known == 0 || known == k.d.watchId() || !trustedConnected();
+                    log("HELLO", String.format(Locale.ROOT, "%s v=%d id=%08x rate=%d perG=%d platform=%s known=%08x -> %s", who(dev),
+                            p[1] & 0xff, k.d.watchId(), k.d.rate(), k.d.perG(), k.d.platform(), known, accept ? "accepted" : "refused"));
+                    if (accept) {
+                        float[] ax = axis(c);
+                        log("SETTINGS", "turn=" + turn(c) + " hand=" + (leftHand(c) ? "left" : "right") + " learnt=" + (ax != null)
+                                + " voice=" + voiceNotes(c) + " online=" + voiceOnline(c) + " debug=" + debug(c));
+                    }
                     if (!accept) {
                         k.trusted = false;
                         setStatus("другие часы (" + name + ") уже подключены — «Забыть часы», чтобы сменить");
@@ -751,11 +843,13 @@ public final class WristLink {
             }
             boolean right = r == WristGesture.RIGHT;
             if (!musicPlaying(c)) {
+                log("PRESS", "none: music not playing");
                 remember((right ? "вправо" : "влево") + ", но музыка не играла");
                 answer(k, WristGesture.EV_IGNORED);
                 return;
             }
             press(c, right ? KeyEvent.KEYCODE_MEDIA_NEXT : KeyEvent.KEYCODE_MEDIA_PREVIOUS);
+            log("PRESS", right ? "next" : "previous");
             remember((right ? "вправо → следующий трек" : "влево → предыдущий трек") + " (" + Math.round(k.d.lastPeak()) + "° за "
                     + seconds(k.d.lastTook()) + " с" + (k.d.lastByCompass() ? ", по компасу" : "") + ")");
             answer(k, right ? WristGesture.EV_NEXT : WristGesture.EV_PREVIOUS);
@@ -765,6 +859,7 @@ public final class WristLink {
         private void voice(final Conn k, byte[] p) {
             int r = k.voice.packet(p);
             if (r == VoiceNote.STARTED) {
+                log("VOICE", "start id=" + k.voice.id() + " codec=" + k.voice.codec() + " rate=" + k.voice.rate());
                 k.askedFrom = -1;
                 setStatus(name(k) + " · заметка голосом…");
                 return;
@@ -772,6 +867,7 @@ public final class WristLink {
             if (r == VoiceNote.MISSING) {
                 long now = SystemClock.elapsedRealtime(), from = k.voice.missingFrom();
                 if (from != k.askedFrom || now - k.askedAt > 1000) {
+                    log("VOICE", "missing id=" + k.voice.id() + " from=" + from + " (have " + k.voice.received() + ")");
                     k.askedFrom = from;
                     k.askedAt = now;
                     message(k, WristGesture.voiceFrom(k.voice.id(), from));
@@ -784,6 +880,7 @@ public final class WristLink {
             final int id = k.voice.id();
             final String key = k.d.watchId() + ":" + id + ":" + k.voice.total() + ":" + k.voice.millis();
             Object[] before = heard.get(key);
+            log("VOICE", "complete id=" + id + " bytes=" + k.voice.total() + " ms=" + k.voice.millis() + (before != null ? " (heard before)" : ""));
             if (before != null) {
                 // the same note again: answered as before (or still being made — the answer follows)
                 if (before[0] != null) message(k, WristGesture.voiceDone(id, (Integer) before[0], (String) before[1], k.mtu - 3));
@@ -800,6 +897,7 @@ public final class WristLink {
             WatchVoice.handle(c, k.voice.bytes(), k.voice.codec(), k.voice.rate(), new WatchVoice.Done() {
                 @Override
                 public void done(int result, String line) {
+                    log("VOICE", "done id=" + id + " result=" + result + " " + line);
                     synchronized (Server.this) {
                         heard.put(key, new Object[]{result, line});
                         // to the watch now connected (it may have reconnected meanwhile)
@@ -811,6 +909,50 @@ public final class WristLink {
                     remember("заметка с часов: " + line);
                 }
             });
+        }
+
+        static String sample(double t, double x, double y, double z, double h) {
+            return String.format(Locale.ROOT, "wt=%.0f x=%.2f y=%.2f z=%.2f h=%s", t, x, y, z, Double.isNaN(h) ? "-" : String.format(Locale.ROOT, "%.1f", h));
+        }
+
+        static String hex(byte[] p) {
+            StringBuilder b = new StringBuilder();
+            for (int i = 0; i < p.length && i < 40; i++) b.append(String.format("%02x", p[i] & 0xff));
+            return b.toString();
+        }
+
+        static String whyName(int why) {
+            switch (why) {
+                case WristGesture.WHY_OK:
+                    return "ok";
+                case WristGesture.WHY_SMALL:
+                    return "small";
+                case WristGesture.WHY_NOT_FOREARM:
+                    return "not-forearm";
+                case WristGesture.WHY_OLD_WATCH_APP:
+                    return "old-app";
+                default:
+                    return String.valueOf(why);
+            }
+        }
+
+        static String evName(int ev) {
+            switch (ev) {
+                case WristGesture.EV_IGNORED:
+                    return "ignored";
+                case WristGesture.EV_NEXT:
+                    return "next";
+                case WristGesture.EV_PREVIOUS:
+                    return "previous";
+                case WristGesture.EV_LEARNED:
+                    return "learned";
+                case WristGesture.EV_PAUSE:
+                    return "pause";
+                case WristGesture.EV_STREAM:
+                    return "stream";
+                default:
+                    return String.valueOf(ev);
+            }
         }
 
         /** A longer message to the watch (settings, voice notes), if it listens. */
@@ -827,6 +969,7 @@ public final class WristLink {
         /** One byte to the watch, if it listens: it vibrates. */
         private void answer(Conn k, int ev) {
             lastEvent = ev;
+            log("EV", evName(ev) + (k.notify ? "" : " (the watch does not listen)"));
             notifyWatch(k, new byte[]{(byte) ev});
         }
 
