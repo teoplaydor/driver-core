@@ -70,9 +70,11 @@ fs.writeFileSync(path.join(out, 'fixed.hex'), [
   hex(P.hello(0x0badcafe, 25, 981, 'vela')),
   hex(P.accel(7, [1000, -1000, 32767, -32768, 0, 981, 40000, -40000, 1], 3)),
   hex(P.hello(0x0badcafe, 16, 981, 'vela', P.VERSION_TURNS)),
-  hex(P.turnPacket(9, 61.6, 344, [0.6, -0.8, 0])),
-  hex(P.swingPacket(10, 58.4, 356, [0, 0.6, 0.8], [-0.1, -0.2, 0.97], 61.25)),
-  hex(P.swingPacket(11, 33, 300, [-1, 0, 0], [-0.95, 0.31, 0], NaN)),
+  hex(P.rollPacket(9, 61.64, 344, P.SOURCE_GRAVITY, 0.37, 12.4)),
+  hex(P.rollPacket(10, -48.25, 410, P.SOURCE_COMPASS, -0.93, 3)),
+  hex(P.voiceStart(7, P.CODEC_RECORDED, 16000, 0)),
+  hex(P.voiceData(7, 70000, new Uint8Array([1, 2, 3, 250, 255]))),
+  hex(P.voiceEnd(7, 70005, 4321)),
 ].join('\n') + '\n')
 
 // the turn finder over the Java test's streams: what it finds, for WristJsTest to compare with the Java finder
@@ -90,10 +92,7 @@ if (fs.existsSync(inFile)) {
     if (!l.trim() || !f) continue
     const [t, x, y, z, h] = l.trim().split(' ').map(Number)
     const r = f.sample(x, y, z, t, h)
-    if (r) {
-      found.push([name, r.peak.toFixed(3), r.took.toFixed(1), Number.isNaN(r.dh) ? 'NaN' : r.dh.toFixed(3),
-        r.rest.concat(r.far).map((v) => v.toFixed(5)).join(' ')].join(' '))
-    }
+    if (r) found.push([name, r.twist.toFixed(3), r.took.toFixed(1), r.source, r.slope.toFixed(5), r.slopeChange.toFixed(3)].join(' '))
   }
   fs.writeFileSync(path.join(out, 'finder_js.txt'), found.join('\n') + '\n')
   console.log('finder: ' + found.length + ' turns in the Java test\'s streams')
@@ -108,4 +107,139 @@ const theirs = Buffer.concat([Buffer.from([2, 1, 6, 17, 7]), Buffer.alloc(16, 0x
 const okAdv = P.advertises(ours, P.SERVICE) && P.advertises(new Uint8Array(ours).buffer, P.SERVICE) && P.advertises(Array.from(ours), P.SERVICE)
   && !P.advertises(theirs, P.SERVICE) && !P.advertises(null, P.SERVICE) && !P.advertises(new ArrayBuffer(0), P.SERVICE)
 console.log((okAdv ? 'ok   ' : 'FAIL ') + 'advertisement check')
-if (!okAdv) process.exit(1)
+let bad = okAdv ? 0 : 1
+const ok = (c, what) => {
+  if (!c) bad++
+  console.log((c ? 'ok   ' : 'FAIL ') + what)
+}
+
+// ---------------------------------------------------------------- voice notes
+
+// the phone's answers as the phone's Java builds them (VoiceNoteTest wrote them)
+const evFile = path.join(out, 'events.hex')
+if (fs.existsSync(evFile)) {
+  const ev = fs.readFileSync(evFile, 'utf8').trim().split('\n').map((l) => P.parseEvent(new Uint8Array(Buffer.from(l, 'hex'))))
+  ok(ev[0].ev === P.EV_CONFIG && ev[0].leftHand && ev[0].voice && ev[0].mtu === 247
+    && ev[1].ev === P.EV_CONFIG && !ev[1].leftHand && !ev[1].voice && ev[1].mtu === 23,
+  'the phone\'s settings read: left hand, voice notes, MTU')
+  ok(ev[2].ev === P.EV_VOICE_FROM && ev[2].id === 7 && ev[2].offset === 70000, 'the phone\'s «again from 70000» read')
+  ok(ev[3].ev === P.EV_VOICE_DONE && ev[3].id === 7 && ev[3].result === P.VOICE_SAVED
+    && ev[3].line === 'Сохранено: купить хлеб · напомнит завтра в 9:00' && ev[4].line === 'Сохранен',
+  'the phone\'s «done» read with its line (whole, and cut on a letter): «' + ev[3].line + '»')
+}
+
+// a recording on its way: the recorder's Ogg frames go as they are; one write lost, asked for again
+const frames = []
+for (let i = 0; i < 7; i++) {
+  const f = new Uint8Array(300 + i * 37)
+  for (let k = 0; k < f.length; k++) f[k] = (i * 31 + k * 7) & 0xff
+  frames.push(f)
+}
+frames[0].set([0x4f, 0x67, 0x67, 0x53], 0) // «OggS»
+const v = P.createVoice(300, 'opus', 16000)
+ok(v.next(180) === null, 'nothing to send before the first frame (the codec is not known yet)')
+const wire = []
+const lost = []
+let k = 0
+for (const f of frames.slice(0, 4)) v.add(f)
+for (let p; (p = v.next(180));) {
+  const b = new Uint8Array(p)
+  if (b[0] === 0x51 && k++ === 3) lost.push(hex(p)) // the fourth write lost on the way
+  else wire.push(hex(p))
+}
+ok(wire[0] === hex(P.voiceStart(300, P.CODEC_RECORDED, 16000, 0)) && v.codec === P.CODEC_RECORDED,
+  'Ogg from the recorder: START (as recorded), id 300 → ' + (300 & 0xff))
+for (const f of frames.slice(4)) v.add(f)
+v.end(4321)
+// the phone asks again from the lost bytes' offset
+const at = new Uint8Array(Buffer.from(lost[0], 'hex'))
+const lostAt = (at[2] | (at[3] << 8) | (at[4] << 16) | (at[5] << 24)) >>> 0
+for (let p; (p = v.next(180));) wire.push(hex(p))
+const endBefore = wire[wire.length - 1]
+v.from(lostAt)
+for (let p; (p = v.next(180));) wire.push(hex(p))
+const all = Buffer.concat(frames.map((f) => Buffer.from(f)))
+ok(Buffer.from(v.bytes()).equals(all) && endBefore.startsWith('52') && wire[wire.length - 1].startsWith('52')
+  && wire.every((w) => w.length / 2 <= 186), 'the bytes kept in order; END, and after «again from» the rest and END again; '
+  + 'writes ≤ 186 bytes (' + wire.length + ' writes)')
+fs.writeFileSync(path.join(out, 'voice_js.hex'), wire.join('\n') + '\n')
+fs.writeFileSync(path.join(out, 'voice_js_bytes.hex'), all.toString('hex') + '\n')
+v.again()
+ok(hex(v.next(20)) === hex(P.voiceStart(300, P.CODEC_RECORDED, 16000, 0)), 'a new link: all of it again from START')
+// Opus without a file around it: each packet after its length
+const raw = P.createVoice(5, 'opus', 16000)
+raw.add(new Uint8Array([0x48, 1, 2]))
+raw.add(new Uint8Array([0x48, 3]))
+ok(raw.codec === P.CODEC_OPUS_PACKETS && hex(raw.bytes()) === '0300480102' + '02004803', 'Opus packets without Ogg: each after its length')
+const pcm = P.createVoice(6, 'pcm', 8000)
+pcm.add(new Uint8Array([1, 2, 3, 4]))
+ok(pcm.codec === P.CODEC_PCM16 && hex(pcm.next(10)) === hex(P.voiceStart(6, P.CODEC_PCM16, 8000, 0)), 'PCM: as PCM, 8 kHz')
+
+// the watch held to the mouth: «up» in the watch's axes for a pose (x along the forearm to the hand), blended
+const norm = (u) => {
+  const m = Math.hypot(u[0], u[1], u[2])
+  return [u[0] / m, u[1] / m, u[2] / m]
+}
+const POSE = {
+  hanging: [-1, 0.05, 0.1], // the arm along the body, fingers down (left hand: the crown toward the hand)
+  looking: [0.3, 0.05, 0.95], // looking at the dial
+  mouth: [0.85, 0.35, 0.12], // held to the mouth, the dial to the face
+  flat: [0.05, 0.1, 1]
+}
+/** Poses in turn, [pose, seconds, move-into seconds], 20 a second in m/s², a little shake; what the detector said. */
+function talkRun(talk, plan, t0) {
+  const said = []
+  let t = t0 || 0
+  let prev = POSE[plan[0][0]]
+  for (const [pose, secs, move] of plan) {
+    const to = POSE[pose]
+    const n = Math.round(secs * 20)
+    const m = Math.round((move || 0) * 20)
+    for (let i = 0; i < n; i++) {
+      const f = m > 0 ? Math.min(1, i / m) : 1
+      const u = norm([0, 1, 2].map((j) => prev[j] + (to[j] - prev[j]) * f))
+      // moving: a pull while the arm swings up or down
+      const pull = m > 0 && i < m ? 1 + 0.35 * Math.sin(Math.PI * i / m) : 1
+      const x = 9.81 * pull * u[0] + 0.15 * gauss()
+      const y = 9.81 * pull * u[1] + 0.15 * gauss()
+      const z = 9.81 * pull * u[2] + 0.15 * gauss()
+      const w = talk.sample(x, y, z, t)
+      if (w) said.push([w, t])
+      t += 50
+    }
+    prev = to
+  }
+  return { said, t }
+}
+let tk = P.createTalk()
+tk.setHand(true)
+let r = talkRun(tk, [['hanging', 25], ['mouth', 4, 0.5], ['hanging', 3, 0.5]])
+ok(r.said.length === 2 && r.said[0][0] === 'start' && r.said[1][0] === 'stop' && tk.learnt() && tk.fingers() === 1,
+  'raised to the mouth and held: «start»; lowered: «stop» (' + r.said.map((s) => s[0] + ' ' + (s[1] / 1000).toFixed(1) + ' s').join(', ')
+  + '); the side learnt from the hanging arm')
+const startAt = r.said[0][1] - 25000
+ok(startAt >= 1000 && startAt <= 1600, 'the recording starts ' + (startAt / 1000).toFixed(2) + ' s after the hand began to rise')
+r = talkRun(tk, [['hanging', 2], ['looking', 5, 0.5], ['flat', 5, 0.5], ['hanging', 2, 0.5]], r.t)
+ok(r.said.length === 0, 'looking at the dial, the hand on the table: nothing')
+r = talkRun(tk, [['hanging', 2], ['mouth', 0.4, 0.3], ['hanging', 2, 0.3]], r.t)
+ok(r.said.length === 0, 'the hand passing by the mouth: nothing')
+r = talkRun(tk, [['hanging', 2], ['mouth', 1, 0.1], ['hanging', 2, 0.1]], r.t)
+ok(r.said.length === 2 && r.said[0][0] === 'start' && r.said[1][0] === 'cancel', 'held just long enough, then away at once: «cancel» — no note')
+r = talkRun(tk, [['mouth', 3, 0.5], ['mouth', 20]], r.t + 5000)
+ok(r.said.length === 0, 'a hand resting high for long (a steering wheel) — not raised from below: nothing')
+// the right hand set, but the watch is on the left (or the crown toward the elbow): the hanging arm must not record,
+// and the side is learnt from it
+tk = P.createTalk()
+tk.setHand(false)
+r = talkRun(tk, [['hanging', 30]])
+ok(r.said.length === 0 && tk.learnt() && tk.fingers() === 1, 'the side set wrong: the hanging arm records nothing, and the side is learnt')
+r = talkRun(tk, [['mouth', 3, 0.5], ['hanging', 2, 0.5]], r.t)
+ok(r.said.length === 2 && r.said[0][0] === 'start' && r.said[1][0] === 'stop', '…then the mouth works')
+const kept = tk.down
+const tk2 = P.createTalk()
+tk2.setHand(false)
+tk2.down = kept
+ok(tk2.learnt() && tk2.fingers() === 1, 'what was learnt kept and given back: ' + kept.map((s) => Math.round(s)).join(' / ') + ' s')
+
+console.log(bad === 0 ? 'WATCH PROTOCOL JS OK' : bad + ' FAILED')
+if (bad) process.exit(1)

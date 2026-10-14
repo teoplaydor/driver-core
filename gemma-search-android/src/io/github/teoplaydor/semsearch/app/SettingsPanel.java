@@ -59,7 +59,8 @@ final class SettingsPanel extends FrameLayout implements Engine.Listener {
     private Toggle stretchToggle, quietToggle;
     private TextView stretchAccess, stretchAfter;
     private View quietRow, afterRow;
-    private Toggle wristToggle;
+    private Toggle wristToggle, wristVoice;
+    private View wristVoiceRow;
     private TextView wristState, wristHand, wristDir, wristTurn, wristForget;
     private final Runnable wristShow = new Runnable() {
         @Override
@@ -1102,10 +1103,11 @@ final class SettingsPanel extends FrameLayout implements Engine.Listener {
     private void buildWrist() {
         final Context c = getContext();
         LinearLayout card = section("Часы: треки поворотом кисти");
-        TextView how = Ui.text(c, "Поверните кисть вправо и обратно — следующий трек, влево — предыдущий. Часы присылают телефону "
-                + "показания акселерометра по Bluetooth, поворот распознаёт телефон; работает, только пока играет музыка. Нужно "
-                + "маленькое приложение на часах: Wear OS, Xiaomi (HyperOS), Amazfit (Zepp OS), Garmin — см. описание.", 13, Ui.TEXT2,
-                Ui.REGULAR);
+        TextView how = Ui.text(c, "Поверните кисть вправо и обратно — следующий трек, влево — предыдущий (пока играет музыка). "
+                + "Поднесите часы ко рту, как будто говорите в них, и скажите заметку — опустите руку, и она сохранится здесь, "
+                + "с напоминанием, если назвать время. Часы сами распознают жесты и шлют телефону короткий сигнал по Bluetooth. "
+                + "Нужно маленькое приложение на часах: Xiaomi (HyperOS), Wear OS, Amazfit (Zepp OS), Garmin — см. описание; "
+                + "заметки голосом — на Xiaomi Watch S5.", 13, Ui.TEXT2, Ui.REGULAR);
         how.setPadding(Ui.dp(c, 18), Ui.dp(c, 12), Ui.dp(c, 18), Ui.dp(c, 4));
         card.addView(how);
         wristToggle = new Toggle(c, WristLink.on(c));
@@ -1172,6 +1174,16 @@ final class SettingsPanel extends FrameLayout implements Engine.Listener {
                 });
             }
         });
+        wristVoice = new Toggle(c, WristLink.voiceNotes(c));
+        wristVoice.setListener(new Toggle.Listener() {
+            @Override
+            public void changed(boolean on) {
+                WristLink.setVoiceNotes(c, on);
+                showWrist();
+            }
+        });
+        wristVoiceRow = toggleRow(card, "Заметки голосом с часов", "поднесите часы ко рту и говорите; опустите руку — заметка готова",
+                wristVoice);
         wristForget = quiet(card, "Забыть часы", Ui.TEXT2, new Runnable() {
             @Override
             public void run() {
@@ -1201,6 +1213,8 @@ final class SettingsPanel extends FrameLayout implements Engine.Listener {
         rowOf(wristHand).setVisibility(on ? VISIBLE : GONE);
         rowOf(wristDir).setVisibility(on ? VISIBLE : GONE);
         rowOf(wristTurn).setVisibility(on ? VISIBLE : GONE);
+        if (wristVoice != null && wristVoice.isOn() != WristLink.voiceNotes(c)) wristVoice.setOn(WristLink.voiceNotes(c), false);
+        if (wristVoiceRow != null) wristVoiceRow.setVisibility(on ? VISIBLE : GONE);
         wristForget.setVisibility(name.isEmpty() ? GONE : VISIBLE);
         if (!name.isEmpty()) wristForget.setText("Забыть часы (" + name + ")");
     }

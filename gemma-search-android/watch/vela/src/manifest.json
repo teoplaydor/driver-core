@@ -1,8 +1,8 @@
 {
   "package": "io.github.teoplaydor.semsearch.wrist",
   "name": "Пульт кистью",
-  "versionName": "1.2.0",
-  "versionCode": 13,
+  "versionName": "1.3.0",
+  "versionCode": 14,
   "minPlatformVersion": 1000,
   "minAPILevel": 1,
   "icon": "/common/logo.png",
@@ -12,7 +12,9 @@
     { "name": "system.bluetooth.ble" },
     { "name": "system.vibrator" },
     { "name": "system.brightness" },
-    { "name": "system.storage" }
+    { "name": "system.storage" },
+    { "name": "system.record" },
+    { "name": "system.file" }
   ],
   "config": {
     "logLevel": "log",

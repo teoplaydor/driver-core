@@ -1,3 +1,4 @@
+import io.github.teoplaydor.semsearch.core.VoiceNote;
 import io.github.teoplaydor.semsearch.core.WristGesture;
 
 import java.nio.charset.StandardCharsets;
@@ -61,10 +62,40 @@ public class WristJsTest {
         // turns found on the watch: HELLO v2, then one TURN packet per turn
         ok(Arrays.equals(fixed.get(2), WristGesture.hello(WristGesture.VERSION_TURNS, 0x0badcafe, 16, 981, "vela")),
                 "HELLO v2: the same bytes as the phone's");
-        ok(Arrays.equals(fixed.get(3), WristGesture.turnPacket(9, 61.6f, 344, new float[]{0.6f, -0.8f, 0})), "TURN: the same bytes");
-        ok(Arrays.equals(fixed.get(4), WristGesture.swingPacket(10, 58.4f, 356, new float[]{0, 0.6f, 0.8f}, new float[]{-0.1f, -0.2f, 0.97f}, 61.25f))
-                && Arrays.equals(fixed.get(5), WristGesture.swingPacket(11, 33, 300, new float[]{-1, 0, 0}, new float[]{-0.95f, 0.31f, 0}, Float.NaN)),
-                "SWING: the same bytes (with the compass and without)");
+        ok(Arrays.equals(fixed.get(3), WristGesture.rollPacket(9, 61.64f, 344, WristGesture.SOURCE_GRAVITY, 0.37f, 12.4f))
+                && Arrays.equals(fixed.get(4), WristGesture.rollPacket(10, -48.25f, 410, WristGesture.SOURCE_COMPASS, -0.93f, 3)),
+                "ROLL: the same bytes (gravity, the compass)");
+        // the voice note's packets, as the phone reads them
+        VoiceNote vn = new VoiceNote();
+        boolean voice = vn.packet(fixed.get(5)) == VoiceNote.STARTED && vn.id() == 7 && vn.codec() == WristGesture.CODEC_RECORDED && vn.rate() == 16000
+                && vn.packet(fixed.get(6)) == VoiceNote.MISSING && vn.missingFrom() == 0
+                && vn.packet(fixed.get(7)) == VoiceNote.MISSING && vn.missingFrom() == 0 && vn.millis() == 4321;
+        ok(voice, "VOICE: start, bytes at 70000, end at 70005 — the first 70000 asked for again");
+        ok(Arrays.equals(fixed.get(5), WristGesture.voiceStart(7, WristGesture.CODEC_RECORDED, 16000, 0))
+                && Arrays.equals(fixed.get(6), WristGesture.voiceData(7, 70000, new byte[]{1, 2, 3, (byte) 250, (byte) 255}, 0, 5))
+                && Arrays.equals(fixed.get(7), WristGesture.voiceEnd(7, 70005, 4321)), "VOICE: the same bytes as the phone's");
+        // a recording sent by the watch's JavaScript with a write lost on the way (and sent again when asked): whole
+        List<byte[]> wire = read(a[0] + "/voice_js.hex");
+        byte[] want = read(a[0] + "/voice_js_bytes.hex").get(0);
+        VoiceNote vj = new VoiceNote();
+        int missing = 0;
+        boolean complete = false;
+        for (byte[] p : wire) {
+            int r = vj.packet(p);
+            if (r == VoiceNote.MISSING) missing++;
+            if (r == VoiceNote.COMPLETE) complete = true;
+        }
+        ok(complete && Arrays.equals(vj.bytes(), want) && missing > 0 && vj.millis() == 4321,
+                "VOICE from the watch's JavaScript: a write lost, told (" + missing + "×), sent again — the recording whole ("
+                        + want.length + " bytes)");
+        // the same by the Vela page itself (a write failed and written again, the phone's «again from 238»)
+        List<byte[]> page = read(a[0] + "/vela_voice_app.hex");
+        byte[] frames = read(a[0] + "/vela_voice_bytes.hex").get(0);
+        VoiceNote vp = new VoiceNote();
+        boolean whole = false;
+        for (byte[] p : page) if (vp.packet(p) == VoiceNote.COMPLETE) whole = true;
+        ok(whole && Arrays.equals(vp.bytes(), frames) && vp.codec() == WristGesture.CODEC_RECORDED && vp.rate() == 16000,
+                "VOICE from the Vela page: the recorder's frames whole on the phone (" + frames.length + " bytes, Ogg as recorded)");
         // (the protocol module alone, and the apps' pages themselves)
         for (String file : new String[]{"vela_turns", "zepp_turns", "vela_s5_turns", "vela_app", "vela_s5_app", "vela_hanging_app", "zepp_app"}) {
             List<byte[]> ps = read(a[0] + "/" + file + ".hex");
@@ -96,9 +127,7 @@ public class WristJsTest {
                 String[] v = l.trim().split(" ");
                 double h = v.length > 4 && !v[4].equals("NaN") ? Double.parseDouble(v[4]) : Double.NaN;
                 if (f.sample(Double.parseDouble(v[1]), Double.parseDouble(v[2]), Double.parseDouble(v[3]), Double.parseDouble(v[0]), h)) {
-                    float[] r = f.rest(), u = f.peakUp();
-                    java.add(name + " " + f.peak() + " " + f.took() + " " + f.headingChange() + " " + r[0] + " " + r[1] + " " + r[2]
-                            + " " + u[0] + " " + u[1] + " " + u[2]);
+                    java.add(name + " " + f.twist() + " " + f.took() + " " + f.source() + " " + f.slope() + " " + f.slopeChange());
                 }
             }
             List<String> jsl = new ArrayList<String>();
@@ -108,9 +137,9 @@ public class WristJsTest {
             for (int i = 0; same && i < java.size(); i++) {
                 String[] x = java.get(i).split(" "), y = jsl.get(i).split(" ");
                 same = x[0].equals(y[0]);
-                for (int k = 1; same && k < 10; k++) {
+                for (int k = 1; same && k < 6; k++) {
                     double xv = Double.parseDouble(x[k]), yv = Double.parseDouble(y[k]);
-                    same = Double.isNaN(xv) ? Double.isNaN(yv) : Math.abs(xv - yv) <= (k == 2 ? 0.2 : k <= 3 ? 0.01 : 1e-4);
+                    same = Math.abs(xv - yv) <= (k == 2 ? 0.2 : k == 4 ? 1e-4 : 0.01);
                 }
                 if (!same) first = "\n     java: " + java.get(i) + "\n     js:   " + jsl.get(i);
             }

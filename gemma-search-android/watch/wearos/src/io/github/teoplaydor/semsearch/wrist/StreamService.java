@@ -443,7 +443,7 @@ public final class StreamService extends Service implements SensorEventListener 
         lastNs = e.timestamp;
         double h = !Double.isNaN(heading) && Math.abs(e.timestamp - headingNs) < 1_000_000_000L ? heading : Double.NaN;
         if (finder.sample(e.values[0], e.values[1], e.values[2], sampleMs, h)) {
-            send(WristGesture.swingPacket(seq++ & 0xff, finder.peak(), finder.took(), finder.rest(), finder.peakUp(), finder.headingChange()));
+            send(WristGesture.rollPacket(seq++ & 0xff, finder.twist(), finder.took(), finder.source(), finder.slope(), finder.slopeChange()));
         }
     }
 

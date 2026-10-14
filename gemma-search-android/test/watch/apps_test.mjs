@@ -150,7 +150,7 @@ async function zepp() {
   ok(!W.overlap, 'zepp: one write at a time')
   const sent = W.writes.filter((w) => w[0] === SAMPLES)
   ok(sent.length === 3 && sent[0][1].startsWith('0002') && Buffer.from(sent[0][1].slice(20), 'hex').toString() === 'zepp'
-    && sent.slice(1).every((w) => w[1].startsWith('30')),
+    && sent.slice(1).every((w) => w[1].startsWith('40')),
     'zepp: HELLO (the watch finds the turns) first, then one packet per turn: ' + (sent.length - 1) + ' — ' + W.text)
   ok(sent.every((w) => w[2] <= 20), 'zepp: every write fits 20 bytes')
   fs.writeFileSync(path.join(out, 'zepp_app.hex'), sent.map((w) => w[1]).join('\n') + '\n')
@@ -197,13 +197,22 @@ async function vela() {
             W.outstanding = 1; const v = o.characteristic.characteristicValue
             W.writes.push([o.characteristic.serviceUuid, o.characteristic.characteristicUuid, Array.from(new Uint8Array(v)).map((x) => x.toString(16).padStart(2, '0')).join(''), o.characteristic.descriptors])
             if (W.hangWrites) return  // the completion never comes: the watch's write watchdog must keep the stream going
-            setImmediate(() => { W.outstanding = 0; o.success && o.success(); o.complete && o.complete() }) } }
+            if (W.failVoice && new Uint8Array(v)[0] === 0x51) { W.failVoice--; W.writes.pop(); W.failed = (W.failed || 0) + 1
+              setImmediate(() => { W.outstanding = 0; o.fail && o.fail(null, 10004); o.complete && o.complete() }); return }
+            setImmediate(() => { W.outstanding = 0; o.success && o.success(); o.complete && o.complete() }) },
+          setBLEMtuSize(o) { W.mtuAsked = o.mtu; setImmediate(() => o.success && o.success()) } }
           W.gatts.push(g); return g } }`,
     '@system.sensor': `export default { subscribeAccelerometer(o) { W.acc = o }, unsubscribeAccelerometer() { W.acc = null },
       subscribeCompass(o) { W.compass = o }, unsubscribeCompass() { W.compass = null } }`,
     '@system.vibrator': `export default { vibrate(o) { W.buzz.push(o.mode) } }`,
     '@system.brightness': `export default { setKeepScreenOn(o) { W.keep = o.keepScreenOn } }`,
-    '@system.storage': `const m = new Map(); W.storage = m; export default { get(o) { o.success(m.get(o.key) || '') }, set(o) { m.set(o.key, o.value) } }`
+    '@system.storage': `const m = new Map(); W.storage = m; export default { get(o) { o.success(m.get(o.key) || '') }, set(o) { m.set(o.key, o.value) } }`,
+    '@system.record': `const R = { start(o) { W.recording = o; W.recStarts = (W.recStarts || 0) + 1 },
+        stop() { const o = W.recording; W.recording = null; W.recStops = (W.recStops || 0) + 1
+          setImmediate(() => { R.onframerecorded && R.onframerecorded({ frameBuffer: new Uint8Array(W.lastFrame || [1]).buffer, isLastFrame: true })
+            o && o.success && o.success({}); o && o.complete && o.complete() }) } }
+      W.record = R; export default R`,
+    '@system.file': `export default { readArrayBuffer(o) { o.fail && o.fail(null, 300) } }`
   }, '../../common/proto.js')
   const def = mod.default
   const page = Object.create(def)
@@ -245,14 +254,17 @@ async function vela() {
   ok(d && +d[1] > 200 && +d[2] === sent.length - 1 && +d[3] === sent.length && +d[4] === sent.length && +d[5] === 0,
     'vela: the counters on the screen — the last turn, sensor, turns, writes and how they ended («' + page.diag + '»)')
   ok(sent.length === 3 && sent[0][2].startsWith('0002') && Buffer.from(sent[0][2].slice(20), 'hex').toString() === 'vela'
-    && sent.slice(1).every((w) => w[2].startsWith('30')),
+    && sent.slice(1).every((w) => w[2].startsWith('40')),
     'vela: HELLO (the watch finds the turns) first, then one packet per turn: ' + (sent.length - 1))
   ok(sent.every((w) => w[2].length <= 40 && w[0] === SERVICE && Array.isArray(w[3])), 'vela: every write fits 20 bytes, with its service and descriptors')
   fs.writeFileSync(path.join(out, 'vela_app.hex'), sent.map((w) => w[2]).join('\n') + '\n')
-  const say = (b) => g.onBLECharacteristicChange({ serviceUuid: SERVICE, characteristicUuid: EVENTS, characteristicValue: new Uint8Array([b]).buffer })
+  const say = (b) => g.onBLECharacteristicChange({ serviceUuid: SERVICE, characteristicUuid: EVENTS,
+    characteristicValue: new Uint8Array(Array.isArray(b) ? b : [b]).buffer })
   say(1)
   say(3)
   ok(W.buzz.join() === 'short,long', 'vela: «next» buzzes short, «learnt» long')
+  say([6, 1, 23, 0]) // the phone's settings: the left hand, no voice notes
+  ok(page.voiceOn === false && W.storage.get('wrist_voice') === '0', 'vela: the phone\'s settings taken (voice notes off) and kept')
   say(4)
   ok(W.acc === null && W.compass === null && /не играет музыка/.test(page.state) && /телефон: пауза/.test(page.diag),
     'vela: «pause» — the accelerometer off, and the screen says why («' + page.state + '»)')
@@ -377,7 +389,7 @@ async function vela() {
   }
   await advance(300)
   const s5w = W.writes.slice(w3).filter((w) => w[1] === SAMPLES)
-  ok(s5w.length === 3 && s5w[0][2].startsWith('0002') && s5w[1][2].startsWith('30') && s5w[2][2].startsWith('30')
+  ok(s5w.length === 3 && s5w[0][2].startsWith('0002') && s5w[1][2].startsWith('40') && s5w[2][2].startsWith('40')
     && /повороты 2/.test(p3.diag), 'vela (S5: whole m/s², samples in batches): HELLO and both turns — «' + p3.diag + '»')
   fs.writeFileSync(path.join(out, 'vela_s5_app.hex'), s5w.map((w) => w[2]).join('\n') + '\n')
   p3.onDestroy()
@@ -409,11 +421,90 @@ async function vela() {
   await advance(300)
   const hw = W.writes.slice(w4).filter((w) => w[1] === SAMPLES)
   p4.showDiag()
-  ok(hw.length === 3 && hw[1][2].startsWith('30') && hw[2][2].startsWith('30') && /компас \d+°/.test(p4.diag) && /\(компас\)/.test(p4.diag),
+  ok(hw.length === 3 && hw[1][2].startsWith('40') && hw[2][2].startsWith('40') && /компас \d+°/.test(p4.diag) && /\(компас\)/.test(p4.diag),
     'vela (arm hanging): both twists found by the compass — «' + p4.diag + '»')
   fs.writeFileSync(path.join(out, 'vela_hanging_app.hex'), hw.map((w) => w[2]).join('\n') + '\n')
   p4.onDestroy()
   ok(W.compass === null, 'vela: the compass off when the page goes')
+
+  // a voice note: the music paused (the sensor stays on for the notes), the watch raised to the mouth and held — it
+  // records, the frames go to the phone as they come (one write lost and written again), lowered — the end; the phone
+  // asks for some again, then says it is saved
+  W.storage.set('wrist_voice', '1')
+  const p5 = Object.create(def)
+  Object.assign(p5, JSON.parse(JSON.stringify(def.data)))
+  p5.onInit()
+  await flush(); await flush(); await flush(); await flush()
+  W.found([{ deviceId: '5A:11:22:33:44:55', rssi: -60, addressType: 'RANDOM', data: new Uint8Array([2, 1, 6, 17, 7, ...le]).buffer }])
+  const g5 = W.gatts[W.gatts.length - 1]
+  g5.onBLEConnectionStateChange(2)
+  await flush(); await flush(); await flush()
+  ok(W.mtuAsked === 247, 'vela (voice): a bigger MTU asked for')
+  const say5 = (b) => g5.onBLECharacteristicChange({ serviceUuid: SERVICE, characteristicUuid: EVENTS, characteristicValue: new Uint8Array(b).buffer })
+  say5([6, 3, 247, 0]) // the left hand, voice notes on, MTU 247
+  const w5 = W.writes.length
+  const g9 = 9.81
+  const pose = (u, k) => { const m = Math.hypot(...u); return u.map((c) => (c / m) * g9 * (k || 1) + (rnd() - 0.5) * 0.2) }
+  const HANG = [-1, 0.05, 0.1]
+  const MOUTH = [0.85, 0.35, 0.12]
+  const step = async (u, k) => { await advance(50); const [x, y, z] = pose(u, k); W.acc && W.acc.callback({ x, y, z }); await flush() }
+  for (let i = 0; i < 40; i++) await step(HANG)
+  say5([4]) // «pause»
+  ok(W.acc !== null && /поднесите часы ко рту/.test(p5.state), 'vela (voice): «pause» — the sensor stays on for the notes («' + p5.state + '»)')
+  const buzz0 = W.buzz.length
+  // raised in half a second, held
+  for (let i = 0; i <= 10; i++) await step(HANG.map((h, j) => h + (MOUTH[j] - h) * (i / 10)), 1 + 0.3 * Math.sin(Math.PI * i / 10))
+  const frames = []
+  W.failVoice = 1
+  for (let i = 0; i < 60; i++) {
+    await step(MOUTH)
+    if (W.recording && i % 8 === 0) {
+      // a frame every 0.4 s: the recorder's Ogg file in pieces
+      const f = new Uint8Array(400)
+      for (let k = 0; k < f.length; k++) f[k] = (frames.length * 13 + k * 5) & 0xff
+      if (frames.length === 0) f.set([0x4f, 0x67, 0x67, 0x53])
+      frames.push(f)
+      W.record.onframerecorded({ frameBuffer: f.buffer, isLastFrame: false })
+      await flush()
+    }
+  }
+  ok(W.recStarts === 1 && W.recording && W.recording.format === 'opus' && W.recording.sampleRate === 16000 && W.recording.frameSize > 0
+    && W.buzz[buzz0] === 'short' && /говорите/.test(p5.note), 'vela (voice): held to the mouth — recording Opus 16 kHz in frames, a short buzz, «' + p5.note + '»')
+  // lowered
+  W.lastFrame = [7, 7, 7]
+  frames.push(new Uint8Array(W.lastFrame))
+  for (let i = 0; i <= 20; i++) await step(MOUTH.map((m, j) => m + (HANG[j] - m) * Math.min(1, i / 10)))
+  await advance(500)
+  const vw = W.writes.slice(w5).filter((w) => w[1] === SAMPLES).map((w) => w[2])
+  ok(W.recStops === 1 && vw.some((w) => w.startsWith('50')) && vw[vw.length - 1].startsWith('52') && W.failed === 1,
+    'vela (voice): lowered — the recording stopped, START, the bytes, END (' + vw.filter((w) => w.startsWith('51')).length + ' writes of bytes, one lost and written again)')
+  ok(!vw.some((w) => w.startsWith('40')), 'vela (voice): no turns sent meanwhile')
+  ok(vw.filter((w) => w.startsWith('51')).every((w) => w.length / 2 <= 244), 'vela (voice): writes as big as the MTU takes (≤ 244 bytes)')
+  const noteId = parseInt(vw.find((w) => w.startsWith('50')).slice(2, 4), 16)
+  // the phone asks for the bytes from 238 again
+  const n0 = W.writes.length
+  say5([8, noteId, 238, 0, 0, 0])
+  await advance(300)
+  const again = W.writes.slice(n0).filter((w) => w[1] === SAMPLES).map((w) => w[2])
+  ok(again.length >= 2 && again[0].startsWith('51' + vw.find((w) => w.startsWith('50')).slice(2, 4) + 'ee000000') && again[again.length - 1].startsWith('52'),
+    'vela (voice): «again from 238» — sent again from there, and the end')
+  fs.writeFileSync(path.join(out, 'vela_voice_app.hex'), vw.concat(again).join('\n') + '\n')
+  fs.writeFileSync(path.join(out, 'vela_voice_bytes.hex'), Buffer.concat(frames.map((f) => Buffer.from(f))).toString('hex') + '\n')
+  // done: saved
+  say5([9, noteId, 0, ...Buffer.from('Сохранено: купить хлеб')])
+  ok(W.buzz[W.buzz.length - 1] === 'long' && p5.note === 'Сохранено: купить хлеб' && p5.voices.length === 0,
+    'vela (voice): the phone saved it — a long buzz, «' + p5.note + '»')
+  // a raise too short to be a note: nothing sent
+  const n1 = W.writes.length
+  for (let i = 0; i < 40; i++) await step(HANG)
+  for (let i = 0; i <= 6; i++) await step(HANG.map((h, j) => h + (MOUTH[j] - h) * (i / 6)))
+  for (let i = 0; i < 16; i++) await step(MOUTH)
+  for (let i = 0; i <= 20; i++) await step(MOUTH.map((m, j) => m + (HANG[j] - m) * Math.min(1, i / 4)))
+  await advance(2000)
+  ok(W.recStarts === 2 && W.recStops === 2 && W.writes.slice(n1).filter((w) => w[1] === SAMPLES).length === 0 && p5.voices.length === 0,
+    'vela (voice): held a moment and away — the recording dropped, nothing sent (' + W.recStarts + ' ' + W.recStops + ' '
+    + W.writes.slice(n1).filter((w) => w[1] === SAMPLES).map((w) => w[2].slice(0, 6)).join(',') + ')')
+  p5.onDestroy()
 }
 
 await zepp()

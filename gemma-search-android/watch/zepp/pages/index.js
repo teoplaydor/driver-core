@@ -211,7 +211,7 @@ Page({
       platform: 'zepp',
       turns: true,
       send: (b) => this.send(b),
-      onTurn: (t) => this.show('поворот ' + Math.round(t.peak) + '° за ' + String(Math.round(t.took / 100) / 10).replace('.', ',') + ' с')
+      onTurn: (t) => this.show('поворот ' + Math.round(Math.abs(t.twist)) + '° за ' + String(Math.round(t.took / 100) / 10).replace('.', ',') + ' с')
     })
     this.listen(true)
   },

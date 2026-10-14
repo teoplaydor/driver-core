@@ -2,8 +2,9 @@
   <div class="page">
     <text class="title">Пульт кистью</text>
     <text class="state">{{ state }}</text>
+    <text class="note" show="{{ note !== '' }}">{{ note }}</text>
     <text class="diag">{{ diag }}</text>
-    <text class="hint">Вправо — дальше, влево — назад</text>
+    <text class="hint">{{ voiceOn ? 'Вправо — дальше, влево — назад · ко рту — заметка' : 'Вправо — дальше, влево — назад' }}</text>
     <input type="button" class="button" value="{{ on ? 'Стоп' : 'Старт' }}" onclick="toggle" />
   </div>
 </template>
@@ -14,17 +15,23 @@
  * LE service, connects, finds the turns in its own accelerometer (and compass: with the arm hanging only it sees a
  * twist) and sends one short packet per turn (the phone's radio and processor stay idle in between), vibrates on the
  * phone's answer. The phone decides which way and what to press.
+ * And voice notes: the watch held to the mouth (as one talks into it) records; lowered, the recording goes to the phone,
+ * which makes it a note — with a reminder if a time was said — and says what became of it (a vibration, a line here).
  * Vela lets neither the sensor nor Bluetooth run in the background, so the page keeps the screen on while it works;
- * when the music stops the phone says «pause» and the sensor is switched off until it plays again.
+ * when the music stops the phone says «pause»: no turns are sent then, and the sensor is switched off unless voice
+ * notes are on.
  */
 import ble from '@system.bluetooth.ble'
 import sensor from '@system.sensor'
 import vibrator from '@system.vibrator'
 import brightness from '@system.brightness'
 import storage from '@system.storage'
+import record from '@system.record'
+import file from '@system.file'
 import {
-  SERVICE, SAMPLES, EVENTS, EV_NEXT, EV_PREVIOUS, EV_LEARNED, EV_IGNORED, EV_PAUSE, EV_STREAM,
-  advertises, createPacker
+  SERVICE, SAMPLES, EVENTS, EV_NEXT, EV_PREVIOUS, EV_LEARNED, EV_IGNORED, EV_PAUSE, EV_STREAM, EV_CONFIG, EV_VOICE_FROM,
+  EV_VOICE_DONE, VOICE_SAVED, VOICE_SILENT, VOICE_KEPT, VOICE_ANSWER, SOURCE_COMPASS, advertises, createPacker,
+  parseEvent, createTalk, createVoice
 } from '../../common/proto.js'
 
 /** How long a connection may take before it is let go and the phone looked for again. */
@@ -38,6 +45,25 @@ const NOTIFY_MS = 4000
 
 /** A write's completion may not arrive; move on after this long so the sample stream keeps flowing. */
 const WRITE_MS = 150
+
+/** The same for a voice note's bytes (many writes in a row: the link's own queue keeps them in order). */
+const VOICE_WRITE_MS = 60
+
+/**
+ * A voice note as the S5 records it: Opus, 16 kHz mono, ~2 KB a second (a minute is ~120 KB, a few seconds over
+ * Bluetooth); its frames handed over as they are recorded, so most of it is on the phone by the time the hand is down.
+ * If the watch takes no Opus: 8 kHz PCM, 16 KB a second — slow over Bluetooth, so at most 20 s.
+ */
+const OPUS = { format: 'opus', sampleRate: 16000, numberOfChannels: 1, encodeBitRate: 16000, frameSize: 1024 }
+const PCM = { format: 'pcm', sampleRate: 8000, numberOfChannels: 1, encodeBitRate: 128000, frameSize: 2048 }
+const PCM_MAX_MS = 20000
+
+/** The phone's answer about a note may take a while (recognition): after this long the end is said again. */
+const DONE_MS = 40000
+
+/** How many bytes of a note go in one write: before the phone tells the link's MTU, a long write is tried. */
+const CHUNK_UNKNOWN = 180
+const CHUNK_MIN = 14
 
 /**
  * The accelerometer's pace: «ui» (~16 a second) first — a quick turn needs it; on the S5 «game» gave one value over and
@@ -78,7 +104,9 @@ export default {
   data: {
     on: false,
     state: 'выключено',
-    diag: ''
+    diag: '',
+    note: '',
+    voiceOn: true
   },
 
   onInit() {
@@ -94,8 +122,35 @@ export default {
     this.pace = 0
     this.paceKnown = false
     this.writeId = 0
+    this.playing = true
+    this.leftHand = true
+    this.mtu = 0
+    this.chunk = CHUNK_UNKNOWN
+    this.talk = createTalk()
+    this.rec = null
+    this.voices = []
+    this.voiceFails = 0
+    this.doneTimer = 0
+    this.noteId = Math.floor(Math.random() * 256)
     const self = this
     this.variant = 0
+    storage.get({
+      key: 'wrist_voice',
+      success(v) {
+        // what the phone said last (it says again on every connection)
+        if (v === '0' || v === '1') self.voiceOn = v === '1'
+      }
+    })
+    storage.get({
+      key: 'wrist_fingers',
+      success(v) {
+        // where the arm has hung: which way along x the fingers are (see createTalk)
+        try {
+          const d = JSON.parse(v)
+          if (Array.isArray(d)) self.talk.down = d
+        } catch (e) {}
+      }
+    })
     storage.get({
       key: 'wrist_scan',
       success(v) {
@@ -276,7 +331,7 @@ export default {
     g.onBLECharacteristicChange = function (c) {
       if (g !== self.gatt || !c || !c.characteristicValue) return
       const v = new Uint8Array(c.characteristicValue)
-      if (v.length > 0) self.heard(v[0])
+      if (v.length > 0) self.heard(v)
     }
     // the watch's connect waits for the link with no limit of its own: 15 s, then let go and look again
     this.later(() => {
@@ -362,7 +417,6 @@ export default {
   },
 
   linked() {
-    const self = this
     this.linkedOk = true
     if (this.stepTimer) clearTimeout(this.stepTimer)
     this.stepTimer = 0
@@ -371,6 +425,17 @@ export default {
     this.n = { s: 0, p: 0, w: 0, ok: 0, bad: 0, to: 0, code: '' }
     this.ev = ''
     this.turn = ''
+    this.playing = true
+    // the link's MTU is told again by the phone (CONFIG)
+    this.mtu = 0
+    this.chunk = CHUNK_UNKNOWN
+    this.voiceFails = 0
+    // a voice note not yet confirmed: all of it again (the phone of this link has none of it)
+    for (let i = 0; i < this.voices.length; i++) this.voices[i].again()
+    // bigger writes for voice notes, if the link takes them (the phone tells the result)
+    try {
+      this.gatt.setBLEMtuSize({ mtu: 247, success() {}, fail() {} })
+    } catch (e) {}
     this.newPacker()
     this.listen(true)
   },
@@ -386,8 +451,8 @@ export default {
         self.send(buf)
       },
       onTurn(t) {
-        self.turn = Math.round(t.peak) + '° за ' + String(Math.round(t.took / 100) / 10).replace('.', ',') + ' с'
-          + (Number.isNaN(t.dh) ? '' : ' (компас)')
+        self.turn = Math.round(Math.abs(t.twist)) + '° за ' + String(Math.round(t.took / 100) / 10).replace('.', ',') + ' с'
+          + (t.source === SOURCE_COMPASS ? ' (компас)' : '')
         self.showDiag()
       }
     })
@@ -422,11 +487,14 @@ export default {
     this.notifyTimer = 0
     if (this.writeTimer) clearTimeout(this.writeTimer)
     this.writeTimer = 0
+    if (this.doneTimer) clearTimeout(this.doneTimer)
+    this.doneTimer = 0
     this.writing = false
     this.linkedOk = false
     this.listen(false)
     this.queue = []
     this.writing = false
+    if (this.rec) this.stopNote(false)
     const g = this.gatt
     this.gatt = null
     if (g) {
@@ -437,16 +505,59 @@ export default {
     }
   },
 
-  /** One byte from the phone. */
-  heard(ev) {
+  /** What the phone said (one byte, or more for the settings and the voice notes). */
+  heard(v) {
+    const e = parseEvent(v)
+    const ev = e.ev
     if (ev === EV_PAUSE) {
       this.ev = 'пауза'
-      this.listen(false)
-      this.state = 'на телефоне не играет музыка — жду'
+      this.playing = false
+      this.mute()
+      if (this.voiceOn) {
+        // the sensor stays on for the voice notes; no turns are sent
+        this.state = 'музыка не играет · поднесите часы ко рту — заметка'
+      } else {
+        this.listen(false)
+        this.state = 'на телефоне не играет музыка — жду'
+      }
     } else if (ev === EV_STREAM) {
       this.ev = 'играет'
+      this.playing = true
       if (this.packer) this.packer.restart()
+      this.mute()
       this.listen(true)
+    } else if (ev === EV_CONFIG) {
+      this.leftHand = e.leftHand
+      this.talk.setHand(e.leftHand)
+      if (e.mtu > 23) this.mtu = e.mtu
+      this.chunk = this.mtu ? Math.max(CHUNK_MIN, Math.min(this.mtu, 512) - 3 - 6) : CHUNK_UNKNOWN
+      if (e.voice !== this.voiceOn) {
+        this.voiceOn = e.voice
+        storage.set({ key: 'wrist_voice', value: e.voice ? '1' : '0' })
+        if (!e.voice && this.rec) this.stopNote(true)
+      }
+      if (this.voiceOn && !this.listening && this.linkedOk) this.listen(true)
+      else if (!this.voiceOn && !this.playing) this.listen(false)
+      return
+    } else if (ev === EV_VOICE_FROM) {
+      const n = this.voices[0]
+      if (n && n.id === e.id) {
+        // a write lost on the way: again from there (and the writes smaller, if they keep getting lost there)
+        if (n.askedAt === e.offset && ++n.asked >= 3 && this.chunk > CHUNK_MIN) {
+          this.chunk = Math.max(CHUNK_MIN, Math.floor(this.chunk / 3))
+          n.asked = 0
+        } else if (n.askedAt !== e.offset) {
+          n.askedAt = e.offset
+          n.asked = 1
+        }
+        n.from(e.offset)
+        n.endAt = 0
+        this.pump()
+      }
+      return
+    } else if (ev === EV_VOICE_DONE) {
+      this.voiceDone(e)
+      return
     } else if (ev === EV_NEXT || ev === EV_PREVIOUS) {
       this.ev = ev === EV_NEXT ? 'вперёд' : 'назад'
       vibrator.vibrate({ mode: 'short' })
@@ -581,6 +692,8 @@ export default {
         return
       }
     }
+    if (this.voiceOn) this.talked(this.talk.sample(ret.x, ret.y, ret.z, now), now)
+    this.mute()
     this.packer.sample(ret.x, ret.y, ret.z, now, this.headingNow(now))
     if (now - (this.rawAt || 0) > 400) {
       this.rawAt = now
@@ -605,10 +718,15 @@ export default {
   },
 
   pump() {
-    if (this.writing || !this.gatt || this.queue.length === 0) return
+    if (this.writing || !this.gatt || !this.linkedOk) return
     const self = this
     const g = this.gatt
-    const buf = this.queue.shift()
+    // the turns first (short, now or never), then a voice note's next bytes
+    const voice = this.queue.length === 0 ? this.voices[0] : null
+    const buf = voice ? this.voiceNext(voice) : this.queue.shift()
+    if (!buf) return
+    const head = new Uint8Array(buf)
+    const at = head[0] === 0x51 ? (head[2] | (head[3] << 8) | (head[4] << 16) | (head[5] << 24)) >>> 0 : -1
     const id = ++this.writeId
     const n = this.n
     this.writing = true
@@ -633,6 +751,14 @@ export default {
       } else if (n) {
         n.ok++
       }
+      if (bad && at >= 0 && voice && self.voices[0] === voice) {
+        // a note's bytes not written: from there again, smaller if it keeps failing (no long writes on this link)
+        voice.from(Math.min(voice.sent, at))
+        if (++self.voiceFails >= 2 && self.chunk > CHUNK_MIN) {
+          self.chunk = CHUNK_MIN
+          self.voiceFails = 0
+        }
+      }
       next()
     }
     g.writeCharacteristicValue({
@@ -651,8 +777,180 @@ export default {
       this.writeTimer = setTimeout(() => {
         if (!settled && n) n.to++
         next()
-      }, WRITE_MS)
+      }, voice ? VOICE_WRITE_MS : WRITE_MS)
     }
+  },
+
+  // ---------------------------------------------------------------- voice notes
+
+  /** No turns sent while the music is paused or a note is being said. */
+  mute() {
+    if (this.packer) this.packer.mute = !this.playing || this.talk.busy()
+  },
+
+  /** What the hand did (createTalk): held to the mouth — record; taken away — the note goes to the phone. */
+  talked(what, now) {
+    if (what === 'start') this.startNote(now)
+    else if (what === 'stop') this.stopNote(false)
+    else if (what === 'cancel') this.stopNote(true)
+    if (this.rec && this.rec.opts === PCM && now - this.rec.at >= PCM_MAX_MS) this.stopNote(false)
+    // where the arm hangs, kept now and then (which way the fingers are, see createTalk)
+    if (now - (this.fingersSaved || 0) > 30000) {
+      this.fingersSaved = now
+      storage.set({ key: 'wrist_fingers', value: JSON.stringify(this.talk.down.map((s) => Math.round(s))) })
+    }
+  },
+
+  startNote(now) {
+    if (this.rec) return
+    this.noteId = (this.noteId + 1) & 0xff
+    vibrator.vibrate({ mode: 'short' })
+    this.note = 'говорите… опустите руку — отправлю'
+    this.record(OPUS, now)
+  },
+
+  /** Recording in one format; Opus not taken (202 — wrong parameters) — PCM. */
+  record(opts, now) {
+    const self = this
+    const v = createVoice(this.noteId, opts.format, opts.sampleRate)
+    const rec = { v, opts, at: now, ms: 0, stopping: false, cancel: false }
+    this.rec = rec
+    this.voices.push(v)
+    record.onframerecorded = function (res) {
+      if (self.rec !== rec || !res) return
+      if (res.frameBuffer && !rec.cancel) {
+        v.add(res.frameBuffer)
+        self.pump()
+      }
+      if (res.isLastFrame) self.endNote(rec)
+    }
+    const params = {
+      format: opts.format,
+      sampleRate: opts.sampleRate,
+      numberOfChannels: opts.numberOfChannels,
+      encodeBitRate: opts.encodeBitRate,
+      frameSize: opts.frameSize,
+      success(data) {
+        // over (stopped, or cut short by a call or an alarm); no frames came — then the file it wrote
+        if (self.rec !== rec) return
+        if (v.len === 0 && data && data.uri) self.readNote(rec, data.uri)
+        else self.endNote(rec)
+      },
+      fail(data, code) {
+        if (self.rec !== rec) return
+        self.dropVoice(v)
+        self.rec = null
+        if (code === 202 && opts === OPUS) {
+          self.record(PCM, now)
+          return
+        }
+        self.note = 'запись не началась (' + code + ')'
+        self.talk.done(Date.now())
+      }
+    }
+    try {
+      record.start(params)
+    } catch (e) {
+      params.fail(null, 'нет')
+    }
+  },
+
+  /** Taken away from the mouth (cancel: too soon, or voice notes switched off): the recording stops. */
+  stopNote(cancel) {
+    const rec = this.rec
+    if (!rec || rec.stopping) return
+    rec.stopping = true
+    rec.cancel = cancel
+    rec.ms = Date.now() - rec.at
+    try {
+      record.stop()
+    } catch (e) {}
+    if (!cancel) vibrator.vibrate({ mode: 'short' })
+    // the last frame (or the success callback) ends it; if neither comes, it ends anyway
+    const self = this
+    setTimeout(() => {
+      if (self.rec === rec) self.endNote(rec)
+    }, 1500)
+  },
+
+  readNote(rec, uri) {
+    const self = this
+    file.readArrayBuffer({
+      uri,
+      success(data) {
+        if (data && data.buffer) rec.v.add(data.buffer)
+        self.endNote(rec)
+      },
+      fail() {
+        self.endNote(rec)
+      }
+    })
+  },
+
+  endNote(rec) {
+    if (this.rec !== rec) return
+    this.rec = null
+    if (!rec.ms) rec.ms = Date.now() - rec.at
+    this.talk.done(Date.now())
+    this.mute()
+    if (this.packer) this.packer.restart()
+    if (rec.cancel || rec.v.len === 0) {
+      this.dropVoice(rec.v)
+      this.note = rec.cancel ? '' : 'запись пустая — микрофон не дал звука'
+      return
+    }
+    rec.v.end(rec.ms)
+    rec.v.endAt = 0
+    this.note = 'отправляю заметку…'
+    this.pump()
+  },
+
+  dropVoice(v) {
+    const i = this.voices.indexOf(v)
+    if (i >= 0) this.voices.splice(i, 1)
+  },
+
+  /** The next write of the first note on its way; after the end, the phone's answer is waited for (and asked again). */
+  voiceNext(v) {
+    const p = v.next(this.chunk)
+    if (p) {
+      if (v.ended && v.endSent && !v.endAt) v.endAt = Date.now()
+      if (v.len) this.note = this.rec && this.rec.v === v ? 'говорите… опустите руку — отправлю'
+        : 'отправляю заметку… ' + Math.min(99, Math.round((100 * v.sent) / v.len)) + '%'
+      return p
+    }
+    if (v.ended && v.endSent && v.endAt && Date.now() - v.endAt > DONE_MS) {
+      // no answer: the end said again (the phone may have missed it); after three — given up
+      v.tries = (v.tries || 0) + 1
+      if (v.tries >= 3) {
+        this.dropVoice(v)
+        this.note = 'телефон не ответил — заметка не сохранена'
+        return null
+      }
+      v.endSent = false
+      v.endAt = 0
+      return this.voiceNext(v)
+    }
+    if (v.ended && v.endSent && !this.doneTimer) {
+      // look again when the answer is due
+      const self = this
+      this.doneTimer = setTimeout(() => {
+        self.doneTimer = 0
+        self.pump()
+      }, DONE_MS + 100)
+    }
+    return null
+  },
+
+  /** What became of a note: a vibration and its line (a long buzz — a note made). */
+  voiceDone(e) {
+    const v = this.voices[0]
+    if (!v || v.id !== e.id) return
+    this.dropVoice(v)
+    if (e.result === VOICE_SAVED || e.result === VOICE_KEPT || e.result === VOICE_ANSWER) vibrator.vibrate({ mode: 'long' })
+    else vibrator.vibrate({ mode: 'short' })
+    this.note = e.line || (e.result === VOICE_SILENT ? 'ничего не расслышал' : e.result === VOICE_SAVED ? 'заметка сохранена' : 'не вышло')
+    this.pump()
   }
 }
 </script>
@@ -676,6 +974,13 @@ export default {
   width: 380px;
   font-size: 28px;
   color: #8da6c0;
+  text-align: center;
+}
+.note {
+  margin-top: 10px;
+  width: 400px;
+  font-size: 26px;
+  color: #e6edf3;
   text-align: center;
 }
 .diag {

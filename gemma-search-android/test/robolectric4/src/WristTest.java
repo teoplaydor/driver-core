@@ -1,6 +1,12 @@
 import static org.junit.Assert.*;
 
 import android.app.Application;
+import android.app.Notification;
+import android.app.NotificationManager;
+import android.bluetooth.BluetoothGattServerCallback;
+import android.content.Intent;
+import android.os.Bundle;
+import android.speech.SpeechRecognizer;
 import android.bluetooth.BluetoothAdapter;
 import android.bluetooth.BluetoothDevice;
 import android.bluetooth.BluetoothGattCharacteristic;
@@ -21,11 +27,19 @@ import org.robolectric.android.controller.ServiceController;
 import org.robolectric.annotation.Config;
 import org.robolectric.shadows.ShadowBluetoothGattServer;
 import org.robolectric.shadows.ShadowLooper;
+import org.robolectric.shadows.ShadowSpeechRecognizer;
 
+import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collections;
 import java.util.UUID;
 
+import io.github.teoplaydor.semsearch.app.Engine;
+import io.github.teoplaydor.semsearch.app.IndexStore;
 import io.github.teoplaydor.semsearch.app.WristLink;
 import io.github.teoplaydor.semsearch.app.WristService;
+import io.github.teoplaydor.semsearch.core.Pcm;
 import io.github.teoplaydor.semsearch.core.WristGesture;
 
 /**
@@ -66,6 +80,106 @@ public class WristTest {
         for (int i = 0; i + 3 <= xyz.length / 3; i += 3) {
             sg.notifyOnCharacteristicWriteRequest(dev, 100 + seq, ch, false, false, 0, WristGesture.accel(seq++ & 0xff, xyz, i, 3));
         }
+    }
+
+    static Bundle said(String s) {
+        Bundle b = new Bundle();
+        b.putStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION, new ArrayList<String>(Collections.singletonList(s)));
+        return b;
+    }
+
+    /** A note's packets as the watch writes them: long writes (prepared, then executed) of `chunk` bytes; `lose`: one lost. */
+    static void sendNote(ShadowBluetoothGattServer sg, BluetoothDevice dev, BluetoothGattCharacteristic ch, int id, int codec, byte[] b,
+                         int chunk, int lose, boolean end) {
+        BluetoothGattServerCallback cb = sg.getGattServerCallback();
+        cb.onCharacteristicWriteRequest(dev, 300, ch, false, true, 0, WristGesture.voiceStart(id, codec, 16000, 0));
+        int k = 0;
+        for (int o = 0; o < b.length; o += chunk, k++) {
+            if (k == lose) continue;
+            byte[] p = WristGesture.voiceData(id, o, b, o, Math.min(chunk, b.length - o));
+            // in parts of 200 (the link's MTU), put together on «execute»
+            for (int q = 0; q < p.length; q += 200) {
+                cb.onCharacteristicWriteRequest(dev, 301, ch, true, true, q, Arrays.copyOfRange(p, q, Math.min(p.length, q + 200)));
+            }
+            cb.onExecuteWrite(dev, 302, true);
+        }
+        if (end) cb.onCharacteristicWriteRequest(dev, 303, ch, false, true, 0, WristGesture.voiceEnd(id, b.length, b.length / 32));
+    }
+
+    /**
+     * Voice notes from the watch: the settings told (the left hand, voice notes, the MTU once the watch asked for more);
+     * a recording in long writes with one lost — asked for again from there; whole — recognised from the sound handed to
+     * the recognizer (no microphone) and made a note with its reminder and the recording, the watch told «saved» with the
+     * line; the same note again (a new link) answered as before, not saved twice; silence — nothing.
+     */
+    static void voiceNotes(Application app, WristLink.Server server, ShadowBluetoothGattServer sg, BluetoothDevice watch,
+                           BluetoothGattCharacteristic samples, BluetoothGattDescriptor cccd) throws Exception {
+        ShadowSpeechRecognizer.setIsOnDeviceRecognitionAvailable(true);
+        final Engine e = Engine.get(app);
+        Robo.waitFor("store", () -> e.store() != null);
+        sg.getGattServerCallback().onDescriptorWriteRequest(watch, 7, cccd, false, true, 0, BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE);
+        assertArrayEquals("settings told: left hand, voice notes, MTU 23",
+                WristGesture.config(WristGesture.CFG_LEFT_HAND | WristGesture.CFG_VOICE, 23), server.lastMessage);
+        sg.getGattServerCallback().onMtuChanged(watch, 247);
+        assertArrayEquals("…and again with the bigger MTU", WristGesture.config(3, 247), server.lastMessage);
+        WristLink.setVoiceNotes(app, false);
+        assertArrayEquals("voice notes off: told", WristGesture.config(WristGesture.CFG_LEFT_HAND, 247), server.lastMessage);
+        WristLink.setVoiceNotes(app, true);
+
+        // 1.5 s of a voice-like sound (WAV, as a watch that records WAV sends it)
+        float[] x = new float[24000];
+        for (int i = 0; i < x.length; i++) x[i] = (float) (0.3 * Math.sin(2 * Math.PI * 180 * i / 16000.0) * Math.sin(Math.PI * i / x.length));
+        byte[] wav = Pcm.wav16(x, 16000);
+        sendNote(sg, watch, samples, 5, WristGesture.CODEC_WAV, wav, 400, 3, true);
+        assertArrayEquals("a write lost: «again from 1200»", WristGesture.voiceFrom(5, 1200), server.lastMessage);
+        assertTrue(WristLink.status(), WristLink.status().contains("заметка голосом"));
+        // sent again from there
+        BluetoothGattServerCallback cb = sg.getGattServerCallback();
+        for (int o = 1200; o < wav.length; o += 400) {
+            cb.onCharacteristicWriteRequest(watch, 310, samples, false, true, 0, WristGesture.voiceData(5, o, wav, o, Math.min(400, wav.length - o)));
+        }
+        Robo.waitFor("the recognizer", () -> ShadowSpeechRecognizer.getLatestSpeechRecognizer() != null);
+        SpeechRecognizer sr = ShadowSpeechRecognizer.getLatestSpeechRecognizer();
+        Intent asked = Shadows.shadowOf(sr).getLastRecognizerIntent();
+        assertNotNull("the sound handed to the recognizer, no microphone", asked.getParcelableExtra("android.speech.extra.AUDIO_SOURCE"));
+        assertEquals(16000, asked.getIntExtra("android.speech.extra.AUDIO_SOURCE_SAMPLING_RATE", 0));
+        Shadows.shadowOf(sr).triggerOnResults(said("Напомни завтра в 9 купить хлеб"));
+        Robo.waitFor("the watch told", () -> server.lastMessage != null && server.lastMessage[0] == WristGesture.EV_VOICE_DONE);
+        byte[] done = server.lastMessage;
+        String line = new String(done, 3, done.length - 3, StandardCharsets.UTF_8);
+        assertEquals("note 5", 5, done[1]);
+        assertEquals("saved", WristGesture.VOICE_SAVED, done[2]);
+        assertTrue(line, line.toLowerCase().startsWith("сохранено: купить хлеб") && line.contains("напомнит"));
+        IndexStore.Item note = null;
+        for (IndexStore.Item n : e.store().notes()) if (n.body.toLowerCase().contains("купить хлеб")) note = n;
+        assertNotNull("the note", note);
+        assertTrue("with its reminder", note.remind > System.currentTimeMillis());
+        final long id = note.id;
+        Robo.waitFor("the recording kept", () -> {
+            for (IndexStore.Item n : e.store().notes()) if (n.id == id && n.audio != null) return true;
+            return false;
+        });
+        assertTrue(WristLink.last(app), WristLink.last(app).contains("заметка с часов: Сохранено"));
+        NotificationManager nm = (NotificationManager) app.getSystemService(Context.NOTIFICATION_SERVICE);
+        boolean shown = false;
+        for (android.service.notification.StatusBarNotification n : Shadows.shadowOf(nm).getActiveNotifications()) {
+            if ("Заметка с часов".equals(n.getNotification().extras.getString(Notification.EXTRA_TITLE))) shown = true;
+        }
+        assertTrue("the phone shows it too", shown);
+
+        // the same note again (the watch had no answer, a new link): answered as before, not a second note
+        server.lastMessage = null;
+        sendNote(sg, watch, samples, 5, WristGesture.CODEC_WAV, wav, 400, -1, true);
+        assertArrayEquals("the same answer", done, server.lastMessage);
+        int notes = 0;
+        for (IndexStore.Item n : e.store().notes()) if (n.body.toLowerCase().contains("купить хлеб")) notes++;
+        assertEquals("one note", 1, notes);
+
+        // silence: nothing kept, the watch told
+        sendNote(sg, watch, samples, 6, WristGesture.CODEC_WAV, Pcm.wav16(new float[16000], 16000), 400, -1, true);
+        Robo.waitFor("silence told", () -> server.lastMessage != null && server.lastMessage[0] == WristGesture.EV_VOICE_DONE
+                && server.lastMessage[1] == 6);
+        assertEquals("silent", WristGesture.VOICE_SILENT, server.lastMessage[2]);
     }
 
     @Test
@@ -187,12 +301,14 @@ public class WristTest {
         sg.notifyOnCharacteristicWriteRequest(other, 5, samples, false, true, 0,
                 WristGesture.hello(WristGesture.VERSION_TURNS, 0x12345678, 16, 981, "zepp"));
         assertTrue(WristLink.status(), WristLink.status().contains("распознаёт повороты сам"));
-        sg.notifyOnCharacteristicWriteRequest(other, 6, samples, false, true, 0, WristGesture.turnPacket(0, 26, 300, new float[]{1, 0, 0}));
+        sg.notifyOnCharacteristicWriteRequest(other, 6, samples, false, true, 0, WristGesture.rollPacket(0, 26, 300, WristGesture.SOURCE_GRAVITY, 0.2f, 4));
         assertTrue(WristLink.status(), WristLink.status().contains("поворот 26° за 0,3 с") && WristLink.status().contains("мало"));
         server.lastEvent = -1;
-        sg.notifyOnCharacteristicWriteRequest(other, 7, samples, false, true, 0, WristGesture.turnPacket(1, 64, 350, new float[]{1, 0, 0}));
+        sg.notifyOnCharacteristicWriteRequest(other, 7, samples, false, true, 0, WristGesture.rollPacket(1, 64, 350, WristGesture.SOURCE_GRAVITY, 0.2f, 6));
         assertEquals("a turn found on the watch: next", WristGesture.EV_NEXT, server.lastEvent);
         assertTrue(WristLink.last(app), WristLink.last(app).contains("следующий") && WristLink.last(app).contains("64°"));
+
+        voiceNotes(app, server, sg, other, samples, cccd);
 
         // off: the service and the link are gone
         WristLink.setOn(c, false);

@@ -1,65 +1,76 @@
 package io.github.teoplaydor.semsearch.core;
 
 /**
- * A turn of the wrist to the right or to the left and back, from a watch's accelerometer: any watch whose own small app
- * can talk Bluetooth LE (Wear OS, Xiaomi Vela, Zepp OS, Garmin…). One instance per watch connection.
+ * A turn of the wrist to the right or to the left and back, from a watch's accelerometer (and compass): any watch whose
+ * own small app can talk Bluetooth LE (Wear OS, Xiaomi Vela, Zepp OS, Garmin…). One instance per watch connection.
  *
- * <p>Two ways to get there. A watch that can, recognises the turn itself ({@link Finder}, the same code in the watches'
- * JavaScript) and sends one short TURN packet per turn — the phone's radio and processor stay idle in between. A watch
- * that cannot streams its raw accelerometer and the phone runs the same {@link Finder}. Either way the phone decides
- * what the turn means: whether it was big enough ({@link #turn}), and which way it went by the axis it went around.
+ * <p>The turn is a twist around the forearm, and the forearm lies along the watch's x axis on every watch (x across
+ * the dial toward 3 o'clock). So the whole thing is one number: how far the watch has twisted around x — the roll of
+ * gravity in the dial's y–z plane while the forearm is not upright, the compass heading while it is (the arm hanging
+ * along the body: then a twist turns the watch around gravity itself, which only the compass sees). A turn is that
+ * number swinging away from where it has been lately and back, quickly ({@link Finder}). Nothing has to be still
+ * before: the «where it has been lately» is a moving average, and a turn while walking or while the hand is busy is
+ * seen the same way.
  *
- * <p>Nothing about the watch is assumed: the units (m/s², milli-g, raw counts) are learnt from the size of gravity when
- * the hand is still; the axes from one turn «to the right» the user makes once ({@link #learn()}), or, until then, the
- * common layout (x across the dial toward 3 o'clock, which on the left wrist points to the hand).
+ * <p>A watch that can finds the turn itself (the same {@link Finder} in the watches' JavaScript) and sends one short
+ * ROLL packet per turn — the phone's radio and processor stay idle in between. A watch that cannot streams its raw
+ * accelerometer and the phone runs the same {@link Finder}. Either way the phone decides what the turn means: big enough
+ * ({@link #turn}), the forearm's slope kept (a raised hand is not a twist), and which side is «right» (for the left or
+ * the right hand, or as taught by one turn — {@link #learn()}).
  *
- * <p>The protocol (little-endian; fits the 20 bytes of a Bluetooth LE write, more samples in a packet when the link
- * allows):
+ * <p>The protocol (little-endian; fits the 20 bytes of a Bluetooth LE write):
  * <pre>
- *   HELLO  [0]=0x00 [1]=version: 1 — samples follow, 2 — the watch recognises turns, TURN packets follow
+ *   HELLO  [0]=0x00 [1]=version: 1 — samples follow, 2 — the watch finds the turns
  *          [2..5]=watch id (u32, random, kept by the watch) [6..7]=samples per second (u16)
  *          [8..9]=counts per g (u16, 0 = not known) [10..]=platform, ASCII (≤ 10)
  *   ACCEL  [0]=0x10|n (n = 1..15 samples) [1]=sequence (u8, +1 per packet) then n × (x, y, z) as int16
- *   TURN   [0]=0x20 [1]=sequence (u8) [2]=how far, degrees (u8) [3]=how long, 10 ms (u8)
- *          [4..9]=the axis it went around, in the watch's axes, × 10000 (3 × int16) — the first watch apps' turn
- *   SWING  [0]=0x30 [1]=sequence (u8) [2]=how far, degrees (u8) [3]=how long, 10 ms (u8)
- *          [4..9]=«up» at rest, [10..15]=«up» at the far end, in the watch's axes, × 10000 (3 × int16 each)
- *          [16..17]=how far the compass heading went, 0.1° (int16, east positive; −32768 — no compass)
+ *   ROLL   [0]=0x40 [1]=sequence (u8) [2..3]=the twist, 0.1° (int16, right-handed around x) [4]=how long, 10 ms (u8)
+ *          [5]=seen by: 1 gravity, 2 the compass [6]=the forearm's slope at rest (cos between «up» and x, × 100, int8)
+ *          [7]=how far the slope changed meanwhile (degrees, u8)
+ *   VOICE  [0]=0x50 start: [1]=note id (u8) [2]=codec (1 — the recorder's own file, Ogg Opus or WAV, told by its
+ *                          first bytes; 2 — PCM 16-bit; 3 — WAV; 4 — Opus packets, each after its length, u16)
+ *                          [3..4]=samples per second (u16) [5..8]=bytes (u32, 0 — not known yet)
+ *          [0]=0x51 data:  [1]=note id [2..5]=offset (u32) then the bytes (as many as the link takes in one write)
+ *          [0]=0x52 end:   [1]=note id [2..5]=bytes in all (u32) [6..9]=how long, ms (u32)
  * </pre>
- * The turn is a twist around the forearm, measured around the forearm whatever way the arm is held: by gravity when
- * the forearm lies more or less flat (its turn around the forearm's axis, the forearm's own slope kept — that tells a
- * twist from raising the hand), by the compass when the forearm is upright (the arm along the body: a twist turns the
- * watch around gravity, which the accelerometer cannot see).
- * The phone answers on {@link #EVENTS} with one byte: {@link #EV_NEXT}, {@link #EV_PREVIOUS}, {@link #EV_LEARNED},
- * {@link #EV_IGNORED} (a turn while no music is playing) — the watch vibrates; and {@link #EV_PAUSE} when the music
- * stops, {@link #EV_STREAM} when it plays again: a watch that listens to them switches its sensor off in between and
- * saves its battery (the connection stays).
+ * The phone answers on {@link #EVENTS}: one byte {@link #EV_NEXT}, {@link #EV_PREVIOUS}, {@link #EV_LEARNED},
+ * {@link #EV_IGNORED} (a turn while no music is playing) — the watch vibrates; {@link #EV_PAUSE} when the music stops,
+ * {@link #EV_STREAM} when it plays again (the watch sends no turns in between); and longer ones ({@link #config},
+ * {@link #voiceFrom}, {@link #voiceDone}): {@link #EV_CONFIG} [1]=flags ({@link #CFG_LEFT_HAND}, {@link #CFG_VOICE})
+ * [2..3]=the link's MTU (u16, 0 — not known); {@link #EV_VOICE_FROM} [1]=note id [2..5]=offset to send again from;
+ * {@link #EV_VOICE_DONE} [1]=note id [2]=what became of it ({@link #VOICE_SAVED}, {@link #VOICE_SILENT},
+ * {@link #VOICE_KEPT}, {@link #VOICE_ANSWER}, {@link #VOICE_FAILED}) [3..]=a line about it, UTF-8, for the watch's
+ * screen (cut to what one notification holds).
  */
 public final class WristGesture {
     /** The phone's Bluetooth LE service, the watch writes samples to {@link #SAMPLES}, reads answers from {@link #EVENTS}. */
     public static final String SERVICE = "a7b7e001-9ca3-4574-a1f0-3c9840e24d01",
             SAMPLES = "a7b7e002-9ca3-4574-a1f0-3c9840e24d01",
             EVENTS = "a7b7e003-9ca3-4574-a1f0-3c9840e24d01";
-    /** HELLO versions: the watch streams samples / the watch recognises turns and sends TURN packets. */
+    /** HELLO versions: the watch streams samples / the watch finds the turns itself. */
     public static final int VERSION = 1, VERSION_TURNS = 2;
-    public static final int KIND_HELLO = 0, KIND_ACCEL = 1, KIND_TURN = 2, KIND_SWING = 3;
-    public static final int EV_IGNORED = 0, EV_NEXT = 1, EV_PREVIOUS = 2, EV_LEARNED = 3, EV_PAUSE = 4, EV_STREAM = 5;
+    public static final int KIND_HELLO = 0, KIND_ACCEL = 1, KIND_TURN = 2, KIND_SWING = 3, KIND_ROLL = 4, KIND_VOICE = 5;
+    public static final int VOICE_START = 0x50, VOICE_DATA = 0x51, VOICE_END = 0x52;
+    public static final int CODEC_RECORDED = 1, CODEC_PCM16 = 2, CODEC_WAV = 3, CODEC_OPUS_PACKETS = 4;
+    public static final int EV_IGNORED = 0, EV_NEXT = 1, EV_PREVIOUS = 2, EV_LEARNED = 3, EV_PAUSE = 4, EV_STREAM = 5,
+            EV_CONFIG = 6, EV_VOICE_FROM = 8, EV_VOICE_DONE = 9;
+    public static final int CFG_LEFT_HAND = 1, CFG_VOICE = 2;
+    /**
+     * What became of a voice note: a note made (with its reminder…), nothing said in it, kept as a recording without
+     * text (no recognition on this phone), a question answered or a search (not a note), the recording not readable.
+     */
+    public static final int VOICE_SAVED = 0, VOICE_SILENT = 1, VOICE_KEPT = 2, VOICE_ANSWER = 3, VOICE_FAILED = 4;
+    public static final int SOURCE_GRAVITY = 1, SOURCE_COMPASS = 2;
 
     /** What a sample (or a packet) ended: nothing, a turn to the right, to the left, the right turn learnt. */
     public static final int NONE = 0, RIGHT = 1, LEFT = 2, LEARNED = 3;
 
-    /** Around the forearm: the turn's axis within this many degrees of it (TURN packets of the first watch apps). */
-    static final float AXIS_DEG = 40;
-    /** Gravity tells the twist while it leans this far off the forearm at least (sine); below, only the compass can. */
-    static final float LEVER_MIN = 0.3f;
-    /** The compass is preferred while gravity leans less than this off the forearm (sine), if there is one. */
-    static final float COMPASS_LEVER = 0.4f;
-    /** A twist keeps the forearm's slope: the cosine between «up» and the forearm changes by this much at most… */
-    static final float KEEP = 0.3f;
-    /** …and, told by gravity, the angle by this much at most (degrees); a wrist does not twist further than MAX_TWIST. */
-    static final float KEEP_DEG = 25, MAX_TWIST = 135;
-    /** Why the last turn did nothing: it did something, too small, not around the forearm, upright with no compass. */
-    public static final int WHY_OK = 0, WHY_SMALL = 1, WHY_NOT_FOREARM = 2, WHY_UPRIGHT = 3;
+    /** A twist keeps the forearm's slope: told by gravity, it changes by this much at most (degrees), or by 0.6 of the twist… */
+    static final float KEEP_DEG = 25;
+    /** …and a wrist does not twist further than this. */
+    public static final float MAX_TWIST = 150;
+    /** Why the last turn did nothing: it did something, too small, not a twist (the hand raised or lowered), old app. */
+    public static final int WHY_OK = 0, WHY_SMALL = 1, WHY_NOT_FOREARM = 2, WHY_OLD_WATCH_APP = 3;
     /** Samples per second when the watch has not said. */
     static final int DEFAULT_RATE = 25;
 
@@ -73,10 +84,9 @@ public final class WristGesture {
     private int lastSeq = -1;
     private long samples, packets, gaps, turns;
 
-    // the direction: the axis a turn to the right goes around, in the watch's own axes
-    private final float[] right = {1, 0, 0};
+    // which way is right: +1 a twist around +x, −1 around −x (the left hand / the right hand, or taught)
+    private int rightSign = 1;
     private boolean learnt, learning;
-    private final float[] lastAxis = new float[3];
     private float lastPeak, lastTook;
     private int why;
     private boolean lastByCompass;
@@ -96,7 +106,7 @@ public final class WristGesture {
         return hello;
     }
 
-    /** Does the watch recognise turns itself (TURN packets) rather than stream samples? */
+    /** Does the watch find the turns itself (ROLL packets) rather than stream samples? */
     public boolean recognises() {
         return version >= VERSION_TURNS;
     }
@@ -114,12 +124,12 @@ public final class WristGesture {
         return perG;
     }
 
-    /** The size of gravity measured in the watch's units (0 until the hand was still once). */
+    /** The size of gravity measured in the watch's units (0 until a sample came). */
     public float gravity() {
         return finder.gravity();
     }
 
-    /** For the screen: how far the watch is tilted from where the hand last rested, in degrees (streamed samples). */
+    /** For the screen: how far the watch is twisted from where it has been lately, in degrees (streamed samples). */
     public float tilt() {
         return finder.tilt();
     }
@@ -137,7 +147,7 @@ public final class WristGesture {
         return packets;
     }
 
-    /** Turns that came (TURN packets, or found in the samples), whatever they meant. */
+    /** Turns that came (ROLL packets, or found in the samples), whatever they meant. */
     public long turns() {
         return turns;
     }
@@ -147,7 +157,7 @@ public final class WristGesture {
         return gaps;
     }
 
-    /** The last turn: how far (degrees) and how long (ms). */
+    /** The last turn: how far (degrees), how long (ms). */
     public float lastPeak() {
         return lastPeak;
     }
@@ -168,7 +178,7 @@ public final class WristGesture {
 
     // ------------------------------------------------------------------ direction
 
-    /** The next turn (whichever way) is the turn to the right: its axis is kept. */
+    /** The next turn (whichever way) is the turn to the right. */
     public void learn() {
         learning = true;
     }
@@ -178,41 +188,23 @@ public final class WristGesture {
     }
 
     /**
-     * The axis of a turn to the right learnt earlier (3 numbers), or for the left/right hand when none was. The forearm
-     * lies along one of the watch's axes, so a learnt axis near one is taken as that axis (a turn taught with the arm
-     * a little raised shows its axis a little off).
+     * Which way is right: a learnt axis (3 numbers — only its side along x matters: the forearm is the watch's x), or
+     * for the left/right hand when none was (x toward 3 o'clock points to the hand on the left wrist, to the elbow on the
+     * right one). An axis learnt by the first versions that does not lie along x is not trusted.
      */
     public void setRight(float[] axis, boolean leftHand) {
-        if (axis != null && axis.length == 3 && norm(axis) > 0.5f) {
-            float[] a = snap(axis);
-            System.arraycopy(a, 0, right, 0, 3);
+        if (axis != null && axis.length == 3 && norm(axis) > 0.5f && Math.abs(axis[0]) >= 0.5f * norm(axis)) {
+            rightSign = axis[0] > 0 ? 1 : -1;
             learnt = true;
         } else {
-            // x toward 3 o'clock: to the hand on the left wrist, to the elbow on the right one
-            right[0] = leftHand ? 1 : -1;
-            right[1] = 0;
-            right[2] = 0;
+            rightSign = leftHand ? 1 : -1;
             learnt = false;
         }
     }
 
-    /** The axis of the last turn seen (what {@link #learn()} keeps). */
+    /** The axis of a turn to the right (what {@link #learn()} keeps): ±x. */
     public float[] lastAxis() {
-        return lastAxis.clone();
-    }
-
-    /** The watch's axis (±x, ±y, ±z) within 35° of v, or v itself (unit). */
-    static float[] snap(float[] v) {
-        float n = norm(v);
-        int best = 0;
-        for (int i = 1; i < 3; i++) if (Math.abs(v[i]) > Math.abs(v[best])) best = i;
-        float[] out = new float[3];
-        if (Math.abs(v[best]) / n >= (float) Math.cos(Math.toRadians(35))) {
-            out[best] = Math.signum(v[best]);
-        } else {
-            for (int i = 0; i < 3; i++) out[i] = v[i] / n;
-        }
-        return out;
+        return new float[]{rightSign, 0, 0};
     }
 
     public boolean learnt() {
@@ -243,19 +235,17 @@ public final class WristGesture {
             finder.reset();
             return NONE;
         }
-        if (kind == KIND_TURN) {
-            if (p.length < 10) return NONE;
+        if (kind == KIND_ROLL) {
+            if (p.length < 8) return NONE;
             packets++;
-            float[] axis = {(short) u16(p, 4) / 10000f, (short) u16(p, 6) / 10000f, (short) u16(p, 8) / 10000f};
-            return decide(p[2] & 0xff, (p[3] & 0xff) * 10f, axis);
+            return decide((short) u16(p, 2) / 10f, (p[4] & 0xff) * 10f, p[5] == SOURCE_COMPASS, p[7] & 0xff);
         }
-        if (kind == KIND_SWING) {
-            if (p.length < 18) return NONE;
+        if (kind == KIND_TURN || kind == KIND_SWING) {
+            // the first watch apps (1.1–1.2): their turns were measured otherwise — the watch app wants updating
             packets++;
-            float[] rest = {(short) u16(p, 4) / 10000f, (short) u16(p, 6) / 10000f, (short) u16(p, 8) / 10000f};
-            float[] far = {(short) u16(p, 10) / 10000f, (short) u16(p, 12) / 10000f, (short) u16(p, 14) / 10000f};
-            int h = (short) u16(p, 16);
-            return swing(p[2] & 0xff, (p[3] & 0xff) * 10f, rest, far, h == -32768 ? Float.NaN : h / 10f);
+            turns++;
+            why = WHY_OLD_WATCH_APP;
+            return NONE;
         }
         if (kind != KIND_ACCEL || n == 0 || p.length < 2 + 6 * n) return NONE;
         packets++;
@@ -277,8 +267,13 @@ public final class WristGesture {
         return out;
     }
 
-    private static int u16(byte[] p, int o) {
+    static int u16(byte[] p, int o) {
         return (p[o] & 0xff) | ((p[o + 1] & 0xff) << 8);
+    }
+
+    /** Little-endian u32 at o. */
+    public static long u32(byte[] p, int o) {
+        return (u16(p, o) | ((long) u16(p, o + 2) << 16)) & 0xffffffffL;
     }
 
     /** A HELLO packet (for the watch side and the tests); version 1: samples follow. */
@@ -286,7 +281,7 @@ public final class WristGesture {
         return hello(VERSION, watchId, rate, perG, platform);
     }
 
-    /** A HELLO packet of a version: {@link #VERSION} samples follow, {@link #VERSION_TURNS} TURN packets follow. */
+    /** A HELLO packet of a version: {@link #VERSION} samples follow, {@link #VERSION_TURNS} the watch finds the turns. */
     public static byte[] hello(int version, int watchId, int rate, int perG, String platform) {
         byte[] name = platform == null ? new byte[0] : platform.getBytes(java.nio.charset.StandardCharsets.US_ASCII);
         int len = Math.min(10, name.length);
@@ -319,42 +314,86 @@ public final class WristGesture {
     }
 
     /**
-     * A SWING packet: how far (degrees, gravity or compass), how long (ms), «up» at rest and at the far end (the watch's
-     * axes, unit), how far the compass heading went (degrees; NaN — no compass).
+     * A ROLL packet: the twist (degrees, right-handed around the watch's x), how long (ms), seen by gravity or the
+     * compass, the forearm's slope at rest (cos between «up» and x) and how far it changed (degrees).
      */
-    public static byte[] swingPacket(int seq, float peakDeg, float tookMs, float[] rest, float[] far, float headingDeg) {
-        byte[] p = new byte[18];
-        p[0] = (byte) (KIND_SWING << 4);
+    public static byte[] rollPacket(int seq, float twistDeg, float tookMs, int source, float slope, float slopeChange) {
+        byte[] p = new byte[8];
+        p[0] = (byte) (KIND_ROLL << 4);
         p[1] = (byte) seq;
-        p[2] = (byte) Math.max(0, Math.min(255, Math.round(peakDeg)));
-        p[3] = (byte) Math.max(0, Math.min(255, Math.round(tookMs / 10)));
-        for (int i = 0; i < 3; i++) {
-            put16(p, 4 + 2 * i, Math.round(rest[i] * 10000));
-            put16(p, 10 + 2 * i, Math.round(far[i] * 10000));
-        }
-        put16(p, 16, Float.isNaN(headingDeg) ? -32768 : Math.max(-32767, Math.min(32767, Math.round(headingDeg * 10))));
+        put16(p, 2, Math.round(twistDeg * 10));
+        p[4] = (byte) Math.max(0, Math.min(255, Math.round(tookMs / 10)));
+        p[5] = (byte) source;
+        p[6] = (byte) Math.max(-100, Math.min(100, Math.round(slope * 100)));
+        p[7] = (byte) Math.max(0, Math.min(255, Math.round(slopeChange)));
         return p;
     }
 
-    private static void put16(byte[] p, int o, int v) {
+    /** EV_CONFIG: the settings the watch acts on ({@link #CFG_LEFT_HAND}, {@link #CFG_VOICE}) and the link's MTU. */
+    public static byte[] config(int flags, int mtu) {
+        return new byte[]{(byte) EV_CONFIG, (byte) flags, (byte) mtu, (byte) (mtu >>> 8)};
+    }
+
+    /** EV_VOICE_FROM: send the note again from this offset (a write was lost on the way). */
+    public static byte[] voiceFrom(int id, long offset) {
+        byte[] p = new byte[6];
+        p[0] = (byte) EV_VOICE_FROM;
+        p[1] = (byte) id;
+        put32(p, 2, offset);
+        return p;
+    }
+
+    /** EV_VOICE_DONE: what became of the note, and a line about it cut to {@code max} bytes in all (whole letters). */
+    public static byte[] voiceDone(int id, int result, String line, int max) {
+        byte[] text = line == null ? new byte[0] : line.getBytes(java.nio.charset.StandardCharsets.UTF_8);
+        int n = Math.max(0, Math.min(text.length, max - 3));
+        while (n > 0 && n < text.length && (text[n] & 0xc0) == 0x80) n--; // not in the middle of a letter
+        byte[] p = new byte[3 + n];
+        p[0] = (byte) EV_VOICE_DONE;
+        p[1] = (byte) id;
+        p[2] = (byte) result;
+        System.arraycopy(text, 0, p, 3, n);
+        return p;
+    }
+
+    /** VOICE start, data and end (for the tests: the watch's side is in its JavaScript). */
+    public static byte[] voiceStart(int id, int codec, int rate, long bytes) {
+        byte[] p = new byte[9];
+        p[0] = (byte) VOICE_START;
+        p[1] = (byte) id;
+        p[2] = (byte) codec;
+        p[3] = (byte) rate;
+        p[4] = (byte) (rate >>> 8);
+        put32(p, 5, bytes);
+        return p;
+    }
+
+    public static byte[] voiceData(int id, long offset, byte[] b, int from, int n) {
+        byte[] p = new byte[6 + n];
+        p[0] = (byte) VOICE_DATA;
+        p[1] = (byte) id;
+        put32(p, 2, offset);
+        System.arraycopy(b, from, p, 6, n);
+        return p;
+    }
+
+    public static byte[] voiceEnd(int id, long bytes, long ms) {
+        byte[] p = new byte[10];
+        p[0] = (byte) VOICE_END;
+        p[1] = (byte) id;
+        put32(p, 2, bytes);
+        put32(p, 6, ms);
+        return p;
+    }
+
+    static void put32(byte[] p, int o, long v) {
+        for (int i = 0; i < 4; i++) p[o + i] = (byte) (v >>> (8 * i));
+    }
+
+    static void put16(byte[] p, int o, int v) {
         v = Math.max(-32768, Math.min(32767, v));
         p[o] = (byte) v;
         p[o + 1] = (byte) (v >>> 8);
-    }
-
-    /** A TURN packet: how far (degrees), how long (ms), around which axis (the watch's axes, unit length). */
-    public static byte[] turnPacket(int seq, float peakDeg, float tookMs, float[] axis) {
-        byte[] p = new byte[10];
-        p[0] = (byte) (KIND_TURN << 4);
-        p[1] = (byte) seq;
-        p[2] = (byte) Math.max(0, Math.min(255, Math.round(peakDeg)));
-        p[3] = (byte) Math.max(0, Math.min(255, Math.round(tookMs / 10)));
-        for (int i = 0; i < 3; i++) {
-            int v = Math.max(-32768, Math.min(32767, Math.round(axis[i] * 10000)));
-            p[4 + 2 * i] = (byte) v;
-            p[5 + 2 * i] = (byte) (v >>> 8);
-        }
-        return p;
     }
 
     // ------------------------------------------------------------------ samples
@@ -372,229 +411,223 @@ public final class WristGesture {
         double t = samples * 1000.0 / rate;
         samples++;
         if (!finder.sample(x, y, z, t)) return NONE;
-        return swing(finder.peak(), finder.took(), finder.rest(), finder.peakUp(), finder.headingChange());
+        return decide(finder.twist(), finder.took(), finder.source() == SOURCE_COMPASS, finder.slopeChange());
     }
 
-    /**
-     * What a turn means, from where «up» was at rest and at the far end (the watch's axes) and how far the compass went:
-     * the twist around the forearm — by gravity when it leans off the forearm enough, by the compass when the forearm is
-     * upright — big enough? which way? (or, being taught, the way to the right).
-     */
-    private int swing(float peakDeg, float tookMs, float[] rest, float[] far, float headingDeg) {
-        float rn = norm(rest), fn = norm(far);
-        if (rn < 0.5f || fn < 0.5f) return NONE;
-        float[] r = {rest[0] / rn, rest[1] / rn, rest[2] / rn}, u = {far[0] / fn, far[1] / fn, far[2] / fn};
+    /** What a twist means: a twist at all (the slope kept)? big enough? which way? (or, being taught, the way to the right). */
+    private int decide(float twist, float tookMs, boolean byCompass, float slopeChange) {
         turns++;
         lastTook = tookMs;
-        lastPeak = peakDeg;
-        float[] c = cross(r, u);
-        float cn = norm(c);
-        if (cn > 1e-6f) for (int i = 0; i < 3; i++) lastAxis[i] = -c[i] / cn;
-        boolean compass = !Float.isNaN(headingDeg);
-        if (learning) {
-            // the forearm's axis and the way to the right: from gravity's turn when the forearm lay flat enough, else the
-            // compass's (the forearm upright: its axis is where «up» is, the heading tells the way)
-            float[] axis = null;
-            float[] up = snap(r);
-            boolean upright = compass && Math.abs(up[0]) + Math.abs(up[1]) + Math.abs(up[2]) == 1; // «up» along one axis
-            if (upright && Math.abs(headingDeg) >= turn) {
-                // a quick twist's own jolt moves gravity a little too, but here only the compass tells the twist
-                axis = new float[]{-Math.signum(headingDeg) * up[0], -Math.signum(headingDeg) * up[1], -Math.signum(headingDeg) * up[2]};
-            } else if (!upright && cn > (float) Math.sin(Math.toRadians(20)) && peakDeg >= turn) {
-                axis = snap(lastAxis);
-            }
-            if (axis == null) {
-                why = WHY_SMALL;
-                return NONE;
-            }
-            learning = false;
-            System.arraycopy(axis, 0, lastAxis, 0, 3);
-            setRight(axis, true);
-            why = WHY_OK;
-            return LEARNED;
-        }
-        float c0 = dot(r, right), c1 = dot(u, right);
-        float lever = (float) Math.sqrt(Math.max(0, 1 - c0 * c0)), lever1 = (float) Math.sqrt(Math.max(0, 1 - c1 * c1));
-        if (Math.abs(c1 - c0) > KEEP) {
-            // the forearm's slope changed: the hand was raised or lowered, not twisted
-            why = WHY_NOT_FOREARM;
-            return NONE;
-        }
-        float twist;
-        if (compass && lever < COMPASS_LEVER) {
-            // the forearm upright: the heading turned as the watch turned around it (east positive; the sign by which way
-            // the forearm's axis points, up or down)
-            twist = (c0 < 0 ? 1 : -1) * headingDeg;
-            lastByCompass = true;
-        } else if (lever >= LEVER_MIN && lever1 >= LEVER_MIN) {
-            // gravity leans off the forearm at rest and at the far end alike (else its turn around the forearm is noise),
-            // and the forearm's slope stayed
-            if (Math.abs(Math.toDegrees(Math.acos(Math.max(-1, Math.min(1, c1))) - Math.acos(Math.max(-1, Math.min(1, c0))))) > KEEP_DEG) {
-                why = WHY_NOT_FOREARM;
-                return NONE;
-            }
-            twist = twistAbout(right, r, u);
-            lastByCompass = false;
-        } else {
-            why = WHY_UPRIGHT;
-            return NONE;
-        }
         lastPeak = Math.abs(twist);
-        if (lastPeak > MAX_TWIST) {
+        lastByCompass = byCompass;
+        if (!byCompass && slopeChange > Math.max(KEEP_DEG, 0.6f * lastPeak) || lastPeak > MAX_TWIST) {
+            // the forearm's slope changed about as much as it twisted: the hand was raised or lowered (an arm swinging as
+            // one walks tilts the forearm too, but much less than a twist turns it)
             why = WHY_NOT_FOREARM;
             return NONE;
         }
-        if (Math.abs(twist) < turn) {
+        if (lastPeak < turn) {
             why = WHY_SMALL;
             return NONE;
         }
         why = WHY_OK;
-        return twist > 0 ? RIGHT : LEFT;
-    }
-
-    /** How far the watch turned around k (degrees, right-handed) while «up», seen from the watch, went from a to b. */
-    static float twistAbout(float[] k, float[] a, float[] b) {
-        float ak = dot(a, k), bk = dot(b, k);
-        float[] pa = {a[0] - ak * k[0], a[1] - ak * k[1], a[2] - ak * k[2]};
-        float[] pb = {b[0] - bk * k[0], b[1] - bk * k[1], b[2] - bk * k[2]};
-        double ang = Math.atan2(dot(k, cross(pa, pb)), dot(pa, pb));
-        // gravity, seen from the watch, turned the other way
-        return (float) -Math.toDegrees(ang);
-    }
-
-    /** A TURN packet of the first watch apps: big enough? around the forearm? which way? (or, being taught, the right). */
-    private int decide(float peakDeg, float tookMs, float[] axis) {
-        float n = norm(axis);
-        if (n < 0.5f) return NONE;
-        turns++;
-        lastPeak = peakDeg;
-        lastTook = tookMs;
-        lastByCompass = false;
-        for (int i = 0; i < 3; i++) lastAxis[i] = axis[i] / n;
-        if (peakDeg < turn) {
-            why = WHY_SMALL;
-            return NONE;
-        }
         if (learning) {
             learning = false;
-            setRight(lastAxis, true);
-            why = WHY_OK;
+            rightSign = twist > 0 ? 1 : -1;
+            learnt = true;
             return LEARNED;
         }
-        float d = dot(lastAxis, right);
-        float cos = (float) Math.cos(Math.toRadians(AXIS_DEG));
-        why = WHY_OK;
-        if (d >= cos) return RIGHT;
-        if (d <= -cos) return LEFT;
-        why = WHY_NOT_FOREARM;
-        return NONE; // not around the forearm
+        return twist * rightSign > 0 ? RIGHT : LEFT;
     }
 
     // ------------------------------------------------------------------ the turn itself
 
     /**
-     * Finds turns in an accelerometer's samples, by their real times (the rate may wander): the hand still for a moment
-     * (where it rests), then away from there by more than {@link #START_DEG} and back near it within {@link #MAX_MS}.
-     * A quick turn is seen by the watch as gravity turning and the watch's own acceleration on top (it sits on the wrist,
-     * a few cm off the forearm's axis): at the start and at the end the watch swings a little the other way, at the far
-     * end further. So the swing that went furthest decides, and a turn ends only when, after coming back, no further
-     * swing follows within {@link #GRACE_MS}.
+     * Finds turns in an accelerometer's samples (and the compass's heading, if the watch has one), by their real times:
+     * one number — how far the watch has twisted around its x axis, the forearm — swinging away from where it has been
+     * lately and back. Two such numbers, watched side by side; whichever sees the turn tells it:
      *
-     * <p>With the forearm upright (the arm hanging along the body, or raised) a twist turns the watch around gravity
-     * itself, and gravity barely moves. Then the compass sees it: the heading of the watch's y axis turns by the twist.
-     * So a watch that has one passes its heading with each sample, and the heading's swing counts as a swing too
-     * (only while the forearm — the watch's x axis on the usual watches — is within ~50° of upright and the y axis lies
-     * flat enough for a heading to mean something). What the turn was is told by where gravity pointed at rest and at
-     * the far end ({@link #rest()}, {@link #peakUp()}) and how far the heading went ({@link #headingChange()}): the phone
-     * works out the twist around the forearm from them. The same code is in the watches' JavaScript
+     * <ul>
+     * <li>by gravity: its roll in the dial's y–z plane (atan2 of y and z), while gravity leans off the forearm at all
+     *     ({@link #LEVER_GRAVITY}). The forearm's own slope does not enter it: raised, lowered, flat — the same twist
+     *     gives the same number;</li>
+     * <li>by the compass: the watch's whole orientation from gravity and the heading of its y axis, and the twist around
+     *     x from one sample to the next added up (what a gyroscope would tell) — it sees a twist with the arm hanging
+     *     along the body too, when the twist turns the watch around gravity itself. An arm swinging as one walks turns
+     *     the watch around another axis and adds nothing to it.</li>
+     * </ul>
+     * For each: where it has been lately is a moving average (≈ {@link #BASE_MS}), how restless it has been the moving
+     * average of how far it strays. A turn starts when the number strays by more than {@link #START_DEG} while it has
+     * been calm enough ({@link #CALM_DEG}) — nothing has to be still: walking or a busy hand is calm enough. It ends when
+     * the number comes back within half of how far it went (or {@link #BACK_DEG}) and no further swing follows within
+     * {@link #GRACE_MS} (a quick turn's own jolt swings the watch a little the other way first: the swing that went
+     * furthest decides). Slower than {@link #MAX_MS} is not a gesture — a new position. After a turn both numbers wait
+     * {@link #QUIET_MS}, so that one turn is told once. The same code is in the watches' JavaScript
      * (watch/vela/src/common/proto.js).
      */
     public static final class Finder {
-        /** The hand still: over this long (and 3 samples at least), every sample within STILL_DEG of their mean. */
-        static final double STILL_MS = 320, STILL_DEG = 10, STILL_MAG = 0.18;
-        /** The turn starts this far from the rest, and within FRESH_MS after the hand was still. */
-        static final double START_DEG = 14, FRESH_MS = 600;
-        /** Back near the rest: within BACK_DEG, or within BACK_FRAC of how far it went. */
-        static final double BACK_DEG = 15, BACK_FRAC = 0.5;
-        /** Smaller turns are not reported; a turn takes MIN_MS at least and MAX_MS at most (slower is not a gesture). */
-        static final double MIN_DEG = 22, MIN_MS = 90, MAX_MS = 900;
-        /** After coming back: this long for a further, bigger swing (the one before was the run-up). */
+        /** The turn starts when the number strays this far from where it has been lately… */
+        static final double START_DEG = 14;
+        /** …while it has been this calm (the moving average of how far it strayed). */
+        static final double CALM_DEG = 10;
+        /** Back: within BACK_DEG, or within BACK_FRAC of how far it went. */
+        static final double BACK_DEG = 15, BACK_FRAC = 0.4;
+        /** Smaller turns are not reported; a turn takes MIN_MS at least and MAX_MS at most. */
+        static final double MIN_DEG = 22, MIN_MS = 90, MAX_MS = 800;
+        /** After coming back: this long for a further, bigger swing. */
         static final double GRACE_MS = 140;
-        /** The low-pass of the signal (Hz): smooths the watch's own jolt at the start of a quick turn. */
+        /** Where it has been lately, how restless: moving averages over about this long (ms). */
+        static final double BASE_MS = 600, CALM_MS = 300;
+        /** A number that has just become good is trusted after this long; after a turn, both wait QUIET_MS. */
+        static final double SETTLE_MS = 250, QUIET_MS = 400;
+        /** The low-pass of the accelerometer (Hz): smooths the watch's own jolt at the start of a quick turn. */
         static final double CUT_HZ = 5;
+        /** Gravity's number is good while gravity leans off the forearm this far (sine), once in use down to LEVER_KEEP. */
+        static final double LEVER_GRAVITY = 0.3, LEVER_KEEP = 0.25;
+        /** The compass's number is good while the dial's y axis is no steeper than this (|cos| with «up»), then KEEP_Y. */
+        static final double FLAT_Y = 0.92, KEEP_Y = 0.95;
         /** Beyond these (× gravity): a knock or a throw, not a turn. */
         static final double KNOCK_HI = 3.0, KNOCK_LO = 0.25;
-        /** The compass counts while the forearm (x) is this upright (|cos| at least) and the y axis this flat (at most). */
-        static final double UPRIGHT = 0.6, FLAT_Y = 0.75;
 
-        static final int N = 64;
-        private final double[] ts = new double[N];
-        private final double[] ux = new double[N], uy = new double[N], uz = new double[N], mg = new double[N], hd = new double[N];
-        private int count, at;
+        /** One number watched for a swing away and back. */
+        private static final class Track {
+            boolean good, baseSet;
+            double goodT, raw, theta, base, calm;
+            /** 0 waiting, 1 away, 2 back — waiting whether a bigger swing follows. */
+            int state;
+            double b0, peak, startT, endT, slope0, slopeMax;
+
+            void lose() {
+                good = false;
+                baseSet = false;
+                state = 0;
+            }
+
+            /** The number now (an angle, or an increment when inc), at t; true when a turn has just ended. */
+            boolean step(double v, boolean inc, double t, double dt, double ux, double quietUntil) {
+                if (!good) {
+                    good = true;
+                    goodT = t;
+                    baseSet = false;
+                }
+                if (!baseSet) {
+                    raw = v;
+                    theta = inc ? 0 : v;
+                    base = theta;
+                    calm = 0;
+                    baseSet = true;
+                } else if (inc) {
+                    theta += v;
+                } else {
+                    theta += wrapDeg(v - raw);
+                    raw = v;
+                }
+                if (state == 0) {
+                    double d = theta - base;
+                    if (Math.abs(d) > START_DEG && calm <= CALM_DEG && t - goodT >= SETTLE_MS && t >= quietUntil) {
+                        state = 1;
+                        b0 = base;
+                        peak = d;
+                        startT = t;
+                        slope0 = ux;
+                        slopeMax = 0;
+                        return false;
+                    }
+                    // where it has been lately, and how restless
+                    calm += (1 - Math.exp(-dt / CALM_MS)) * (Math.abs(d) - calm);
+                    base += (1 - Math.exp(-dt / BASE_MS)) * d;
+                    return false;
+                }
+                double d = theta - b0;
+                slopeMax = Math.max(slopeMax, Math.abs(Math.toDegrees(Math.acos(clamp(ux)) - Math.acos(clamp(slope0)))));
+                if (Math.abs(d) > Math.abs(peak)) {
+                    // further than before: a bigger swing (after the run-up, or still on the way)
+                    peak = d;
+                    state = 1;
+                }
+                if (state == 1) {
+                    if (t - startT > MAX_MS) {
+                        // turned and stayed: a new position, not a gesture; calm again before the next one
+                        settle();
+                        return false;
+                    }
+                    if (Math.abs(d) <= Math.max(BACK_DEG, BACK_FRAC * Math.abs(peak))) {
+                        if (Math.abs(peak) < MIN_DEG) {
+                            // a wobble
+                            state = 0;
+                            return false;
+                        }
+                        state = 2;
+                        endT = t;
+                    }
+                    return false;
+                }
+                // state 2: back; a further swing would have made state 1 above
+                if (t - endT < GRACE_MS) return false;
+                settle();
+                return endT - startT >= MIN_MS;
+            }
+
+            /** A turn already back counts even if the number goes away now. */
+            boolean doneAlready() {
+                return state == 2 && Math.abs(peak) >= MIN_DEG && endT - startT >= MIN_MS;
+            }
+
+            /** Back to waiting from where the number is now, restless enough that a moment of calm comes first. */
+            void settle() {
+                state = 0;
+                base = theta;
+                calm = 1.5 * CALM_DEG;
+            }
+        }
+
         private final double[] f = new double[3];
         private boolean primed;
         private double lastT;
         private double g;
         private boolean gSeen;
-
-        private final double[] rest = new double[3];
-        private boolean haveRest;
-        private double lastStill = Double.NEGATIVE_INFINITY;
-        /** 0 waiting, 1 away from the rest, 2 back — waiting whether a bigger swing follows. */
-        private int state;
-        private double startT, endT;
-        private double peak, took, tilt;
-        private final double[] peakU = new double[3];
-        private final double[] axis = new double[3];
-        // the compass: the heading now and at rest (radians, NaN — none), the furthest it went (degrees, signed)
-        private double curH = Double.NaN, restH = Double.NaN;
-        private double gravPeak, headPeak, headAt;
-        private boolean headUsed;
+        private final Track grav = new Track(), comp = new Track();
+        private double quietUntil = Double.NEGATIVE_INFINITY;
+        private double twist, took, slopeOut, slopeChangeOut;
+        private int sourceOut;
+        private float tilt;
 
         public void reset() {
-            count = 0;
             primed = false;
-            haveRest = false;
-            lastStill = Double.NEGATIVE_INFINITY;
-            state = 0;
-            restH = Double.NaN;
+            grav.lose();
+            comp.lose();
+            mSet = false;
         }
 
         public float gravity() {
             return gSeen ? (float) g : 0;
         }
 
-        /** How far from where the hand last rested (degrees, gravity or compass, whichever more), for the screen. */
+        /** How far the watch is twisted from where it has been lately (degrees), for the screen. */
         public float tilt() {
-            return (float) tilt;
+            return tilt;
         }
 
-        /** The turn just found: how far it went (degrees, gravity or compass), how long it took (ms). */
-        public float peak() {
-            return (float) peak;
+        /** The turn just found: the twist (degrees, right-handed around x), how long it took (ms), seen by what. */
+        public float twist() {
+            return (float) twist;
         }
 
         public float took() {
             return (float) took;
         }
 
-        /** The axis of the smallest rotation from rest to the far end (the watch's axes, unit). */
-        public float[] axis() {
-            return new float[]{(float) axis[0], (float) axis[1], (float) axis[2]};
+        public int source() {
+            return sourceOut;
         }
 
-        /** Where «up» was at rest, and at the far end of the turn (the watch's axes, unit). */
-        public float[] rest() {
-            return new float[]{(float) rest[0], (float) rest[1], (float) rest[2]};
+        /** The forearm's slope at rest (cos between «up» and x), and how far it changed during the turn (degrees). */
+        public float slope() {
+            return (float) slopeOut;
         }
 
-        public float[] peakUp() {
-            return new float[]{(float) peakU[0], (float) peakU[1], (float) peakU[2]};
-        }
-
-        /** How far the compass heading went during the turn (degrees, east positive), NaN when it did not count. */
-        public float headingChange() {
-            return headUsed ? (float) headAt : Float.NaN;
+        public float slopeChange() {
+            return (float) slopeChangeOut;
         }
 
         /** One sample at time t (ms); true when a turn has just ended. */
@@ -604,7 +637,6 @@ public final class WristGesture {
 
         /** One sample at time t (ms) with the compass heading then (radians, north 0, east π/2; NaN — none). */
         public boolean sample(double x, double y, double z, double t, double heading) {
-            curH = heading;
             double dt = primed ? t - lastT : 0;
             if (primed && (dt < 0 || dt > 1000)) {
                 // the clock went back or the samples stopped: start afresh (samples at the same time are still samples)
@@ -625,171 +657,126 @@ public final class WristGesture {
             }
             double m = Math.sqrt(f[0] * f[0] + f[1] * f[1] + f[2] * f[2]);
             if (!(m > 0)) return false;
-            int k = at;
-            at = (at + 1) % N;
-            if (count < N) count++;
-            ts[k] = t;
-            ux[k] = f[0] / m;
-            uy[k] = f[1] / m;
-            uz[k] = f[2] / m;
-            mg[k] = m;
-            hd[k] = heading;
-
-            if (gSeen && (m > KNOCK_HI * g || m < KNOCK_LO * g)) {
-                // a knock or a throw
-                state = 0;
-                lastStill = Double.NEGATIVE_INFINITY;
+            if (!gSeen) {
+                g = m;
+                gSeen = true;
+            } else if (Math.abs(m - g) < 0.2 * g) {
+                g += (1 - Math.exp(-dt / 2000)) * (m - g);
+            }
+            if (m > KNOCK_HI * g || m < KNOCK_LO * g) {
+                // a knock or a throw: not a turn
+                grav.state = 0;
+                comp.state = 0;
                 return false;
             }
-            if (state == 0 && still(t)) {
-                // where the hand rests now (and where the watch faces)
-                lastStill = t;
-                haveRest = true;
-            }
-            if (!haveRest) return false;
-            double c = rest[0] * ux[k] + rest[1] * uy[k] + rest[2] * uz[k];
-            double grav = Math.acos(Math.max(-1, Math.min(1, c))) * 180 / Math.PI;
-            double head = Double.isNaN(restH) || Double.isNaN(curH) ? Double.NaN : wrapDeg((curH - restH) * 180 / Math.PI);
-            double deg = Double.isNaN(head) ? grav : Math.max(grav, Math.abs(head));
-            tilt = deg;
-            if (state == 0) {
-                if (deg > START_DEG && t - lastStill <= FRESH_MS) {
-                    state = 1;
-                    startT = lastStill;
-                    peak = deg;
-                    gravPeak = grav;
-                    copyU(k, peakU);
-                    headUsed = !Double.isNaN(head);
-                    headPeak = headUsed ? Math.abs(head) : 0;
-                    headAt = headUsed ? head : 0;
+            double ux = f[0] / m, uy = f[1] / m, uz = f[2] / m;
+            double lever = Math.sqrt(uy * uy + uz * uz);
+            boolean found = false;
+            int by = 0;
+            // gravity's number
+            if (lever >= (grav.good ? LEVER_KEEP : LEVER_GRAVITY)) {
+                if (grav.step(Math.toDegrees(Math.atan2(uy, uz)), false, t, dt, ux, quietUntil)) {
+                    found = true;
+                    by = SOURCE_GRAVITY;
                 }
-                return false;
-            }
-            if (grav > gravPeak) {
-                // gravity's far end
-                gravPeak = grav;
-                copyU(k, peakU);
-            }
-            if (!Double.isNaN(head) && Math.abs(head) > headPeak) {
-                // the compass's far end
-                headPeak = Math.abs(head);
-                headAt = head;
-                headUsed = true;
-            }
-            if (deg > peak) {
-                // further than before: a bigger swing (after the run-up, or still on the way)
-                peak = deg;
-                state = 1;
-            }
-            if (state == 1) {
-                if (t - startT > MAX_MS) {
-                    // turned and stayed: a new position, not a gesture
-                    state = 0;
-                    haveRest = false;
-                    lastStill = Double.NEGATIVE_INFINITY;
-                    return false;
-                }
-                if (deg <= Math.max(BACK_DEG, BACK_FRAC * peak)) {
-                    if (peak < MIN_DEG) {
-                        // a wobble: still where it rests
-                        state = 0;
-                        return false;
-                    }
-                    state = 2;
-                    endT = t;
-                }
-                return false;
-            }
-            // state 2: back; a further swing would have made state 1 above
-            if (t - endT < GRACE_MS) return false;
-            state = 0;
-            lastStill = Double.NEGATIVE_INFINITY; // still again before the next one
-            took = endT - startT;
-            if (took < MIN_MS) return false;
-            double cx = rest[1] * peakU[2] - rest[2] * peakU[1], cy = rest[2] * peakU[0] - rest[0] * peakU[2],
-                    cz = rest[0] * peakU[1] - rest[1] * peakU[0];
-            double n = Math.sqrt(cx * cx + cy * cy + cz * cz);
-            if (n < 1e-6) {
-                axis[0] = axis[1] = axis[2] = 0;
             } else {
-                // the watch turned around this axis (gravity, seen from the watch, turned the other way)
-                axis[0] = -cx / n;
-                axis[1] = -cy / n;
-                axis[2] = -cz / n;
+                if (grav.doneAlready()) {
+                    found = true;
+                    by = SOURCE_GRAVITY;
+                }
+                grav.lose();
             }
+            // the compass's number
+            if (!Double.isNaN(heading) && Math.abs(uy) <= (comp.good ? KEEP_Y : FLAT_Y)) {
+                double inc = orient(ux, uy, uz, heading);
+                if (comp.step(inc, true, t, dt, ux, quietUntil) && !found) {
+                    found = true;
+                    by = SOURCE_COMPASS;
+                }
+            } else {
+                mSet = false;
+                if (comp.doneAlready() && !found) {
+                    found = true;
+                    by = SOURCE_COMPASS;
+                }
+                comp.lose();
+            }
+            Track tr = by == SOURCE_COMPASS ? comp : grav, other = by == SOURCE_COMPASS ? grav : comp;
+            tilt = (float) Math.max(grav.good && grav.baseSet ? Math.abs(grav.theta - grav.base) : 0,
+                    comp.good && comp.baseSet ? Math.abs(comp.theta - comp.base) : 0);
+            if (!found) return false;
+            if (other.good && other.state != 0 && Math.abs(other.peak) > Math.abs(tr.peak) && other.peak * tr.peak > 0) {
+                // the other number is in the middle of the same turn and saw more of it: its measure
+                tr = other;
+                by = by == SOURCE_COMPASS ? SOURCE_GRAVITY : SOURCE_COMPASS;
+                tr.endT = t;
+            }
+            twist = tr.peak;
+            took = tr.endT - tr.startT;
+            sourceOut = by;
+            slopeOut = tr.slope0;
+            slopeChangeOut = tr.slopeMax;
+            // one turn told once: both numbers start afresh and wait a moment
+            quietUntil = t + QUIET_MS;
+            grav.settle();
+            comp.settle();
             return true;
         }
 
+        // the orientation: rows east, north, up — the world's axes in the watch's own
+        private final double[] m = new double[9], mPrev = new double[9];
+        private boolean mSet;
+
+        /**
+         * The watch's orientation from «up» (u) and the heading of its y axis (h: from north toward east), and how far it
+         * twisted around its x axis since the last one (degrees; 0 the first time). Its y axis, laid flat, points h from
+         * north; «clockwise seen from above» of it is y × up.
+         */
+        private double orient(double ux, double uy, double uz, double h) {
+            // y laid flat: y − (y·up) up
+            double yx = -uy * ux, yy = 1 - uy * uy, yz = -uy * uz;
+            double yn = Math.sqrt(yx * yx + yy * yy + yz * yz);
+            yx /= yn;
+            yy /= yn;
+            yz /= yn;
+            // c = y × up
+            double cx = yy * uz - yz * uy, cy = yz * ux - yx * uz, cz = yx * uy - yy * ux;
+            double ch = Math.cos(h), sh = Math.sin(h);
+            System.arraycopy(m, 0, mPrev, 0, 9);
+            // east = cos h · c + sin h · y; north = cos h · y − sin h · c; up
+            m[0] = ch * cx + sh * yx;
+            m[1] = ch * cy + sh * yy;
+            m[2] = ch * cz + sh * yz;
+            m[3] = ch * yx - sh * cx;
+            m[4] = ch * yy - sh * cy;
+            m[5] = ch * yz - sh * cz;
+            m[6] = ux;
+            m[7] = uy;
+            m[8] = uz;
+            if (!mSet) {
+                mSet = true;
+                return 0;
+            }
+            // the turn in the watch's frame: Q = Mprev^T M; its rotation around x
+            double q21 = 0, q12 = 0, tr = 0;
+            for (int i = 0; i < 3; i++) {
+                q21 += mPrev[3 * i + 2] * m[3 * i + 1];
+                q12 += mPrev[3 * i + 1] * m[3 * i + 2];
+                tr += mPrev[3 * i] * m[3 * i] + mPrev[3 * i + 1] * m[3 * i + 1] + mPrev[3 * i + 2] * m[3 * i + 2];
+            }
+            double ang = Math.acos(clamp((tr - 1) / 2));
+            double k = ang < 1e-6 ? 0.5 : ang / (2 * Math.sin(ang));
+            return Math.toDegrees(k * (q21 - q12));
+        }
+
+        private static double clamp(double c) {
+            return Math.max(-1, Math.min(1, c));
+        }
 
         static double wrapDeg(double d) {
             while (d > 180) d -= 360;
             while (d < -180) d += 360;
             return d;
-        }
-
-        private void copyU(int k, double[] out) {
-            out[0] = ux[k];
-            out[1] = uy[k];
-            out[2] = uz[k];
-        }
-
-        /**
-         * Still over the last STILL_MS (3 samples at least): if so, the rest and the size of gravity are taken. With the
-         * forearm upright a slow twist leaves gravity where it was, so then the compass has to be steady too (or the rest
-         * would follow the twist), and where it rests is where the watch faces.
-         */
-        private boolean still(double t) {
-            int n = 0;
-            double sx = 0, sy = 0, sz = 0, sm = 0;
-            for (int i = 0; i < count; i++) {
-                int k = (at - 1 - i + N) % N;
-                if (n >= 3 && t - ts[k] > STILL_MS) break;
-                sx += ux[k];
-                sy += uy[k];
-                sz += uz[k];
-                sm += mg[k];
-                n++;
-            }
-            if (n < 3 || t - ts[(at - n + N) % N] < STILL_MS * 0.66) return false;
-            double len = Math.sqrt(sx * sx + sy * sy + sz * sz);
-            if (len <= 0) return false;
-            sx /= len;
-            sy /= len;
-            sz /= len;
-            double mm = sm / n;
-            double cos = Math.cos(STILL_DEG * Math.PI / 180);
-            for (int i = 0; i < n; i++) {
-                int k = (at - 1 - i + N) % N;
-                if (ux[k] * sx + uy[k] * sy + uz[k] * sz < cos) return false;
-                if (Math.abs(mg[k] - mm) > STILL_MAG * mm) return false;
-            }
-            double h = Double.NaN;
-            if (!Double.isNaN(curH) && Math.abs(sx) >= UPRIGHT && Math.abs(sy) <= FLAT_Y) {
-                // the compass counts: steady too, its mean is where the watch faces
-                double hc = 0, hs = 0;
-                for (int i = 0; i < n; i++) {
-                    int k = (at - 1 - i + N) % N;
-                    if (Double.isNaN(hd[k])) continue;
-                    hc += Math.cos(hd[k]);
-                    hs += Math.sin(hd[k]);
-                }
-                h = Math.atan2(hs, hc);
-                for (int i = 0; i < n; i++) {
-                    int k = (at - 1 - i + N) % N;
-                    if (!Double.isNaN(hd[k]) && Math.abs(wrapDeg((hd[k] - h) * 180 / Math.PI)) > STILL_DEG) return false;
-                }
-            }
-            restH = h;
-            rest[0] = sx;
-            rest[1] = sy;
-            rest[2] = sz;
-            if (!gSeen) {
-                g = mm;
-                gSeen = true;
-            } else {
-                g += 0.1 * (mm - g);
-            }
-            return true;
         }
     }
 
@@ -797,13 +784,5 @@ public final class WristGesture {
 
     static float norm(float[] v) {
         return (float) Math.sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
-    }
-
-    static float dot(float[] a, float[] b) {
-        return a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
-    }
-
-    static float[] cross(float[] a, float[] b) {
-        return new float[]{a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]};
     }
 }
