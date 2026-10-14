@@ -68,7 +68,7 @@ function wrist(segs, hz, unit) {
 
 // ---------------------------------------------------------------- loading a page with stand-in modules
 
-function load(file, mocks, protoRel) {
+function load(file, mocks, protoRel, target) {
   let src = fs.readFileSync(file, 'utf8')
   if (file.endsWith('.ux')) src = src.match(/<script>([\s\S]*)<\/script>/)[1]
   const dir = path.join(out, 'mods')
@@ -79,7 +79,7 @@ function load(file, mocks, protoRel) {
     fs.writeFileSync(f, code)
     src = src.split(`'${name}'`).join(`'${pathToFileURL(f).href}'`)
   }
-  src = src.split(`'${protoRel}'`).join(`'${pathToFileURL(path.join(dir, 'proto.mjs')).href}'`)
+  src = src.split(`'${protoRel}'`).join(`'${pathToFileURL(target || path.join(dir, 'proto.mjs')).href}'`)
   const f = path.join(dir, path.basename(file).replace(/\.\w+$/, '') + '_' + Object.keys(mocks).length + '.mjs')
   fs.writeFileSync(f, src)
   return import(pathToFileURL(f).href)
@@ -182,7 +182,7 @@ async function vela() {
   // this firmware takes no «options» and wants every filter field (code 202 — wrong arguments — otherwise)
   Object.assign(W, { writes: [], notifies: [], scans: 0, scanning: false, gatts: [], buzz: [], acc: null, outstanding: 0, overlap: false, keep: null, closed: 0,
     starts: [], rejectScan: (o) => (o.options || !o.filters.length || o.filters.some((f) => !('deviceId' in f && 'name' in f)) ? 202 : 0) })
-  const mod = await load(path.join(watchDir, 'vela/src/pages/index/index.ux'), {
+  const sysMocks = {
     '@system.bluetooth.ble': `export default {
         createScanner() { const s = { startBLEScan(o) { W.starts.push(o); const code = W.rejectScan ? W.rejectScan(o) : 0
             if (code) { setImmediate(() => o.fail && o.fail(null, code)); return }
@@ -212,14 +212,49 @@ async function vela() {
           setImmediate(() => { R.onframerecorded && R.onframerecorded({ frameBuffer: new Uint8Array(W.lastFrame || [1]).buffer, isLastFrame: true })
             o && o.success && o.success({}); o && o.complete && o.complete() }) } }
       W.record = R; export default R`,
-    '@system.file': `export default { readArrayBuffer(o) { o.fail && o.fail(null, 300) } }`
-  }, '../../common/proto.js')
-  const def = mod.default
-  const page = Object.create(def)
-  Object.assign(page, JSON.parse(JSON.stringify(def.data)))
-  page.onInit()
+    '@system.file': `export default { readArrayBuffer(o) { o.fail && o.fail(null, 300) } }`,
+    '@system.audio': `const A = { play() { W.audioPlays = (W.audioPlays || 0) + 1; W.audioOn = true; W.audioSrc = A.src; W.audioLoop = A.loop
+          setImmediate(() => A.onplay && A.onplay()) },
+        pause() { W.audioOn = false; A.onpause && A.onpause() },
+        stop() { W.audioOn = false; setImmediate(() => A.onstop && A.onstop()) } }
+      W.audio = A; export default A`
+  }
+  // the link (common/link.js) is made by the app (app.ux) with the watch's modules; the page only shows it
+  const dir = path.join(out, 'mods')
+  fs.mkdirSync(dir, { recursive: true })
+  fs.copyFileSync(path.join(watchDir, 'vela/src/common/proto.js'), path.join(dir, 'proto.mjs'))
+  const linkFile = path.join(dir, 'link.mjs')
+  fs.writeFileSync(linkFile, fs.readFileSync(path.join(watchDir, 'vela/src/common/link.js'), 'utf8')
+    .split(`'./proto.js'`).join(`'${pathToFileURL(path.join(dir, 'proto.mjs')).href}'`))
+  const appMod = await load(path.join(watchDir, 'vela/src/app.ux'), sysMocks, './common/link.js', linkFile)
+  const pageMod = await load(path.join(watchDir, 'vela/src/pages/index/index.ux'), {}, '../../common/proto.js')
+  const linkMod = await import(pathToFileURL(linkFile).href)
+  const sys = {}
+  for (const [k, name] of [['ble', '@system.bluetooth.ble'], ['sensor', '@system.sensor'], ['vibrator', '@system.vibrator'],
+    ['brightness', '@system.brightness'], ['storage', '@system.storage'], ['record', '@system.record'], ['file', '@system.file'],
+    ['audio', '@system.audio']]) {
+    sys[k] = (await import(pathToFileURL(path.join(dir, name.replace(/[@/.]/g, '_') + '.mjs')).href)).default
+  }
+  /** Another link, as the app makes it (each scenario its own). */
+  const newLink = () => {
+    const l = linkMod.createLink(sys)
+    l.init()
+    return l
+  }
+  const app = appMod.default
+  app.onCreate()
+  const page = app.link
+  // the page: what it shows is the link's
+  const pageDef = pageMod.default
+  const screen = Object.create(pageDef)
+  Object.assign(screen, JSON.parse(JSON.stringify(pageDef.data)))
+  screen.$app = { $def: app }
+  screen.onInit()
   await flush(); await flush(); await flush(); await flush()
-  ok(W.scanning && W.keep === true && W.filters[0].serviceUuid === SERVICE, 'vela: opened — scanning for the phone\'s service, the screen kept on')
+  ok(W.scanning && W.filters[0].serviceUuid === SERVICE && W.keep !== true, 'vela: opened — scanning for the phone\'s service; the screen may sleep')
+  ok(W.audioOn && W.audioSrc === '/common/quiet.mp3' && W.audioLoop === true && /в фоне/.test(screen.bg),
+    'vela: silence playing round and round — the app runs on in the background («' + screen.bg + '»)')
+  ok(screen.on === true && screen.state === page.state, 'vela: the page shows the link («' + screen.state + '»)')
   ok(W.starts.length === 3 && !W.starts[2].options && W.storage.get('wrist_scan') === '2',
     'vela: the parameters the firmware refused (202) — the next shape tried, the one taken kept (' + W.starts.length + ' tries)')
   // an advertisement without our service is passed by; the phone's (with the service in its bytes) taken
@@ -333,20 +368,18 @@ async function vela() {
       await flush(); await flush()
     }
   }
-  ok(page.on === false && /Mi Fitness/.test(page.state) && W.keep === false && !W.scanning,
+  ok(page.on === false && /Mi Fitness/.test(page.state) && !W.audioOn && !W.scanning,
     'vela: three tries without a link — stopped, the screen may sleep, the hint shown')
   page.toggle()
   await flush(); await flush()
-  ok(page.on === true && W.scanning && W.keep === true, 'vela: «Старт» again — looking for the phone')
+  ok(page.on === true && W.scanning && W.audioOn, 'vela: «Старт» again — looking for the phone')
   page.toggle()
-  ok(W.keep === false && page.on === false, 'vela: «Стоп» — off, the screen may sleep')
-  page.onDestroy()
+  ok(!W.audioOn && page.on === false && screen.on === false, 'vela: «Стоп» — off, the silence stopped (nothing keeps the app running)')
+  page.stop()
 
   // the S5's «game» pace gave one value over and over: a pace whose numbers never change for 2.5 s is given up for the
   // next, slower one, measured again and announced with a new HELLO (the phone then knows the new rate)
-  const p2 = Object.create(def)
-  Object.assign(p2, JSON.parse(JSON.stringify(def.data)))
-  p2.onInit()
+  const p2 = newLink()
   await flush(); await flush(); await flush(); await flush()
   W.found([{ deviceId: '5A:11:22:33:44:55', rssi: -60, addressType: 'RANDOM', data: new Uint8Array([2, 1, 6, 17, 7, ...le]).buffer }])
   W.gatts[W.gatts.length - 1].onBLEConnectionStateChange(2)
@@ -368,13 +401,11 @@ async function vela() {
     'vela (static sensor): HELLO at ~17 a second, then again at 5 (' + hellos.map((h) => h[2].slice(12, 16)).join(', ') + ')')
   p2.showDiag()
   ok(/\(normal\)/.test(p2.diag) && /записи [1-9]/.test(p2.diag), 'vela (static sensor): listening at «normal» — «' + p2.diag + '»')
-  p2.onDestroy()
+  p2.stop()
 
   // the Xiaomi Watch S5 as it is: whole m/s², and the samples handed over three at a time with the same Date.now() —
   // the turns are still found (once they were not: «повороты 0»)
-  const p3 = Object.create(def)
-  Object.assign(p3, JSON.parse(JSON.stringify(def.data)))
-  p3.onInit()
+  const p3 = newLink()
   await flush(); await flush(); await flush(); await flush()
   W.found([{ deviceId: '5A:11:22:33:44:55', rssi: -60, addressType: 'RANDOM', data: new Uint8Array([2, 1, 6, 17, 7, ...le]).buffer }])
   W.gatts[W.gatts.length - 1].onBLEConnectionStateChange(2)
@@ -392,13 +423,11 @@ async function vela() {
   ok(s5w.length === 3 && s5w[0][2].startsWith('0002') && s5w[1][2].startsWith('40') && s5w[2][2].startsWith('40')
     && /повороты 2/.test(p3.diag), 'vela (S5: whole m/s², samples in batches): HELLO and both turns — «' + p3.diag + '»')
   fs.writeFileSync(path.join(out, 'vela_s5_app.hex'), s5w.map((w) => w[2]).join('\n') + '\n')
-  p3.onDestroy()
+  p3.stop()
 
   // the arm hanging along the body: the forearm (x) points down, gravity stays put in a twist, the compass turns —
   // twisted right (east) and back, then left; the compass reports 10 times a second
-  const p4 = Object.create(def)
-  Object.assign(p4, JSON.parse(JSON.stringify(def.data)))
-  p4.onInit()
+  const p4 = newLink()
   await flush(); await flush(); await flush(); await flush()
   W.found([{ deviceId: '5A:11:22:33:44:55', rssi: -60, addressType: 'RANDOM', data: new Uint8Array([2, 1, 6, 17, 7, ...le]).buffer }])
   W.gatts[W.gatts.length - 1].onBLEConnectionStateChange(2)
@@ -424,16 +453,14 @@ async function vela() {
   ok(hw.length === 3 && hw[1][2].startsWith('40') && hw[2][2].startsWith('40') && /компас \d+°/.test(p4.diag) && /\(компас\)/.test(p4.diag),
     'vela (arm hanging): both twists found by the compass — «' + p4.diag + '»')
   fs.writeFileSync(path.join(out, 'vela_hanging_app.hex'), hw.map((w) => w[2]).join('\n') + '\n')
-  p4.onDestroy()
+  p4.stop()
   ok(W.compass === null, 'vela: the compass off when the page goes')
 
   // a voice note: the music paused (the sensor stays on for the notes), the watch raised to the mouth and held — it
   // records, the frames go to the phone as they come (one write lost and written again), lowered — the end; the phone
   // asks for some again, then says it is saved
   W.storage.set('wrist_voice', '1')
-  const p5 = Object.create(def)
-  Object.assign(p5, JSON.parse(JSON.stringify(def.data)))
-  p5.onInit()
+  const p5 = newLink()
   await flush(); await flush(); await flush(); await flush()
   W.found([{ deviceId: '5A:11:22:33:44:55', rssi: -60, addressType: 'RANDOM', data: new Uint8Array([2, 1, 6, 17, 7, ...le]).buffer }])
   const g5 = W.gatts[W.gatts.length - 1]
@@ -470,12 +497,18 @@ async function vela() {
   }
   ok(W.recStarts === 1 && W.recording && W.recording.format === 'opus' && W.recording.sampleRate === 16000 && W.recording.frameSize > 0
     && W.buzz[buzz0] === 'short' && /говорите/.test(p5.note), 'vela (voice): held to the mouth — recording Opus 16 kHz in frames, a short buzz, «' + p5.note + '»')
+  // the watch paused the silence meanwhile (the recorder took the sound): not started again over the recording
+  const plays5 = W.audioPlays
+  W.audio.pause()
+  await advance(2500)
+  ok(W.audioPlays === plays5, 'vela (voice): the background\'s silence not restarted over the recording')
   // lowered
   W.lastFrame = [7, 7, 7]
   frames.push(new Uint8Array(W.lastFrame))
   for (let i = 0; i <= 20; i++) await step(MOUTH.map((m, j) => m + (HANG[j] - m) * Math.min(1, i / 10)))
   await advance(500)
   const vw = W.writes.slice(w5).filter((w) => w[1] === SAMPLES).map((w) => w[2])
+  ok(W.audioPlays > plays5 && W.audioOn, 'vela (voice): the recording over — the silence plays again')
   ok(W.recStops === 1 && vw.some((w) => w.startsWith('50')) && vw[vw.length - 1].startsWith('52') && W.failed === 1,
     'vela (voice): lowered — the recording stopped, START, the bytes, END (' + vw.filter((w) => w.startsWith('51')).length + ' writes of bytes, one lost and written again)')
   ok(!vw.some((w) => w.startsWith('40')), 'vela (voice): no turns sent meanwhile')
@@ -504,7 +537,46 @@ async function vela() {
   ok(W.recStarts === 2 && W.recStops === 2 && W.writes.slice(n1).filter((w) => w[1] === SAMPLES).length === 0 && p5.voices.length === 0,
     'vela (voice): held a moment and away — the recording dropped, nothing sent (' + W.recStarts + ' ' + W.recStops + ' '
     + W.writes.slice(n1).filter((w) => w[1] === SAMPLES).map((w) => w[2].slice(0, 6)).join(',') + ')')
-  p5.onDestroy()
+  p5.stop()
+
+  // in the background: the page left, the link goes on — the turns are still found and sent; the silence stopped by the
+  // watch (a call, an alarm) is played again; «Экран: не гаснет» keeps the screen on only while the page is open
+  const p6 = newLink()
+  const s6 = Object.create(pageDef)
+  Object.assign(s6, JSON.parse(JSON.stringify(pageDef.data)))
+  s6.$app = { $def: { link: p6 } }
+  s6.onInit()
+  await flush(); await flush(); await flush(); await flush()
+  W.found([{ deviceId: '5A:11:22:33:44:55', rssi: -60, addressType: 'RANDOM', data: new Uint8Array([2, 1, 6, 17, 7, ...le]).buffer }])
+  W.gatts[W.gatts.length - 1].onBLEConnectionStateChange(2)
+  await flush(); await flush(); await flush()
+  ok(W.keep !== true && s6.screenOn === false, 'vela (background): the screen may sleep')
+  s6.screen()
+  ok(W.keep === true && s6.screenOn === true && W.storage.get('wrist_screen') === '1', 'vela: «Экран: не гаснет» — kept on while the page is open (and kept)')
+  s6.onHide()
+  ok(W.keep === false, 'vela: the page hidden — the screen may sleep again')
+  s6.screen()
+  s6.onDestroy()
+  ok(p6.on === true && W.audioOn, 'vela (background): the page gone — the link still on, the silence playing')
+  const w6 = W.writes.length
+  for (const [x, y, z] of wrist([[0, 2], [65, 0.4], [0, 1], [-65, 0.4], [0, 1]], 20, 1)) {
+    await advance(50)
+    W.acc && W.acc.callback({ x, y, z })
+    await flush()
+  }
+  await advance(300)
+  const b6 = W.writes.slice(w6).filter((w) => w[1] === SAMPLES)
+  ok(b6.length === 3 && b6[0][2].startsWith('0002') && b6[1][2].startsWith('40') && b6[2][2].startsWith('40'),
+    'vela (background): no page — HELLO and both turns still sent')
+  const plays6 = W.audioPlays
+  W.audioOn = false
+  W.audio.onstop()
+  await advance(2100)
+  ok(W.audioPlays === plays6 + 1 && W.audioOn, 'vela (background): the silence stopped by the watch — played again in 2 s')
+  W.audio.onerror(); W.audio.onerror(); W.audio.onerror()
+  ok(/не работает/.test(p6.bg), 'vela (background): the sound fails again and again — said so («' + p6.bg + '»)')
+  p6.stop()
+  ok(!W.audioOn, 'vela: «Стоп» — the silence stopped')
 }
 
 await zepp()

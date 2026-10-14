@@ -1,10 +1,31 @@
 <script>
 /**
  * «Пульт кистью» for Xiaomi Vela watches (Xiaomi Watch S5: the only one whose apps may read the accelerometer and be a
- * Bluetooth LE client). Everything happens on the one page, which stays open while it works.
+ * Bluetooth LE client). The link to the phone lives here, in the app, not in the page (common/link.js): leaving the page
+ * does not stop it, and while it is on the app keeps running in the background (Vela runs an app on while it plays a
+ * sound — the manifest's «background» features — so it plays silence). The page shows it and switches it.
  */
+import ble from '@system.bluetooth.ble'
+import sensor from '@system.sensor'
+import vibrator from '@system.vibrator'
+import brightness from '@system.brightness'
+import storage from '@system.storage'
+import record from '@system.record'
+import file from '@system.file'
+import audio from '@system.audio'
+import { createLink } from './common/link.js'
+
+const link = createLink({ ble, sensor, vibrator, brightness, storage, record, file, audio })
+
 export default {
-  onCreate() {},
-  onDestroy() {}
+  onCreate() {
+    link.init()
+  },
+
+  onDestroy() {
+    link.stop()
+  },
+
+  link
 }
 </script>
