@@ -344,9 +344,10 @@ public final class QuickNoteActivity extends Activity {
                 .putExtra(RecognizerIntent.EXTRA_CALLING_PACKAGE, getPackageName())
                 .putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 2000L)
                 .putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, 1500L);
-        // the voice kept too (Android 13+, when on): the app records, the recognizer listens to the same sound
+        // the voice kept too (Android 13+, when on), or heard again by GigaAM: the app records, the recognizer listens
+        // to the same sound
         taped = false;
-        if (Engine.get(this).keepVoice() && !noTape) {
+        if ((Engine.get(this).keepVoice() || Engine.get(this).speechReady() && Engine.get(this).tapeWorks()) && !noTape) {
             tape = VoiceTape.start();
             if (tape != null) {
                 taped = true;
@@ -399,7 +400,46 @@ public final class QuickNoteActivity extends Activity {
             }
         }
         stopRecognizer();
-        if (!partial.trim().isEmpty()) heard(partial);
+        if (!partial.trim().isEmpty()) refine(partial);
+    }
+
+    private static final java.util.concurrent.ExecutorService REFINE = java.util.concurrent.Executors.newSingleThreadExecutor();
+
+    /**
+     * What the recognizer heard — or, with GigaAM on the phone and the voice recorded, what GigaAM hears in the same
+     * recording (punctuated, and usually closer); the recognizer's words when GigaAM hears nothing or fails.
+     */
+    private void refine(final String said) {
+        final byte[] v = voice;
+        final Engine e = Engine.get(this);
+        if (v == null || v.length < VoiceTape.RATE || !e.speechReady()) {
+            if (said.trim().isEmpty()) hint("Ничего не расслышал — нажмите на микрофон и скажите ещё раз");
+            else heard(said);
+            return;
+        }
+        label.setText("Уточняю…");
+        heard.setTextColor(Ui.TEXT2);
+        heard.setText(said);
+        REFINE.execute(new Runnable() {
+            @Override
+            public void run() {
+                String t = null;
+                try {
+                    t = Speech.text(e, Speech.samples(v), null);
+                } catch (Throwable x) {
+                    Journal.add(QuickNoteActivity.this, "app", "GigaAM: " + x);
+                }
+                final String out = t != null && !t.trim().isEmpty() ? t : said;
+                runOnUiThread(new Runnable() {
+                    @Override
+                    public void run() {
+                        if (isFinishing() || closing) return;
+                        if (out.trim().isEmpty()) hint("Ничего не расслышал — нажмите на микрофон и скажите ещё раз");
+                        else heard(out);
+                    }
+                });
+            }
+        });
     }
 
     /** No recognizer to talk to here: the phone's own dialog (Google's or the maker's), else the keyboard. */
@@ -459,7 +499,7 @@ public final class QuickNoteActivity extends Activity {
                 // it stopped after words were heard: those are the note
                 String p = partial;
                 stopRecognizer();
-                heard(p);
+                refine(p);
                 return;
             }
             if (onDevice && !triedOther && error != SpeechRecognizer.ERROR_NO_MATCH && error != SpeechRecognizer.ERROR_SPEECH_TIMEOUT) {
@@ -494,11 +534,11 @@ public final class QuickNoteActivity extends Activity {
             ArrayList<String> said = results == null ? null : results.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION);
             String text = said != null && !said.isEmpty() && said.get(0) != null ? said.get(0) : partial;
             stopRecognizer();
-            if (text.trim().isEmpty()) {
+            if (text.trim().isEmpty() && (voice == null || !Engine.get(QuickNoteActivity.this).speechReady())) {
                 hint("Ничего не расслышал — нажмите на микрофон и скажите ещё раз");
                 return;
             }
-            heard(text);
+            refine(text);
         }
 
         @Override
@@ -635,7 +675,9 @@ public final class QuickNoteActivity extends Activity {
                 saved = it;
                 if (r.place != null) Engine.get(QuickNoteActivity.this).setPlace(it, r.place, r.leaving);
                 // the voice with it (half a second at least)
-                if (voice != null && voice.length >= VoiceTape.RATE) Engine.get(QuickNoteActivity.this).setVoice(it, VoiceTape.wav(voice));
+                if (voice != null && voice.length >= VoiceTape.RATE && Engine.get(QuickNoteActivity.this).keepVoice()) {
+                    Engine.get(QuickNoteActivity.this).setVoice(it, VoiceTape.wav(voice));
+                }
                 voice = null;
                 pendingDate = dateOf;
                 pendingBefore = r.beforeMs;

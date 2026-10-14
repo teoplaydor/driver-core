@@ -40,7 +40,8 @@ import io.github.teoplaydor.semsearch.core.WristGesture;
 /**
  * A voice note said into the watch (the watch held to the mouth records, and sends the recording when lowered —
  * {@link WristLink}): its sound decoded (the watch's Ogg Opus, its Opus packets, WAV or PCM), what was said recognised
- * by the phone's recognizer — the sound handed to it, the phone's microphone not used (Android 13+) — and made a note
+ * by GigaAM on the phone when it is downloaded ({@link Speech}), else by the phone's recognizer — the sound handed to
+ * it, the phone's microphone not used (Android 13+) — and made a note
  * the way a quick note is ({@link Capture}: a reminder if a time was said, a question answered from the notes), the
  * recording kept with it. Nothing said in it: nothing kept. No recognition on this phone: the recording is kept as a
  * note to listen to (and found among the sounds). The phone shows what became of it in a quiet notification.
@@ -99,6 +100,30 @@ final class WatchVoice {
                 if (phrases.isEmpty()) {
                     finish(app, done, WristGesture.VOICE_SILENT, "Слов не расслышал — ничего не сохранено", null);
                     return;
+                }
+                if (Engine.get(app).speechReady()) {
+                    // GigaAM on the phone: the whole note at once (in pieces of up to ~22 s), punctuated
+                    String words = null;
+                    try {
+                        words = Speech.text(Engine.get(app), y, phrases, new Speech.Log() {
+                            @Override
+                            public void line(String text) {
+                                WristLog.add(app, "VOICE", text);
+                            }
+                        });
+                    } catch (Throwable e) {
+                        WristLog.add(app, "VOICE", "gigaam failed: " + e + " — the phone's recognizer instead");
+                    }
+                    if (words != null) {
+                        final String w = words;
+                        MAIN.post(new Runnable() {
+                            @Override
+                            public void run() {
+                                made(app, w, w.isEmpty() ? SpeechRecognizer.ERROR_NO_MATCH : 0, wav, seconds, done);
+                            }
+                        });
+                        return;
+                    }
                 }
                 final boolean local = !WristLink.voiceOnline(app) && onDeviceAvailable(app);
                 StringBuilder ps = new StringBuilder();

@@ -53,6 +53,10 @@ final class SettingsPanel extends FrameLayout implements Engine.Listener {
     private View chatToggleRow;
     private ProgressLine chatProgress;
     private TextView ocrValue, ocrNote, ocrButton, ocrDelete;
+    private TextView speechValue, speechNote, speechButton, speechDelete;
+    private Toggle speechToggle;
+    private View speechToggleRow;
+    private ProgressLine speechProgress;
     private Toggle ocrToggle;
     private View ocrToggleRow;
     private ProgressLine ocrProgress;
@@ -112,6 +116,7 @@ final class SettingsPanel extends FrameLayout implements Engine.Listener {
         buildPlaces();
         buildWellbeing();
         buildWrist();
+        buildSpeech();
         buildText();
         buildChat();
         buildIndex();
@@ -1254,6 +1259,61 @@ final class SettingsPanel extends FrameLayout implements Engine.Listener {
         if (!name.isEmpty()) wristForget.setText("Забыть часы (" + name + ")");
     }
 
+    private void buildSpeech() {
+        final Context c = getContext();
+        LinearLayout card = section("Распознавание речи");
+        speechValue = row(card, "GigaAM v3 на телефоне", "заметки голосом — с часов и быстрые — распознаются на телефоне, без сети: "
+                + "русская модель Сбера, сама ставит запятые, точки и заглавные. Без неё — распознаватель телефона", null);
+        speechNote = note(card);
+        speechProgress = progress(card);
+        speechButton = action(card, "Скачать GigaAM v3 (≈250 МБ)", true, new Runnable() {
+            @Override
+            public void run() {
+                e.downloadSpeech(e.speechFullBytes > 0);
+                onEngineChanged();
+            }
+        });
+        speechToggle = new Toggle(c, e.speechOn());
+        speechToggle.setListener(new Toggle.Listener() {
+            @Override
+            public void changed(boolean on) {
+                e.setSpeechOn(on);
+            }
+        });
+        speechToggleRow = toggleRow(card, "Распознавать через GigaAM", "выключено — распознаватель телефона, как раньше", speechToggle);
+        speechDelete = quiet(card, "Удалить GigaAM", Ui.TEXT2, new Runnable() {
+            @Override
+            public void run() {
+                Sheet.confirm(root(), "Удалить GigaAM?", "Заметки голосом будет распознавать телефон.", "Удалить", new Runnable() {
+                    @Override
+                    public void run() {
+                        e.deleteSpeech();
+                    }
+                });
+            }
+        });
+    }
+
+    private void showSpeech() {
+        if (speechValue == null) return;
+        boolean inst = e.speechInstalled();
+        long mb = e.speechBytes() >> 20;
+        speechValue.setText(e.speechDownloading ? "загрузка" : !inst ? "не скачано" : e.speechOn()
+                ? "включено · " + (e.speechInt8() ? "int8" : "fp32") + ", " + mb + " МБ" : "выключено");
+        speechValue.setTextColor(inst && e.speechOn() ? Ui.ACCENT : Ui.TEXT2);
+        String note = e.speechDlError != null ? e.speechDlError
+                : e.speechDownloading && e.speechDlTotal > 0 ? (e.speechDlDone >> 20) + " из " + (e.speechDlTotal >> 20) + " МБ" : "";
+        speechNote.setText(note);
+        speechNote.setVisibility(note.isEmpty() ? GONE : VISIBLE);
+        speechProgress.setVisibility(e.speechDownloading ? VISIBLE : GONE);
+        if (e.speechDownloading && e.speechDlTotal > 0) speechProgress.setProgress(e.speechDlDone / (float) e.speechDlTotal);
+        speechButton.setVisibility(inst || e.speechDownloading ? GONE : VISIBLE);
+        speechButton.setText(e.speechFullBytes > 0 ? "Скачать полную GigaAM v3 (" + (e.speechFullBytes >> 20) + " МБ)" : "Скачать GigaAM v3 (≈250 МБ)");
+        speechToggleRow.setVisibility(inst ? VISIBLE : GONE);
+        if (speechToggle.isOn() != e.speechOn()) speechToggle.setOn(e.speechOn(), false);
+        speechDelete.setVisibility(inst ? VISIBLE : GONE);
+    }
+
     private void buildText() {
         final Context c = getContext();
         LinearLayout card = section("Текст на фото");
@@ -1393,6 +1453,7 @@ final class SettingsPanel extends FrameLayout implements Engine.Listener {
         rowOf(digestValue).setVisibility(Digest.on(getContext()) ? VISIBLE : GONE);
         showPlaces();
         showWellbeing();
+        showSpeech();
         showText();
         showChat();
     }

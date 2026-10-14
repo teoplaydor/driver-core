@@ -124,6 +124,27 @@ public final class Utterances {
         return out;
     }
 
+    /**
+     * The phrases put together again into pieces of at most {@code maxMs} (pauses and all): for a model that takes a
+     * whole stretch of speech at once and punctuates it best in whole sentences, only the room's silence before, after and
+     * between long stretches left out. A phrase longer than that alone (phrases are {@link #MAX_MS} at most).
+     */
+    public static List<int[]> groups(List<int[]> phrases, int rate, int maxMs) {
+        List<int[]> out = new ArrayList<int[]>();
+        long max = (long) rate * maxMs / 1000;
+        int[] cur = null;
+        for (int[] p : phrases) {
+            if (cur != null && p[1] - cur[0] <= max) {
+                cur[1] = p[1];
+            } else {
+                if (cur != null) out.add(cur);
+                cur = new int[]{p[0], p[1]};
+            }
+        }
+        if (cur != null) out.add(cur);
+        return out;
+    }
+
     private static int[] span(int from, int to, int margin, int n, int f, int len) {
         return new int[]{Math.max(0, from - margin) * f, Math.min(len, Math.min(n, to + margin) * f)};
     }

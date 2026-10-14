@@ -300,5 +300,57 @@ public class AssistantTest {
         ShadowAudioRecord.clearSource();
         Robo.call(q, "close");
         Robo.settle(300);
+
+        // GigaAM on the phone (the stand-in from test/gigaam): the same recording heard again by it, its words the note's
+        // (the recognizer's only shown meanwhile); recorded for it though the voice is not kept, and not kept
+        System.setProperty("onnxruntime.native.path", new java.io.File(System.getProperty("npu.fixture")).getAbsolutePath());
+        java.lang.reflect.Field giga = Engine.class.getDeclaredField("speechForTest");
+        giga.setAccessible(true);
+        giga.set(null, new java.io.File("build/test/gigaam/int8"));
+        e.setKeepVoice(false);
+        try {
+            ShadowAudioRecord.setSource(new ShadowAudioRecord.AudioRecordSource() {
+                int t;
+
+                @Override
+                public int readInByteArray(byte[] b, int off, int n, boolean blocking) {
+                    for (int i = 0; i + 1 < n; i += 2, t++) {
+                        // «syllables»: a gliding pitch with harmonics, 0.3 s on, 0.2 s off
+                        double v = 0;
+                        if (t % 8000 < 4800) {
+                            double ph = 2 * Math.PI * 140 * t / 16000.0 * (1 + 0.1 * Math.sin(2 * Math.PI * 2 * t / 16000.0));
+                            for (int k = 1; k <= 12; k++) v += Math.sin(k * ph) / k;
+                            v *= Math.sin(Math.PI * (t % 8000) / 4800.0);
+                        }
+                        short s = (short) (6000 * v);
+                        b[off + i] = (byte) s;
+                        b[off + i + 1] = (byte) (s >> 8);
+                    }
+                    try {
+                        Thread.sleep(n / 32);
+                    } catch (InterruptedException ignored) {
+                        // on
+                    }
+                    return n;
+                }
+            });
+            assertTrue(e.speechReady());
+            q = open();
+            sr = ShadowSpeechRecognizer.getLatestSpeechRecognizer();
+            assertNotNull("recorded for GigaAM", Shadows.shadowOf(sr).getLastRecognizerIntent().getParcelableExtra("android.speech.extra.AUDIO_SOURCE"));
+            Thread.sleep(2500);
+            Shadows.shadowOf(sr).triggerOnResults(said("слова распознавателя телефона"));
+            final Activity q6 = q;
+            Robo.waitFor("kept", () -> Robo.field(q6, "saved") != null);
+            final IndexStore.Item heard = (IndexStore.Item) Robo.field(q, "saved");
+            System.out.println("GigaAM (stand-in) in a quick note: «" + heard.body + "»");
+            assertFalse(heard.body, heard.body.toLowerCase().contains("распознавателя"));
+            assertNull("the voice not kept (off)", heard.audio);
+            ShadowAudioRecord.clearSource();
+            Robo.call(q, "close");
+            Robo.settle(300);
+        } finally {
+            giga.set(null, null);
+        }
     }
 }

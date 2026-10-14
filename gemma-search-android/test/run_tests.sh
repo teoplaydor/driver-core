@@ -79,6 +79,13 @@ java -Dfile.encoding=UTF-8 -Dstdout.encoding=UTF-8 -cp "$T/cls" AnswersTest
 java -Dfile.encoding=UTF-8 -Dstdout.encoding=UTF-8 -cp "$T/cls" WristGestureTest "$T/watch"
 # voice notes from the watch: the VOICE packets put together, Ogg Opus taken apart, the phone's answers (for the JS too)
 java -Dfile.encoding=UTF-8 -Dstdout.encoding=UTF-8 -cp "$T/cls" VoiceNoteTest "$T/watch"
+# GigaAM v3 e2e RNN-T on the phone vs onnx-asr 0.12 (the library its ONNX export is for), on a stand-in with the same
+# files, inputs and outputs: the window and mel filters to the bit, the features, the pieces greedy decoding emits (fp32
+# and int8), the text; the stand-in is also what the app tests (Robolectric) recognize watch and quick notes with
+python3 -m pip install -q onnx-asr==0.12.0 onnx onnxruntime numpy
+rm -rf "$T/gigaam" && python3 test/gigaam/make_gigaam_dummy.py "$T/gigaam"
+python3 test/gigaam/reference_gigaam.py "$T/gigaam" > "$T/gigaam/reference.json"
+java -Dfile.encoding=UTF-8 -Dstdout.encoding=UTF-8 -cp "$T/cls:$T/ort-desktop.jar" GigaAmTest "$T/gigaam"
 # the watch apps (Xiaomi Vela, Zepp OS): their protocol module and their pages over stand-ins of the watches' modules,
 # the packets they write recognised by the phone's Java
 node test/watch/proto_test.mjs watch/vela/src/common/proto.js "$T/watch"

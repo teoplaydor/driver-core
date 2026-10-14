@@ -504,6 +504,22 @@ public class UiShots {
         shot(a, "08-settings");
         ScrollView sv = find(a.getWindow().getDecorView(), ScrollView.class);
         assertNotNull(sv);
+        // the speech card (GigaAM): its section title at the top
+        android.view.View speechTitle = null;
+        java.util.ArrayDeque<android.view.View> walk = new java.util.ArrayDeque<android.view.View>();
+        walk.add(sv.getChildAt(0));
+        while (!walk.isEmpty() && speechTitle == null) {
+            android.view.View v = walk.poll();
+            if (v instanceof android.widget.TextView && "Распознавание речи".contentEquals(((android.widget.TextView) v).getText())) speechTitle = v;
+            if (v instanceof android.view.ViewGroup) for (int i = 0; i < ((android.view.ViewGroup) v).getChildCount(); i++) walk.add(((android.view.ViewGroup) v).getChildAt(i));
+        }
+        assertNotNull("the speech card", speechTitle);
+        int[] at = new int[2], top = new int[2];
+        speechTitle.getLocationInWindow(at);
+        sv.getChildAt(0).getLocationInWindow(top);
+        sv.scrollTo(0, at[1] - top[1] - 40);
+        settle(200);
+        shot(a, "09a-settings-speech");
         sv.scrollTo(0, sv.getChildAt(0).getHeight() / 2);
         settle(200);
         shot(a, "09-settings-middle");

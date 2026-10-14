@@ -30,6 +30,7 @@ import org.robolectric.shadows.ShadowBluetoothGattServer;
 import org.robolectric.shadows.ShadowLooper;
 import org.robolectric.shadows.ShadowSpeechRecognizer;
 
+import java.io.File;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -225,6 +226,131 @@ public class WristTest {
         WristLog.flush();
         String log = new String(java.nio.file.Files.readAllBytes(WristLog.file(app).toPath()), StandardCharsets.UTF_8);
         assertTrue("the recording in the log", log.contains(" VOICE-RAW " + android.util.Base64.encodeToString(junk, android.util.Base64.NO_WRAP)));
+    }
+
+    /**
+     * GigaAM on the phone (the stand-in from test/gigaam with the real export's files, inputs and outputs, on the desktop
+     * ONNX Runtime): a note from the watch recognized by it, the phone's recognizer not asked; its pieces and what it
+     * heard in the log; the note saved with those words. Off again: the phone's recognizer.
+     */
+    static void gigaam(Application app, WristLink.Server server, ShadowBluetoothGattServer sg, BluetoothDevice watch,
+                       BluetoothGattCharacteristic samples) throws Exception {
+        File fx = new File(System.getProperty("npu.fixture"));
+        System.setProperty("onnxruntime.native.path", fx.getAbsolutePath());
+        File giga = new File("build/test/gigaam/int8");
+        assertTrue("the stand-in GigaAM (test/gigaam/make_gigaam_dummy.py) in " + giga, new File(giga, "v3_e2e_rnnt_encoder.int8.onnx").exists());
+        java.lang.reflect.Field f = Engine.class.getDeclaredField("speechForTest");
+        f.setAccessible(true);
+        final Engine e = Engine.get(app);
+        assertFalse(e.speechInstalled());
+
+        // downloaded from the Hub (a stand-in Hub with the repo's fp32 and int8 graphs): the int8 ones taken, nothing else
+        final java.util.Map<String, File> repo = new java.util.concurrent.ConcurrentSkipListMap<String, File>();
+        for (File x : new File("build/test/gigaam/fp32").listFiles()) repo.put(x.getName(), x);
+        repo.put("README.md", new File(giga, "config.json"));
+        final java.util.List<String> fetched = Collections.synchronizedList(new ArrayList<String>());
+        com.sun.net.httpserver.HttpServer hub = com.sun.net.httpserver.HttpServer.create(new java.net.InetSocketAddress("127.0.0.1", 0), 0);
+        hub.createContext("/", ex -> {
+            String path = ex.getRequestURI().getPath();
+            byte[] body;
+            if (path.equals("/api/models/istupakov/gigaam-v3-onnx")) {
+                StringBuilder j = new StringBuilder("{\"id\":\"istupakov/gigaam-v3-onnx\",\"siblings\":[");
+                for (java.util.Map.Entry<String, File> en : repo.entrySet()) {
+                    j.append(j.charAt(j.length() - 1) == '[' ? "" : ",").append("{\"rfilename\":\"").append(en.getKey())
+                            .append("\",\"size\":").append(en.getValue().length()).append("}");
+                }
+                body = j.append("]}").toString().getBytes(StandardCharsets.UTF_8);
+            } else if (path.startsWith("/istupakov/gigaam-v3-onnx/resolve/main/") && repo.containsKey(path.substring(39))) {
+                fetched.add(path.substring(39));
+                body = java.nio.file.Files.readAllBytes(repo.get(path.substring(39)).toPath());
+            } else {
+                ex.sendResponseHeaders(404, -1);
+                ex.close();
+                return;
+            }
+            ex.sendResponseHeaders(200, body.length);
+            ex.getResponseBody().write(body);
+            ex.close();
+        });
+        hub.start();
+        java.lang.reflect.Field hf = Engine.class.getDeclaredField("hubForTest");
+        hf.setAccessible(true);
+        hf.set(null, "http://127.0.0.1:" + hub.getAddress().getPort());
+        try {
+            // only the full graphs there: offered with their size, nothing downloaded yet
+            e.downloadSpeech(false);
+            Robo.waitFor("offered", () -> !e.speechDownloading && e.speechDlError != null);
+            assertTrue(e.speechDlError, e.speechFullBytes > 0 && e.speechDlError.contains("нет версии int8") && fetched.isEmpty() && !e.speechInstalled());
+            // the int8 graphs there too: those taken
+            for (File x : giga.listFiles()) repo.put(x.getName(), x);
+            e.downloadSpeech(false);
+            Robo.waitFor("GigaAM downloaded", () -> !e.speechDownloading && (e.speechInstalled() || e.speechDlError != null));
+            assertNull(e.speechDlError, e.speechDlError);
+            assertTrue("int8, ready", e.speechInstalled() && e.speechInt8() && e.speechReady());
+            Collections.sort(fetched);
+            assertEquals("only the int8 graphs, the vocabulary and the settings", Arrays.asList("config.json", "v3_e2e_rnnt_decoder.int8.onnx",
+                    "v3_e2e_rnnt_encoder.int8.onnx", "v3_e2e_rnnt_joint.int8.onnx", "v3_e2e_rnnt_vocab.txt"), fetched);
+        } finally {
+            hf.set(null, null);
+            hub.stop(0);
+        }
+        try {
+            // a few «syllables»: a gliding pitch with its harmonics, pauses between
+            float[] x = new float[16000 * 3];
+            java.util.Random r = new java.util.Random(11);
+            for (int at = 3200; at + 6000 < x.length; at += 6000 + r.nextInt(3000)) {
+                int len = 3000 + r.nextInt(3000);
+                double f0 = 110 + r.nextInt(100), ph = 0;
+                for (int i = 0; i < len; i++) {
+                    ph += 2 * Math.PI * f0 * (1 + 0.2 * Math.sin(2 * Math.PI * 3 * i / 16000.0)) / 16000;
+                    double v = 0;
+                    for (int k = 1; k <= 12; k++) v += Math.sin(k * ph) / k;
+                    x[at + i] = (float) (0.25 * v * Math.sin(Math.PI * i / len));
+                }
+            }
+            final SpeechRecognizer last = ShadowSpeechRecognizer.getLatestSpeechRecognizer();
+            WristLog.flush();
+            final long logFrom = WristLog.file(app).length();
+            sendNote(sg, watch, samples, 10, WristGesture.CODEC_WAV, Pcm.wav16(x, 16000), 400, -1, true);
+            Robo.waitFor("GigaAM told", () -> server.lastMessage != null && server.lastMessage[0] == WristGesture.EV_VOICE_DONE
+                    && server.lastMessage[1] == 10);
+            assertSame("the phone's recognizer not asked", last, ShadowSpeechRecognizer.getLatestSpeechRecognizer());
+            WristLog.flush();
+            byte[] all = java.nio.file.Files.readAllBytes(WristLog.file(app).toPath());
+            String log = new String(all, (int) logFrom, all.length - (int) logFrom, StandardCharsets.UTF_8);
+            java.util.regex.Matcher m = java.util.regex.Pattern.compile("VOICE gigaam 1/1 [\\d.]+-[\\d.]+ s: «([^»]*)» in \\d+ ms").matcher(log);
+            assertTrue(log, m.find());
+            String words = m.group(1);
+            System.out.println("GigaAM (stand-in) heard: «" + words + "»");
+            assertTrue(log, log.contains("VOICE heard «" + words + "» error=0"));
+            int result = server.lastMessage[2];
+            assertTrue("saved or answered: " + result, !words.isEmpty() && (result == WristGesture.VOICE_SAVED || result == WristGesture.VOICE_ANSWER));
+            // a broken model (half a file): the phone's recognizer instead, the note not lost
+            File broken = java.nio.file.Files.createTempDirectory("gigaam-broken").toFile();
+            for (String n : new String[]{"v3_e2e_rnnt_vocab.txt", "config.json"}) {
+                java.nio.file.Files.copy(new File(giga, n).toPath(), new File(broken, n).toPath());
+            }
+            for (String n : new String[]{"encoder", "decoder", "joint"}) {
+                java.nio.file.Files.write(new File(broken, "v3_e2e_rnnt_" + n + ".int8.onnx").toPath(), new byte[]{8, 7, 1, 2, 3});
+            }
+            f.set(null, broken);
+            e.deleteSpeech(); // the loaded one let go (the folder of a test model is left alone)
+            final SpeechRecognizer before = ShadowSpeechRecognizer.getLatestSpeechRecognizer();
+            sendNote(sg, watch, samples, 11, WristGesture.CODEC_WAV, Pcm.wav16(x, 16000), 400, -1, true);
+            Robo.waitFor("the phone's recognizer instead", () -> ShadowSpeechRecognizer.getLatestSpeechRecognizer() != before);
+            Shadows.shadowOf(ShadowSpeechRecognizer.getLatestSpeechRecognizer()).triggerOnResults(said("Купить батарейки"));
+            Robo.waitFor("told", () -> server.lastMessage != null && server.lastMessage[0] == WristGesture.EV_VOICE_DONE
+                    && server.lastMessage[1] == 11);
+            assertEquals("saved by the phone's recognizer", WristGesture.VOICE_SAVED, server.lastMessage[2]);
+            WristLog.flush();
+            String log2 = new String(java.nio.file.Files.readAllBytes(WristLog.file(app).toPath()), StandardCharsets.UTF_8);
+            assertTrue("why, in the log", log2.contains("gigaam failed: ") && log2.contains("the phone's recognizer instead"));
+        } finally {
+            f.set(null, null);
+        }
+        assertTrue("the downloaded one still there", e.speechReady());
+        e.deleteSpeech();
+        assertFalse("deleted: the phone's recognizer", e.speechInstalled() || e.speechReady());
     }
 
     /** The watch's IMA ADPCM (createAdpcm in proto.js) of samples −1…1, for the tests. */
@@ -445,6 +571,7 @@ public class WristTest {
         assertTrue(WristLink.last(app), WristLink.last(app).contains("следующий") && WristLink.last(app).contains("64°"));
 
         voiceNotes(app, server, sg, other, samples, cccd);
+        gigaam(app, server, sg, other, samples);
         debugLog(app, server, sg, other, samples);
 
         // off: the service and the link are gone

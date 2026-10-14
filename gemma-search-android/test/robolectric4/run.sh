@@ -12,7 +12,9 @@
 #   WellbeingTest   — the «разомнись» nudge from usage statistics (screen-on time), cool-down, quiet hours, access
 #   WristTest       — tracks by a turn of the wrist: the GATT server and advertising, a watch's HELLO and samples, next /
 #                     previous while music plays, pause / stream with the music, another watch turned away, the
-#                     direction taught, off
+#                     direction taught, off; voice notes from the watch, GigaAM downloaded from a stand-in Hub and
+#                     recognizing them (needs build/test/gigaam from test/run_tests.sh), a broken model → the phone's
+#                     recognizer
 #   WristWatchTest  — the Wear OS watch app and the phone end to end: scan, connect, HELLO, the accelerometer streamed,
 #                     next / previous and the watch's buzz, paused with the music, reconnecting
 #   ScanTest        — a document photo offered as a scan for printing: the sheet cut out, black and white, saved;

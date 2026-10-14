@@ -1644,6 +1644,197 @@ public final class Engine {
      */
     static final int FACE_SCAN = 2;
     static final float FACE_SCORE = 0.75f;
+    // ------------------------------------------------------------------ speech on the phone (GigaAM v3)
+
+    /**
+     * GigaAM v3 «e2e» RNN-T (Sber's Russian model: the text comes with punctuation and capitals) as onnx-asr exports it,
+     * its int8 graphs when the repo has them (≈ a quarter of the size, about as good).
+     */
+    static final String SPEECH_REPO = "istupakov/gigaam-v3-onnx";
+    /** The model let go this long after its last use (it holds a few hundred MB). */
+    static final long SPEECH_KEEP_MS = 3 * 60_000L;
+
+    public volatile boolean speechDownloading;
+    public volatile long speechDlDone, speechDlTotal;
+    public volatile String speechDlError;
+    /** The repo had no int8 graphs: the full model's size, offered (a second press downloads it); 0 — not offered. */
+    public volatile long speechFullBytes;
+    private final Object speechLock = new Object();
+    private io.github.teoplaydor.semsearch.core.GigaAm speech;
+    private volatile long speechUsed;
+    /** Tests: the model in this folder instead of the downloaded one; the Hub at this address. */
+    static volatile File speechForTest;
+    static volatile String hubForTest;
+
+    File speechDir() {
+        return speechForTest != null ? speechForTest : new File(ctx.getFilesDir(), "gigaam");
+    }
+
+    private static List<String> names(File dir) {
+        String[] l = dir.list();
+        return l == null ? new ArrayList<String>() : java.util.Arrays.asList(l);
+    }
+
+    /** The model is here: all its files, and they opened when it was downloaded. */
+    public boolean speechInstalled() {
+        File dir = speechDir();
+        return (speechForTest != null || new File(dir, "ready").exists()) && io.github.teoplaydor.semsearch.core.GigaAm.pick(names(dir)).complete();
+    }
+
+    /** Its size on the phone, bytes. */
+    public long speechBytes() {
+        long n = 0;
+        File[] fs = speechDir().listFiles();
+        if (fs != null) for (File f : fs) n += f.length();
+        return n;
+    }
+
+    /** Whether the int8 graphs were taken (the repo had them). */
+    public boolean speechInt8() {
+        return io.github.teoplaydor.semsearch.core.GigaAm.pick(names(speechDir())).int8();
+    }
+
+    /** Notes said (from the watch, quick notes) recognized with GigaAM when it is here. */
+    public boolean speechOn() {
+        return prefs.getBoolean("speech_on", true);
+    }
+
+    public void setSpeechOn(boolean on) {
+        prefs.edit().putBoolean("speech_on", on).apply();
+        notifyChanged();
+    }
+
+    /** GigaAM is here and asked for: speech goes to it. */
+    public boolean speechReady() {
+        return speechOn() && speechInstalled();
+    }
+
+    /**
+     * Downloads GigaAM — its int8 graphs; when the repo has none, the full ones only if {@code full} (else their size is
+     * offered: {@link #speechFullBytes}). Resumable; opened once to be sure.
+     */
+    public void downloadSpeech(final boolean full) {
+        if (speechDownloading || speechInstalled()) return;
+        speechDownloading = true;
+        speechDlError = null;
+        speechDlDone = speechDlTotal = 0;
+        notifyChanged();
+        net.submit(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    HfRepo r = hubForTest != null ? new HfRepo(hubForTest, SPEECH_REPO, prefs.getString("token", ""))
+                            : new HfRepo(SPEECH_REPO, prefs.getString("token", ""));
+                    List<HfRepo.RemoteFile> files = r.listFiles();
+                    List<String> remote = new ArrayList<String>();
+                    for (HfRepo.RemoteFile f : files) remote.add(f.path);
+                    io.github.teoplaydor.semsearch.core.GigaAm.Files pick = io.github.teoplaydor.semsearch.core.GigaAm.pick(remote);
+                    if (!pick.complete()) throw new java.io.IOException("в " + SPEECH_REPO + " нет файлов GigaAM v3 e2e RNN-T");
+                    long total = 0;
+                    for (HfRepo.RemoteFile f : files) if (pick.all().contains(f.path)) total += Math.max(0, f.size);
+                    if (!pick.int8() && !full) {
+                        speechFullBytes = total;
+                        speechDlError = "В " + SPEECH_REPO + " нет версии int8; полная займёт " + (total >> 20) + " МБ — нажмите ещё раз, чтобы скачать её";
+                        return;
+                    }
+                    total = 0;
+                    List<HfRepo.RemoteFile> want = new ArrayList<HfRepo.RemoteFile>();
+                    for (String n : pick.all()) {
+                        for (HfRepo.RemoteFile f : files) {
+                            if (f.path.equals(n)) {
+                                want.add(f);
+                                total += Math.max(0, f.size);
+                            }
+                        }
+                    }
+                    speechDlTotal = total;
+                    File dir = speechDir();
+                    if (!dir.exists() && !dir.mkdirs()) throw new java.io.IOException("не создаётся папка " + dir);
+                    new File(dir, "ready").delete();
+                    // what an earlier choice left (another precision): out, so the folder holds one model
+                    for (String n : names(dir)) {
+                        if (!pick.all().contains(n) && !n.endsWith(".part")) new File(dir, n).delete();
+                    }
+                    long done = 0;
+                    for (HfRepo.RemoteFile f : want) {
+                        File dst = new File(dir, f.path);
+                        if (dst.exists() && f.size >= 0 && dst.length() == f.size) {
+                            done += f.size;
+                            continue;
+                        }
+                        final long base = done;
+                        r.downloadFile(f, dst, new HfRepo.Progress() {
+                            @Override
+                            public boolean onProgress(String file, long fd, long ft, long all, long allTotal) {
+                                speechDlDone = base + fd;
+                                notifyChanged();
+                                return true;
+                            }
+                        });
+                        done += dst.length();
+                    }
+                    // the graphs open (not an error page, not half a file)
+                    io.github.teoplaydor.semsearch.core.GigaAm g = new io.github.teoplaydor.semsearch.core.GigaAm(dir, 1);
+                    g.close();
+                    java.io.FileOutputStream ready = new java.io.FileOutputStream(new File(dir, "ready"));
+                    ready.write((pick.int8() ? "int8" : "fp32").getBytes("UTF-8"));
+                    ready.close();
+                    Journal.add(ctx, "app", "распознавание речи: GigaAM v3 скачан (" + (pick.int8() ? "int8" : "fp32") + ", "
+                            + (total >> 20) + " МБ)");
+                } catch (Throwable e) {
+                    speechDlError = "GigaAM не скачался: " + e.getMessage();
+                    Journal.add(ctx, "app", speechDlError);
+                } finally {
+                    speechDownloading = false;
+                    notifyChanged();
+                }
+            }
+        });
+    }
+
+    public void deleteSpeech() {
+        synchronized (speechLock) {
+            if (speech != null) speech.close();
+            speech = null;
+        }
+        if (speechForTest == null) deleteTree(speechDir());
+        notifyChanged();
+    }
+
+    /**
+     * What was said in this piece of sound (16 kHz mono, at most GigaAm.MAX_MS) — GigaAM loaded on first use, let go a
+     * few minutes after the last. Any thread but the main one.
+     */
+    public String recognizeSpeech(float[] pcm) throws Exception {
+        synchronized (speechLock) {
+            if (speech == null) {
+                speech = new io.github.teoplaydor.semsearch.core.GigaAm(speechDir(), Math.max(1, Math.min(4, Runtime.getRuntime().availableProcessors() / 2)));
+            }
+            speechUsed = System.currentTimeMillis();
+            String out = speech.recognize(pcm);
+            speechUsed = System.currentTimeMillis();
+            main.removeCallbacks(releaseSpeech);
+            main.postDelayed(releaseSpeech, SPEECH_KEEP_MS);
+            return out;
+        }
+    }
+
+    private final Runnable releaseSpeech = new Runnable() {
+        @Override
+        public void run() {
+            net.submit(new Runnable() {
+                @Override
+                public void run() {
+                    synchronized (speechLock) {
+                        if (speech == null || System.currentTimeMillis() - speechUsed < SPEECH_KEEP_MS - 1000) return;
+                        speech.close();
+                        speech = null;
+                    }
+                }
+            });
+        }
+    };
+
     // ------------------------------------------------------------------ text on photos (OCR)
 
     /** RapidOCR 3.10's models on ModelScope: PP-OCRv6 detection (small) and East Slavic recognition (PP-OCRv5 mobile). */
@@ -2964,6 +3155,11 @@ public final class Engine {
     /** Keeping the voice of quick notes (Android 13+; off until turned on, and off for good if it broke recognition). */
     public boolean keepVoice() {
         return android.os.Build.VERSION.SDK_INT >= 33 && prefs.getBoolean("keep_voice", false) && !prefs.getBoolean("keep_voice_broken", false);
+    }
+
+    /** The app can record while the recognizer listens to the same sound (Android 13+, and it did not break it here). */
+    public boolean tapeWorks() {
+        return android.os.Build.VERSION.SDK_INT >= 33 && !prefs.getBoolean("keep_voice_broken", false);
     }
 
     public void setKeepVoice(boolean on) {

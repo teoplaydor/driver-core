@@ -106,6 +106,17 @@ public class VoiceNoteTest {
         quiet(l, r, 2);
         ok(Utterances.phrases(arr(l), R).isEmpty(), "silence: nothing");
 
+        // for GigaAM: the phrases put together again into pieces of at most 22 s (pauses and all)
+        List<int[]> ph = new java.util.ArrayList<int[]>();
+        for (int k = 0; k < 6; k++) ph.add(new int[]{k * 8 * R, (k * 8 + 6) * R}); // 6 s each, every 8 s
+        List<int[]> g = Utterances.groups(ph, R, 22000);
+        ok(g.size() == 2 && g.get(0)[0] == 0 && g.get(0)[1] == 22 * R && g.get(1)[0] == 24 * R && g.get(1)[1] == 46 * R,
+                "phrases into pieces up to 22 s: " + g.size() + " (0–22, 24–46 s)");
+        ph.add(new int[]{47 * R, 59 * R});
+        g = Utterances.groups(ph, R, 22000);
+        ok(g.size() == 3 && g.get(2)[0] == 47 * R, "…one that would make a piece too long starts the next");
+        ok(Utterances.groups(new java.util.ArrayList<int[]>(), R, 22000).isEmpty(), "no phrases: no pieces");
+
         // cleaned: a quiet voice made louder, a loud one kept below full scale, an offset gone
         l.clear();
         say(l, r, 2, 0.02);
