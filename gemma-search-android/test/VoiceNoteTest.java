@@ -1,4 +1,5 @@
 import io.github.teoplaydor.semsearch.core.OggOpus;
+import io.github.teoplaydor.semsearch.core.Utterances;
 import io.github.teoplaydor.semsearch.core.VoiceNote;
 import io.github.teoplaydor.semsearch.core.WristGesture;
 
@@ -17,7 +18,8 @@ import java.util.Random;
  * and the watch's Ogg Opus taken apart into its packets (pages, packets across segments and pages, OpusHead, OpusTags),
  * packets each after its length, an Opus packet's length in samples. And the phone's answers to the watch (settings,
  * «again from», «done» with its line cut on a whole letter): written to events.hex for the watch's JavaScript to read
- * (proto_test.mjs).
+ * (proto_test.mjs). And a note made ready for the recognizer: cleaned (rumble out, loudness evened, peaks below full scale)
+ * and split into phrases at its pauses (a recognizer stops at the first pause), none longer than 12 s.
  * usage: VoiceNoteTest OUT_DIR
  */
 public class VoiceNoteTest {
@@ -38,8 +40,106 @@ public class VoiceNoteTest {
         notes();
         ogg();
         events(a.length > 0 ? a[0] : null);
+        phrases();
         System.out.println(bad == 0 ? "VOICE NOTES OK" : bad + " FAILED");
         if (bad > 0) System.exit(1);
+    }
+
+    static final int R = 16000;
+
+    /** Something like speech: noise in syllables (4–5 a second) at this loudness, for so many seconds; or quiet. */
+    static void say(List<Float> out, Random r, double secs, double amp) {
+        int n = (int) (secs * R);
+        for (int i = 0; i < n; i++) {
+            double t = i / (double) R;
+            double syll = Math.max(0, Math.sin(2 * Math.PI * 4.5 * t)); // 4.5 syllables a second, a short gap between
+            double v = amp * syll * (r.nextGaussian() * 0.5 + 0.5 * Math.sin(2 * Math.PI * 220 * t));
+            out.add((float) (v + 0.001 * r.nextGaussian()));
+        }
+    }
+
+    static void quiet(List<Float> out, Random r, double secs) {
+        say(out, r, secs, 0);
+    }
+
+    static float[] arr(List<Float> l) {
+        float[] a = new float[l.size()];
+        for (int i = 0; i < a.length; i++) a[i] = l.get(i);
+        return a;
+    }
+
+    static String spans(List<int[]> p) {
+        StringBuilder b = new StringBuilder();
+        for (int[] s : p) b.append(String.format(java.util.Locale.ROOT, " %.2f–%.2f", s[0] / (double) R, s[1] / (double) R));
+        return b.toString().trim();
+    }
+
+    static void phrases() {
+        Random r = new Random(17);
+        // two phrases with a second between, short pauses inside: two phrases, where they are
+        List<Float> l = new ArrayList<Float>();
+        quiet(l, r, 0.6);
+        say(l, r, 1.2, 0.2);
+        quiet(l, r, 0.3);
+        say(l, r, 0.8, 0.2);
+        quiet(l, r, 1.0);
+        say(l, r, 1.5, 0.2);
+        quiet(l, r, 0.5);
+        List<int[]> p = Utterances.phrases(arr(l), R);
+        ok(p.size() == 2 && Math.abs(p.get(0)[0] - 0.6 * R) < 0.3 * R && p.get(0)[1] > 2.9 * R && p.get(0)[1] < 3.3 * R
+                && Math.abs(p.get(1)[0] - 3.9 * R) < 0.3 * R && p.get(1)[1] > 5.3 * R,
+                "two phrases a second apart (a short pause inside the first does not split it): " + spans(p));
+        // twenty seconds without a pause: cut, none longer than 12 s
+        l.clear();
+        say(l, r, 20, 0.2);
+        p = Utterances.phrases(arr(l), R);
+        boolean shortEnough = p.size() >= 2;
+        for (int[] s : p) shortEnough &= s[1] - s[0] <= (Utterances.MAX_MS + 600) * R / 1000;
+        ok(shortEnough && p.get(0)[0] == 0 && p.get(p.size() - 1)[1] >= 19.9 * R, "20 s without a pause: cut in " + p.size() + " (" + spans(p) + ")");
+        // a click, and silence: nothing
+        l.clear();
+        quiet(l, r, 1);
+        say(l, r, 0.06, 0.5);
+        quiet(l, r, 1);
+        ok(Utterances.phrases(arr(l), R).isEmpty(), "a click alone is not a phrase");
+        l.clear();
+        quiet(l, r, 2);
+        ok(Utterances.phrases(arr(l), R).isEmpty(), "silence: nothing");
+
+        // cleaned: a quiet voice made louder, a loud one kept below full scale, an offset gone
+        l.clear();
+        say(l, r, 2, 0.02);
+        float[] q = Utterances.clean(arr(l), R);
+        ok(loud(q) > 0.07 && loud(q) < 0.13, String.format(java.util.Locale.ROOT, "a quiet voice evened out (%.3f → %.3f)", loud(arr(l)), loud(q)));
+        l.clear();
+        say(l, r, 2, 1.5);
+        float[] big = arr(l);
+        for (int i = 0; i < big.length; i++) big[i] += 0.2f;
+        q = Utterances.clean(big, R);
+        float peak = 0;
+        double mean = 0;
+        for (float v : q) {
+            peak = Math.max(peak, Math.abs(v));
+            mean += v;
+        }
+        mean /= q.length;
+        ok(peak <= 0.951 && Math.abs(mean) < 0.01, String.format(java.util.Locale.ROOT, "a loud voice with an offset: peaks %.2f, mean %.4f", peak, mean));
+    }
+
+    /** RMS of the loudest third of 20 ms frames. */
+    static double loud(float[] x) {
+        int f = R / 50;
+        double[] fr = new double[x.length / f];
+        for (int k = 0; k < fr.length; k++) {
+            double s = 0;
+            for (int i = k * f; i < (k + 1) * f; i++) s += x[i] * x[i];
+            fr[k] = Math.sqrt(s / f);
+        }
+        Arrays.sort(fr);
+        double s = 0;
+        int from = fr.length * 2 / 3;
+        for (int i = from; i < fr.length; i++) s += fr[i] * fr[i];
+        return Math.sqrt(s / (fr.length - from));
     }
 
     static void notes() {

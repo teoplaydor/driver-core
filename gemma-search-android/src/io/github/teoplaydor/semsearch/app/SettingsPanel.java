@@ -59,8 +59,8 @@ final class SettingsPanel extends FrameLayout implements Engine.Listener {
     private Toggle stretchToggle, quietToggle;
     private TextView stretchAccess, stretchAfter;
     private View quietRow, afterRow;
-    private Toggle wristToggle, wristVoice;
-    private View wristVoiceRow;
+    private Toggle wristToggle, wristVoice, wristOnline;
+    private View wristVoiceRow, wristOnlineRow;
     private TextView wristState, wristHand, wristDir, wristTurn, wristForget;
     private final Runnable wristShow = new Runnable() {
         @Override
@@ -1184,6 +1184,15 @@ final class SettingsPanel extends FrameLayout implements Engine.Listener {
         });
         wristVoiceRow = toggleRow(card, "Заметки голосом с часов", "поднесите часы ко рту и говорите; опустите руку — заметка готова",
                 wristVoice);
+        wristOnline = new Toggle(c, WristLink.voiceOnline(c));
+        wristOnline.setListener(new Toggle.Listener() {
+            @Override
+            public void changed(boolean on) {
+                WristLink.setVoiceOnline(c, on);
+            }
+        });
+        wristOnlineRow = toggleRow(card, "Распознавать заметки через сеть", "точнее; звук уходит в распознавание телефона "
+                + "(обычно Google). Выключено — на самом телефоне, если он умеет", wristOnline);
         wristForget = quiet(card, "Забыть часы", Ui.TEXT2, new Runnable() {
             @Override
             public void run() {
@@ -1215,6 +1224,7 @@ final class SettingsPanel extends FrameLayout implements Engine.Listener {
         rowOf(wristTurn).setVisibility(on ? VISIBLE : GONE);
         if (wristVoice != null && wristVoice.isOn() != WristLink.voiceNotes(c)) wristVoice.setOn(WristLink.voiceNotes(c), false);
         if (wristVoiceRow != null) wristVoiceRow.setVisibility(on ? VISIBLE : GONE);
+        if (wristOnlineRow != null) wristOnlineRow.setVisibility(on && WristLink.voiceNotes(c) ? VISIBLE : GONE);
         wristForget.setVisibility(name.isEmpty() ? GONE : VISIBLE);
         if (!name.isEmpty()) wristForget.setText("Забыть часы (" + name + ")");
     }

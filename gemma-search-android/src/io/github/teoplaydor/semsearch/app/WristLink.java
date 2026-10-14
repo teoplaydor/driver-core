@@ -55,7 +55,7 @@ import io.github.teoplaydor.semsearch.core.WristGesture;
 public final class WristLink {
     static final String PREF_ON = "wrist_on", PREF_LEFT = "wrist_left_hand", PREF_TURN = "wrist_turn", PREF_AXIS = "wrist_axis",
             PREF_WATCH = "wrist_watch", PREF_WATCH_NAME = "wrist_watch_name", PREF_LAST = "wrist_last", PREF_LAST_AT = "wrist_last_at",
-            PREF_VOICE = "wrist_voice";
+            PREF_VOICE = "wrist_voice", PREF_VOICE_ONLINE = "wrist_voice_online";
     static final UUID SERVICE = UUID.fromString(WristGesture.SERVICE), SAMPLES = UUID.fromString(WristGesture.SAMPLES),
             EVENTS = UUID.fromString(WristGesture.EVENTS);
     /** The standard «Client Characteristic Configuration» descriptor (notifications on/off). */
@@ -86,6 +86,18 @@ public final class WristLink {
     public static void setVoiceNotes(Context c, boolean on) {
         prefs(c).edit().putBoolean(PREF_VOICE, on).apply();
         reconfigure(c);
+    }
+
+    /**
+     * Voice notes recognized by the phone's usual (network) recognizer — more exact, the sound goes out — rather than on
+     * the phone itself. Off unless switched on.
+     */
+    public static boolean voiceOnline(Context c) {
+        return prefs(c).getBoolean(PREF_VOICE_ONLINE, false);
+    }
+
+    public static void setVoiceOnline(Context c, boolean on) {
+        prefs(c).edit().putBoolean(PREF_VOICE_ONLINE, on).apply();
     }
 
     /** How far to turn, degrees: 30, 40 or 55. */

@@ -260,6 +260,11 @@ export function createVoice(id, format, rate) {
  * note, otherwise null; busy() — between «held» and «taken away» (no turns of the wrist then). Which way along the
  * watch's x the fingers are: +1 on the left hand (the crown toward the hand), −1 on the right — setHand(); and then
  * learnt from where the arm hangs most of the time (the fingers down): fingers(), learnt(). Any units.
+ *
+ * Or taught: teach(t), then the watch held to the mouth as one talks into it and kept still a second — 'taught' (or
+ * 'teach-failed' after 15 s). With taught poses (up to 3, kept in poses), «at the mouth» is the watch within 28° of
+ * one of them (taken away — farther than 45°), whatever the hand, and it starts sooner (0.45 s); each note said and
+ * saved moves its pose a little toward how the watch was held (nudge).
  */
 export function createTalk() {
   const RAISED = 0.55 // «up» along the fingers at least this (cos): the forearm raised 35° above level or more
@@ -278,6 +283,16 @@ export function createTalk() {
   const LEARN_S = 20
   const LEARN_SHARE = 0.75
   const KEEP_S = 600
+  const CONE_START = 28 // a taught pose: the watch within this of it (degrees)…
+  const CONE_STOP = 45 // …taken away: farther than this
+  const CONE_LOW = 55 // «down»: farther than this from every taught pose
+  const HOLD_TAUGHT_MS = 450
+  const TEACH_MOVE = 30 // teaching: moved this far from where the watch was when asked (to the mouth, from the eyes)…
+  const TEACH_STILL_MS = 1000 // …and held still so long
+  const TEACH_MS = 15000
+  const TEACH_SAME = 15 // a pose this near one already taught replaces it (their mean)
+  const MAX_POSES = 3
+  const NUDGE = 0.2
   let side = 1
   let learnt = false
   let down = [0, 0] // seconds the arm hung with the fingers along +x / along −x
@@ -292,6 +307,36 @@ export function createTalk() {
   let awaySince = NaN
   let restAt = 0
   let lowAt = -Infinity
+  let poses = []
+  let teaching = null
+  let talkSum = [0, 0, 0]
+  let talkN = 0
+  const unit = (v) => {
+    const m = Math.sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]) || 1
+    return [v[0] / m, v[1] / m, v[2] / m]
+  }
+  const angle = (a, b) => (Math.acos(Math.max(-1, Math.min(1, a[0] * b[0] + a[1] * b[1] + a[2] * b[2]))) * 180) / Math.PI
+  /** How far (degrees) the watch is from the nearest taught pose, and which. */
+  function nearest(u) {
+    let best = 180
+    let at = -1
+    for (let i = 0; i < poses.length; i++) {
+      const d = angle(u, poses[i])
+      if (d < best) {
+        best = d
+        at = i
+      }
+    }
+    return { d: best, i: at }
+  }
+  function addPose(p) {
+    const n = nearest(p)
+    if (n.i >= 0 && n.d <= TEACH_SAME) poses[n.i] = unit([poses[n.i][0] + p[0], poses[n.i][1] + p[1], poses[n.i][2] + p[2]])
+    else {
+      poses.push(p)
+      if (poses.length > MAX_POSES) poses.shift()
+    }
+  }
   function learn(ux, dt) {
     // the arm hanging (x within 25° of plumb), not while held to the mouth
     if (Math.abs(ux) < 0.9 || dt <= 0 || state === 1 || state === 2) return
@@ -336,6 +381,45 @@ export function createTalk() {
     busy() {
       return state === 1 || state === 2
     },
+    /** Teach how the watch is held to the mouth: the next still pose away from where it is now (t — now). */
+    teach(t) {
+      teaching = { at: t, u0: null, since: 0, sum: [0, 0, 0] }
+      if (state === 1 || state === 2) {
+        state = 3
+        restAt = t
+      }
+    },
+    teaching() {
+      return teaching !== null
+    },
+    /** The taught poses («up» in the watch's axes, unit vectors), to keep; and given back. */
+    get poses() {
+      return poses.map((p) => p.slice())
+    },
+    set poses(list) {
+      poses = []
+      if (!Array.isArray(list)) return
+      for (const p of list) {
+        if (Array.isArray(p) && p.length === 3 && p.every((v) => typeof v === 'number' && isFinite(v))) poses.push(unit(p))
+      }
+      poses = poses.slice(-MAX_POSES)
+    },
+    forget() {
+      poses = []
+    },
+    /** How the watch was held through the last note said (unit «up»; null — none). */
+    lastPose() {
+      return talkN > 0 ? unit(talkSum) : null
+    },
+    /** A note said there was saved: the nearest taught pose moved a little toward it. */
+    nudge(p) {
+      if (!p || !poses.length) return false
+      const n = nearest(p)
+      if (n.d > CONE_STOP) return false
+      const q = poses[n.i]
+      poses[n.i] = unit([q[0] * (1 - NUDGE) + p[0] * NUDGE, q[1] * (1 - NUDGE) + p[1] * NUDGE, q[2] * (1 - NUDGE) + p[2] * NUDGE])
+      return true
+    },
     talking() {
       return state === 2
     },
@@ -359,11 +443,42 @@ export function createTalk() {
       const m = Math.sqrt(sx * sx + sy * sy + sz * sz) || 1
       const ux = sx / m
       const uz = sz / m
+      const u = [ux, sy / m, uz]
       const steady = Math.abs(n - g) <= STEADY * g
       learn(ux, dt)
+      if (teaching) {
+        // teaching: away from where the watch was when asked, then still for a second — that is the pose
+        if (!teaching.u0) teaching.u0 = u
+        if (t - teaching.at > TEACH_MS) {
+          teaching = null
+          return 'teach-failed'
+        }
+        // (not the arm let down after the tap: the fingers pointing down is no way to talk into a watch)
+        if (angle(u, teaching.u0) >= TEACH_MOVE && steady && side * ux > -0.5) {
+          if (!teaching.since) {
+            teaching.since = t
+            teaching.sum = [0, 0, 0]
+          }
+          teaching.sum = [teaching.sum[0] + u[0], teaching.sum[1] + u[1], teaching.sum[2] + u[2]]
+          if (t - teaching.since >= TEACH_STILL_MS) {
+            addPose(unit(teaching.sum))
+            teaching = null
+            state = 3
+            restAt = t
+            return 'taught'
+          }
+        } else teaching.since = 0
+        return null
+      }
       const f = side * ux
-      if (f < AWAY_FINGERS) lowAt = t
-      const raised = f >= RAISED && f <= VERTICAL && Math.abs(uz) <= UPRIGHT
+      const near = poses.length ? nearest(u).d : 180
+      if (poses.length ? near > CONE_LOW : f < AWAY_FINGERS) lowAt = t
+      const raised = poses.length ? near <= CONE_START : f >= RAISED && f <= VERTICAL && Math.abs(uz) <= UPRIGHT
+      const hold = poses.length ? HOLD_TAUGHT_MS : HOLD_MS
+      if (state === 2) {
+        talkSum = [talkSum[0] + u[0], talkSum[1] + u[1], talkSum[2] + u[2]]
+        talkN++
+      }
       if (state === 0) {
         if (raised && steady && t - lowAt <= RAISE_MS) {
           state = 1
@@ -372,14 +487,16 @@ export function createTalk() {
       } else if (state === 1) {
         if (!raised) state = 0
         else if (!steady) since = t
-        else if (t - since >= HOLD_MS) {
+        else if (t - since >= hold) {
           state = 2
           startAt = t
           awaySince = NaN
+          talkSum = [0, 0, 0]
+          talkN = 0
           return 'start'
         }
       } else if (state === 2) {
-        const away = f < AWAY_FINGERS || Math.abs(uz) > AWAY_UPRIGHT
+        const away = poses.length ? near > CONE_STOP : f < AWAY_FINGERS || Math.abs(uz) > AWAY_UPRIGHT
         if (!away) awaySince = NaN
         else if (Number.isNaN(awaySince)) awaySince = t
         if ((!Number.isNaN(awaySince) && t - awaySince >= AWAY_MS) || t - startAt >= MAX_MS) {

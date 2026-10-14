@@ -207,14 +207,16 @@ async function vela() {
     '@system.vibrator': `export default { vibrate(o) { W.buzz.push(o.mode) } }`,
     '@system.brightness': `export default { setKeepScreenOn(o) { W.keep = o.keepScreenOn } }`,
     '@system.storage': `const m = new Map(); W.storage = m; export default { get(o) { o.success(m.get(o.key) || '') }, set(o) { m.set(o.key, o.value) } }`,
-    '@system.record': `const R = { start(o) { W.recording = o; W.recStarts = (W.recStarts || 0) + 1 },
+    '@system.record': `const R = { start(o) { W.recording = o; W.recStarts = (W.recStarts || 0) + 1; W.recAt = Date.now() },
         stop() { const o = W.recording; W.recording = null; W.recStops = (W.recStops || 0) + 1
           setImmediate(() => { R.onframerecorded && R.onframerecorded({ frameBuffer: new Uint8Array(W.lastFrame || [1]).buffer, isLastFrame: true })
             o && o.success && o.success({}); o && o.complete && o.complete() }) } }
       W.record = R; export default R`,
     '@system.file': `export default { readArrayBuffer(o) { o.fail && o.fail(null, 300) } }`,
     '@system.audio': `const A = { play() { W.audioPlays = (W.audioPlays || 0) + 1; W.audioOn = true; W.audioSrc = A.src; W.audioLoop = A.loop
-          setImmediate(() => A.onplay && A.onplay()) },
+          W.played = (W.played || []).concat([[A.src, Date.now()]])
+          setImmediate(() => A.onplay && A.onplay())
+          if (!A.loop) { const src = A.src; setTimeout(() => { if (A.src === src) { W.audioOn = false; A.onended && A.onended() } }, 300) } },
         pause() { W.audioOn = false; A.onpause && A.onpause() },
         stop() { W.audioOn = false; setImmediate(() => A.onstop && A.onstop()) } }
       W.audio = A; export default A`
@@ -497,6 +499,9 @@ async function vela() {
   }
   ok(W.recStarts === 1 && W.recording && W.recording.format === 'opus' && W.recording.sampleRate === 16000 && W.recording.frameSize > 0
     && W.buzz[buzz0] === 'short' && /говорите/.test(p5.note), 'vela (voice): held to the mouth — recording Opus 16 kHz in frames, a short buzz, «' + p5.note + '»')
+  const startBells = W.played.filter((p) => p[0] === '/common/start.mp3').pop()
+  ok(startBells && startBells[1] < W.recAt && W.recAt - startBells[1] <= 700 && W.played[W.played.length - 1][0] === '/common/quiet.mp3',
+    'vela (voice): the rising bells first, the recording as they end (' + (W.recAt - startBells[1]) + ' ms later), then the silence again')
   // the watch paused the silence meanwhile (the recorder took the sound): not started again over the recording
   const plays5 = W.audioPlays
   W.audio.pause()
@@ -508,7 +513,9 @@ async function vela() {
   for (let i = 0; i <= 20; i++) await step(MOUTH.map((m, j) => m + (HANG[j] - m) * Math.min(1, i / 10)))
   await advance(500)
   const vw = W.writes.slice(w5).filter((w) => w[1] === SAMPLES).map((w) => w[2])
-  ok(W.audioPlays > plays5 && W.audioOn, 'vela (voice): the recording over — the silence plays again')
+  const endBells = W.played.filter((p) => p[0] === '/common/end.mp3').pop()
+  ok(endBells && endBells[1] >= W.recAt && W.played[W.played.length - 1][0] === '/common/quiet.mp3' && W.audioOn,
+    'vela (voice): the recording over — the falling bells, then the silence plays again')
   ok(W.recStops === 1 && vw.some((w) => w.startsWith('50')) && vw[vw.length - 1].startsWith('52') && W.failed === 1,
     'vela (voice): lowered — the recording stopped, START, the bytes, END (' + vw.filter((w) => w.startsWith('51')).length + ' writes of bytes, one lost and written again)')
   ok(!vw.some((w) => w.startsWith('40')), 'vela (voice): no turns sent meanwhile')
@@ -534,9 +541,41 @@ async function vela() {
   for (let i = 0; i < 16; i++) await step(MOUTH)
   for (let i = 0; i <= 20; i++) await step(MOUTH.map((m, j) => m + (HANG[j] - m) * Math.min(1, i / 4)))
   await advance(2000)
-  ok(W.recStarts === 2 && W.recStops === 2 && W.writes.slice(n1).filter((w) => w[1] === SAMPLES).length === 0 && p5.voices.length === 0,
+  ok(W.recStarts === W.recStops && W.writes.slice(n1).filter((w) => w[1] === SAMPLES).length === 0 && p5.voices.length === 0,
     'vela (voice): held a moment and away — the recording dropped, nothing sent (' + W.recStarts + ' ' + W.recStops + ' '
     + W.writes.slice(n1).filter((w) => w[1] === SAMPLES).map((w) => w[2].slice(0, 6)).join(',') + ')')
+
+  // taught: tapped «Запомнить положение у рта» while looking at the watch, held it to the mouth the way this hand does
+  // (the forearm level across the chest — the usual rule does not take it) — remembered; then a note starts from there
+  const ACROSS = [0.1, 0.95, 0.3]
+  const LOOK = [0.3, 0.05, 0.95]
+  const r0 = W.recStarts
+  for (let i = 0; i < 40; i++) await step(HANG)
+  for (let i = 0; i <= 10; i++) await step(HANG.map((h, j) => h + (ACROSS[j] - h) * (i / 10)))
+  for (let i = 0; i < 30; i++) await step(ACROSS)
+  for (let i = 0; i <= 10; i++) await step(ACROSS.map((m, j) => m + (HANG[j] - m) * (i / 10)))
+  await advance(2000)
+  ok(W.recStarts === r0, 'vela (taught): not taught yet — held across the chest, nothing recorded')
+  for (let i = 0; i <= 10; i++) await step(HANG.map((h, j) => h + (LOOK[j] - h) * (i / 10)))
+  for (let i = 0; i < 10; i++) await step(LOOK)
+  p5.teachTalk()
+  ok(/замрите/.test(p5.note), 'vela (taught): «Запомнить» — «' + p5.note + '»')
+  for (let i = 0; i < 6; i++) await step(LOOK)
+  for (let i = 0; i <= 10; i++) await step(LOOK.map((h, j) => h + (ACROSS[j] - h) * (i / 10)))
+  for (let i = 0; i < 30; i++) await step(ACROSS)
+  const kept = JSON.parse(W.storage.get('wrist_poses') || '[]')
+  ok(p5.poses === 1 && kept.length === 1 && W.buzz[W.buzz.length - 1] === 'long' && /запомнил/.test(p5.note),
+    'vela (taught): remembered (' + kept[0] + ') — a long buzz, «' + p5.note + '»')
+  for (let i = 0; i <= 10; i++) await step(ACROSS.map((m, j) => m + (HANG[j] - m) * (i / 10)))
+  for (let i = 0; i < 40; i++) await step(HANG)
+  for (let i = 0; i <= 10; i++) await step(HANG.map((h, j) => h + (ACROSS[j] - h) * (i / 10)))
+  for (let i = 0; i < 40; i++) await step(ACROSS)
+  ok(W.recStarts === r0 + 1 && W.recording, 'vela (taught): raised to the taught pose — recording')
+  for (let i = 0; i <= 20; i++) await step(ACROSS.map((m, j) => m + (HANG[j] - m) * Math.min(1, i / 10)))
+  await advance(2000)
+  ok(!W.recording && W.recStops === W.recStarts, 'vela (taught): lowered — stopped')
+  p5.forgetTalk()
+  ok(p5.poses === 0 && W.storage.get('wrist_poses') === '[]', 'vela (taught): «Забыть положения» — forgotten')
   p5.stop()
 
   // in the background: the page left, the link goes on — the turns are still found and sent; the silence stopped by the

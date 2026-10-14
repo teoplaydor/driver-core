@@ -241,5 +241,50 @@ tk2.setHand(false)
 tk2.down = kept
 ok(tk2.learnt() && tk2.fingers() === 1, 'what was learnt kept and given back: ' + kept.map((s) => Math.round(s)).join(' / ') + ' s')
 
+// taught: a way of holding the watch to the mouth the usual rule does not take (the forearm level across the chest,
+// the dial to the face) — taught once, then it starts (sooner) and stops there; the usual pose no longer does
+POSE.across = [0.1, 0.95, 0.3]
+tk = P.createTalk()
+tk.setHand(true)
+r = talkRun(tk, [['hanging', 3], ['across', 3, 0.5], ['hanging', 3, 0.5]])
+ok(r.said.length === 0, 'not taught: the forearm level across the chest is not «at the mouth»')
+// the button tapped while looking at the watch
+r = talkRun(tk, [['looking', 1, 0.5]], r.t)
+tk.teach(r.t)
+r = talkRun(tk, [['looking', 0.5], ['across', 2.5, 0.5], ['hanging', 2, 0.5]], r.t)
+ok(r.said.length === 1 && r.said[0][0] === 'taught' && tk.poses.length === 1 && !tk.teaching(),
+  'taught: looked at the watch, held it to the mouth a second — «taught» (' + tk.poses[0].map((v) => v.toFixed(2)).join(', ') + ')')
+r = talkRun(tk, [['hanging', 2], ['across', 3, 0.5], ['hanging', 2, 0.5]], r.t)
+const taughtStart = r.said.length ? r.said[0][1] - (r.t - 5000) : NaN
+ok(r.said.length === 2 && r.said[0][0] === 'start' && r.said[1][0] === 'stop' && taughtStart < 1050,
+  'the taught pose: «start» (' + (taughtStart / 1000).toFixed(2) + ' s after the hand began to rise), «stop»')
+r = talkRun(tk, [['hanging', 2], ['mouth', 3, 0.5], ['hanging', 2, 0.5], ['looking', 3, 0.5], ['hanging', 2, 0.5]], r.t)
+ok(r.said.length === 0, 'taught: the other ways of holding it (and looking at it) — nothing')
+// what was taught kept and given back; a saved note moves its pose a little toward how it was held
+const keptPoses = tk.poses
+const tk3 = P.createTalk()
+tk3.poses = JSON.parse(JSON.stringify(keptPoses))
+const near = [0.2, 0.92, 0.33]
+const before = keptPoses[0]
+tk3.nudge(near)
+const after = tk3.poses[0]
+const ang = (a, b) => Math.acos(Math.min(1, a[0] * b[0] + a[1] * b[1] + a[2] * b[2])) * 180 / Math.PI
+const nb = (() => { const m = Math.hypot(...near); return near.map((v) => v / m) })()
+ok(tk3.poses.length === 1 && ang(after, nb) < ang(before, nb) && !tk3.nudge([-1, 0, 0]),
+  'kept and given back; a saved note moves the pose toward it, a far one does not')
+// teaching that never gets a still pose away from the eyes: given up after 15 s
+const tk4 = P.createTalk()
+tk4.teach(0)
+r = talkRun(tk4, [['looking', 16]])
+ok(r.said.length === 1 && r.said[0][0] === 'teach-failed' && tk4.poses.length === 0, 'teaching without a pose held to the mouth: given up after 15 s')
+const tk5 = P.createTalk()
+tk5.setHand(true)
+talkRun(tk5, [['looking', 1]])
+tk5.teach(1000)
+r = talkRun(tk5, [['looking', 0.5], ['hanging', 4, 0.5]], 1000)
+ok(r.said.length === 0 && tk5.poses.length === 0, 'teaching: the arm let down after the tap is not taken for the pose')
+tk.forget()
+ok(tk.poses.length === 0, 'forgotten')
+
 console.log(bad === 0 ? 'WATCH PROTOCOL JS OK' : bad + ' FAILED')
 if (bad) process.exit(1)

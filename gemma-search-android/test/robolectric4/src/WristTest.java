@@ -6,6 +6,7 @@ import android.app.NotificationManager;
 import android.bluetooth.BluetoothGattServerCallback;
 import android.content.Intent;
 import android.os.Bundle;
+import android.speech.RecognizerIntent;
 import android.speech.SpeechRecognizer;
 import android.bluetooth.BluetoothAdapter;
 import android.bluetooth.BluetoothDevice;
@@ -180,6 +181,29 @@ public class WristTest {
         Robo.waitFor("silence told", () -> server.lastMessage != null && server.lastMessage[0] == WristGesture.EV_VOICE_DONE
                 && server.lastMessage[1] == 6);
         assertEquals("silent", WristGesture.VOICE_SILENT, server.lastMessage[2]);
+
+        // two phrases with a pause between: each heard alone (a recognizer stops at a pause), the words put together;
+        // the recognizer not to end a phrase at a breath, in Russian
+        float[] two = new float[16000 * 4];
+        for (int i = 0; i < two.length; i++) {
+            double t = i / 16000.0;
+            boolean on = (t > 0.3 && t < 1.3) || (t > 2.5 && t < 3.5);
+            two[i] = on ? (float) (0.3 * Math.sin(2 * Math.PI * 200 * t)) : 0f;
+        }
+        final SpeechRecognizer before = ShadowSpeechRecognizer.getLatestSpeechRecognizer();
+        sendNote(sg, watch, samples, 7, WristGesture.CODEC_WAV, Pcm.wav16(two, 16000), 400, -1, true);
+        Robo.waitFor("the first phrase", () -> ShadowSpeechRecognizer.getLatestSpeechRecognizer() != before);
+        final SpeechRecognizer first = ShadowSpeechRecognizer.getLatestSpeechRecognizer();
+        Intent i1 = Shadows.shadowOf(first).getLastRecognizerIntent();
+        assertEquals(5000L, i1.getLongExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 0));
+        assertTrue(i1.getStringExtra(RecognizerIntent.EXTRA_LANGUAGE), i1.getStringExtra(RecognizerIntent.EXTRA_LANGUAGE).startsWith("ru"));
+        Shadows.shadowOf(first).triggerOnResults(said("Купить молоко"));
+        Robo.waitFor("the second phrase", () -> ShadowSpeechRecognizer.getLatestSpeechRecognizer() != first);
+        Shadows.shadowOf(ShadowSpeechRecognizer.getLatestSpeechRecognizer()).triggerOnResults(said("и хлеб"));
+        Robo.waitFor("both told", () -> server.lastMessage != null && server.lastMessage[0] == WristGesture.EV_VOICE_DONE
+                && server.lastMessage[1] == 7);
+        String both = new String(server.lastMessage, 3, server.lastMessage.length - 3, StandardCharsets.UTF_8);
+        assertTrue(both, both.toLowerCase().contains("купить молоко и хлеб"));
     }
 
     @Test

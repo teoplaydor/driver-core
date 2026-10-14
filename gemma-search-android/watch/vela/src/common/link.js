@@ -18,6 +18,11 @@ import {
 const QUIET = '/common/quiet.mp3'
 const ALIVE_RETRY_MS = 2000
 
+/** A voice note's sounds: two bells up — speak now; down — done (made by tools/chimes.py); at most this long. */
+const CHIME_START = '/common/start.mp3'
+const CHIME_END = '/common/end.mp3'
+const CHIME_MS = 700
+
 /** How long a connection may take before it is let go and the phone looked for again. */
 const CONNECT_MS = 15000
 
@@ -34,11 +39,13 @@ const WRITE_MS = 150
 const VOICE_WRITE_MS = 60
 
 /**
- * A voice note as the S5 records it: Opus, 16 kHz mono, ~2 KB a second (a minute is ~120 KB, a few seconds over
- * Bluetooth); its frames handed over as they are recorded, so most of it is on the phone by the time the hand is down.
+ * A voice note as the S5 records it: Opus, 16 kHz mono at 22 kbit/s (the top of the range the docs give for it — the
+ * clearer the consonants, the better the recognition), ~2.7 KB a second; its frames handed over as they are recorded
+ * (small ones: the last of a note is not left in the recorder), so most of it is on the phone by the time the hand is
+ * down.
  * If the watch takes no Opus: 8 kHz PCM, 16 KB a second — slow over Bluetooth, so at most 20 s.
  */
-const OPUS = { format: 'opus', sampleRate: 16000, numberOfChannels: 1, encodeBitRate: 16000, frameSize: 1024 }
+const OPUS = { format: 'opus', sampleRate: 16000, numberOfChannels: 1, encodeBitRate: 22000, frameSize: 512 }
 const PCM = { format: 'pcm', sampleRate: 8000, numberOfChannels: 1, encodeBitRate: 128000, frameSize: 2048 }
 const PCM_MAX_MS = 20000
 
@@ -91,7 +98,7 @@ function characteristic(uuid, value, props) {
  */
 export function createLink(sys) {
   const { ble, sensor, vibrator, brightness, storage, record, file, audio } = sys
-  const view = { on: false, state: 'выключено', diag: '', note: '', voiceOn: true, screenOn: false, bg: '' }
+  const view = { on: false, state: 'выключено', diag: '', note: '', voiceOn: true, screenOn: false, bg: '', poses: 0 }
   let onChange = null
   function changed() {
     if (onChange) onChange(view)
@@ -172,20 +179,31 @@ export function createLink(sys) {
         }, ALIVE_RETRY_MS)
       }
       audio.onplay = function () {
+        if (self.chiming) return
         self.audioPlaying = true
         self.aliveErrors = 0
         self.bg = 'работает и в фоне — можно выйти из приложения'
       }
       audio.onpause = function () {
+        if (self.chiming) return
         again('фон: звук приостановлен — включаю снова')
       }
       audio.onstop = function () {
+        if (self.chiming) return
         again('фон: звук остановлен — включаю снова')
       }
       audio.onended = function () {
+        if (self.chiming) {
+          self.chimed()
+          return
+        }
         again('')
       }
       audio.onerror = function () {
+        if (self.chiming) {
+          self.chimed()
+          return
+        }
         self.aliveErrors = (self.aliveErrors || 0) + 1
         if (self.aliveErrors >= 3) {
           self.audioPlaying = false
@@ -195,6 +213,45 @@ export function createLink(sys) {
         again('фон: ошибка звука — пробую снова')
       }
       this.play()
+    },
+
+    /**
+     * A short sound (a note starts, ends) through the one player there is — the background's — then the silence again
+     * and then(). Without a player, then() at once.
+     */
+    chime(src, then) {
+      if (!audio) {
+        if (then) then()
+        return
+      }
+      if (this.chiming) this.chimed()
+      const self = this
+      this.chiming = { then }
+      this.chimeTimer = setTimeout(() => self.chimed(), CHIME_MS)
+      try {
+        audio.loop = false
+        audio.src = src
+        audio.play()
+      } catch (e) {
+        this.chimed()
+      }
+    },
+
+    /** The chime over (ended, failed, or took too long): the silence again, then what waited for it. */
+    chimed() {
+      const c = this.chiming
+      if (!c) return
+      this.chiming = null
+      if (this.chimeTimer) clearTimeout(this.chimeTimer)
+      this.chimeTimer = 0
+      this.audioPlaying = false
+      if (this.alive) this.play()
+      else {
+        try {
+          audio.stop()
+        } catch (e) {}
+      }
+      if (c.then) c.then()
     },
 
     play() {
@@ -242,6 +299,20 @@ export function createLink(sys) {
       this.kept = false
       const self = this
       this.variant = 0
+      this.chiming = null
+      this.chimeTimer = 0
+      this.pending = null
+      storage.get({
+        key: 'wrist_poses',
+        success(v) {
+          // how this hand holds the watch to the mouth, taught (see createTalk)
+          try {
+            const d = JSON.parse(v)
+            if (Array.isArray(d)) self.talk.poses = d
+          } catch (e) {}
+          self.poses = self.talk.poses.length
+        }
+      })
       storage.get({
         key: 'wrist_screen',
         success(v) {
@@ -608,7 +679,7 @@ export function createLink(sys) {
       this.listen(false)
       this.queue = []
       this.writing = false
-      if (this.rec) this.stopNote(false)
+      if (this.rec || this.pending) this.stopNote(false)
       const g = this.gatt
       this.gatt = null
       if (g) {
@@ -648,7 +719,7 @@ export function createLink(sys) {
         if (e.voice !== this.voiceOn) {
           this.voiceOn = e.voice
           storage.set({ key: 'wrist_voice', value: e.voice ? '1' : '0' })
-          if (!e.voice && this.rec) this.stopNote(true)
+          if (!e.voice && (this.rec || this.pending)) this.stopNote(true)
         }
         if (this.voiceOn && !this.listening && this.linkedOk) this.listen(true)
         else if (!this.voiceOn && !this.playing) this.listen(false)
@@ -899,7 +970,7 @@ export function createLink(sys) {
 
     /** No turns sent while the music is paused or a note is being said. */
     mute() {
-      if (this.packer) this.packer.mute = !this.playing || this.talk.busy()
+      if (this.packer) this.packer.mute = !this.playing || this.talk.busy() || this.talk.teaching()
     },
 
     /** What the hand did (createTalk): held to the mouth — record; taken away — the note goes to the phone. */
@@ -907,6 +978,14 @@ export function createLink(sys) {
       if (what === 'start') this.startNote(now)
       else if (what === 'stop') this.stopNote(false)
       else if (what === 'cancel') this.stopNote(true)
+      else if (what === 'taught') {
+        this.savePoses()
+        vibrator.vibrate({ mode: 'long' })
+        this.chime(CHIME_END)
+        this.note = 'запомнил, как вы подносите часы ко рту (' + this.poses + ' из 3) — опустите руку'
+      } else if (what === 'teach-failed') {
+        this.note = 'не получилось: часы не замерли у рта на секунду — попробуйте ещё раз'
+      }
       if (this.rec && this.rec.opts === PCM && now - this.rec.at >= PCM_MAX_MS) this.stopNote(false)
       // where the arm hangs, kept now and then (which way the fingers are, see createTalk)
       if (now - (this.fingersSaved || 0) > 30000) {
@@ -915,12 +994,51 @@ export function createLink(sys) {
       }
     },
 
+    /**
+     * At the mouth: a short buzz and the rising bells — speak now; the recording starts as the bells end, so they are
+     * not in it.
+     */
     startNote(now) {
-      if (this.rec) return
+      if (this.rec || this.pending) return
       this.noteId = (this.noteId + 1) & 0xff
       vibrator.vibrate({ mode: 'short' })
       this.note = 'говорите… опустите руку — отправлю'
-      this.record(OPUS, now)
+      const pending = { at: now }
+      this.pending = pending
+      const self = this
+      this.chime(CHIME_START, function () {
+        if (self.pending !== pending) return // taken away before the bells ended
+        self.pending = null
+        self.record(OPUS, Date.now())
+      })
+    },
+
+    /** Teach how this hand holds the watch to the mouth (the page's button): the next still pose there. */
+    teachTalk() {
+      if (!this.voiceOn) {
+        this.note = 'заметки голосом выключены на телефоне'
+        return
+      }
+      if (!this.listening) {
+        this.note = 'сначала подключитесь к телефону — датчик включается с ним'
+        return
+      }
+      this.talk.teach(Date.now())
+      vibrator.vibrate({ mode: 'short' })
+      this.note = 'поднесите часы ко рту, как будто говорите, и замрите на секунду'
+    },
+
+    /** Forget the taught poses: «at the mouth» by the usual rule again. */
+    forgetTalk() {
+      this.talk.forget()
+      this.savePoses()
+      this.note = 'положения забыты — снова по общему правилу'
+    },
+
+    savePoses() {
+      const p = this.talk.poses
+      this.poses = p.length
+      storage.set({ key: 'wrist_poses', value: JSON.stringify(p.map((v) => v.map((c) => Math.round(c * 1000) / 1000))) })
     },
 
     /** Recording in one format; Opus not taken (202 — wrong parameters) — PCM. */
@@ -971,8 +1089,16 @@ export function createLink(sys) {
 
     /** Taken away from the mouth (cancel: too soon, or voice notes switched off): the recording stops. */
     stopNote(cancel) {
+      if (!this.rec && this.pending) {
+        // taken away while the bells still rang: no note
+        this.pending = null
+        this.note = ''
+        this.talk.done(Date.now())
+        return
+      }
       const rec = this.rec
       if (!rec || rec.stopping) return
+      rec.v.pose = this.talk.lastPose()
       rec.stopping = true
       rec.cancel = cancel
       rec.ms = Date.now() - rec.at
@@ -1018,12 +1144,13 @@ export function createLink(sys) {
       rec.v.endAt = 0
       this.note = 'отправляю заметку…'
       this.pump()
-      this.resumeAlive()
+      // the falling bells: the recording is over (played now, so they are not in it)
+      this.chime(CHIME_END)
     },
 
     /** After a recording: the background's sound again, if the recorder stopped it. */
     resumeAlive() {
-      if (this.alive && !this.audioPlaying && !this.aliveTimer && audio) this.play()
+      if (this.alive && !this.audioPlaying && !this.aliveTimer && !this.chiming && audio) this.play()
     },
 
     dropVoice(v) {
@@ -1068,8 +1195,11 @@ export function createLink(sys) {
       const v = this.voices[0]
       if (!v || v.id !== e.id) return
       this.dropVoice(v)
-      if (e.result === VOICE_SAVED || e.result === VOICE_KEPT || e.result === VOICE_ANSWER) vibrator.vibrate({ mode: 'long' })
-      else vibrator.vibrate({ mode: 'short' })
+      if (e.result === VOICE_SAVED || e.result === VOICE_KEPT || e.result === VOICE_ANSWER) {
+        vibrator.vibrate({ mode: 'long' })
+        // said there and understood: the taught pose moves a little toward how the watch was held
+        if (e.result !== VOICE_KEPT && this.talk.nudge(v.pose)) this.savePoses()
+      } else vibrator.vibrate({ mode: 'short' })
       this.note = e.line || (e.result === VOICE_SILENT ? 'ничего не расслышал' : e.result === VOICE_SAVED ? 'заметка сохранена' : 'не вышло')
       this.pump()
     }

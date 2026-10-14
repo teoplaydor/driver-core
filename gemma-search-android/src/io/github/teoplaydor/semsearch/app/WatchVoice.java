@@ -23,6 +23,7 @@ import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.util.ArrayList;
 import java.util.Calendar;
+import java.util.List;
 import java.util.Locale;
 import java.util.TimeZone;
 import java.util.concurrent.ExecutorService;
@@ -32,6 +33,7 @@ import io.github.teoplaydor.semsearch.R;
 import io.github.teoplaydor.semsearch.core.OggOpus;
 import io.github.teoplaydor.semsearch.core.Pcm;
 import io.github.teoplaydor.semsearch.core.Spoken;
+import io.github.teoplaydor.semsearch.core.Utterances;
 import io.github.teoplaydor.semsearch.core.WristGesture;
 
 /**
@@ -82,13 +84,21 @@ final class WatchVoice {
                     finish(app, done, WristGesture.VOICE_SILENT, "Тишина — ничего не сохранено", null);
                     return;
                 }
-                final byte[] wav = Pcm.wav16(x, Pcm.RATE);
-                final byte[] pcm16 = pcm16(x, Pcm.RATE / 2); // and half a second of quiet: the speech has ended
+                // cleaned (rumble out, loudness evened) and split at its pauses: a recognizer stops at the first pause,
+                // so each phrase is heard alone and the words put together
+                final float[] y = Utterances.clean(x, Pcm.RATE);
+                final List<int[]> phrases = Utterances.phrases(y, Pcm.RATE);
+                final byte[] wav = Pcm.wav16(y, Pcm.RATE);
                 final float seconds = x.length / (float) Pcm.RATE;
+                if (phrases.isEmpty()) {
+                    finish(app, done, WristGesture.VOICE_SILENT, "Слов не расслышал — ничего не сохранено", null);
+                    return;
+                }
+                final boolean local = !WristLink.voiceOnline(app) && onDeviceAvailable(app);
                 MAIN.post(new Runnable() {
                     @Override
                     public void run() {
-                        recognize(app, pcm16, seconds, onDeviceAvailable(app), false, new Words() {
+                        recognizeAll(app, y, phrases, 0, new StringBuilder(), 0, local, new Words() {
                             @Override
                             public void heard(String words, int error) {
                                 made(app, words, error, wav, seconds, done);
@@ -265,18 +275,59 @@ final class WatchVoice {
         return best;
     }
 
-    /** 16-bit samples (little-endian bytes), and so much quiet after. */
-    static byte[] pcm16(float[] x, int quiet) {
-        byte[] b = new byte[2 * (x.length + quiet)];
-        for (int i = 0; i < x.length; i++) {
+    /** Samples from..to as 16-bit (little-endian bytes), with so much quiet before and after. */
+    static byte[] pcm16(float[] x, int from, int to, int lead, int tail) {
+        byte[] b = new byte[2 * (lead + (to - from) + tail)];
+        for (int i = from; i < to; i++) {
             int v = Math.round(Math.max(-1f, Math.min(1f, x[i])) * 32767f);
-            b[2 * i] = (byte) v;
-            b[2 * i + 1] = (byte) (v >> 8);
+            int o = 2 * (lead + i - from);
+            b[o] = (byte) v;
+            b[o + 1] = (byte) (v >> 8);
         }
         return b;
     }
 
     // ------------------------------------------------------------------ the words
+
+    /** Lead-in and tail of quiet around a phrase: a recognizer misses a word that starts its sound, and waits for an end. */
+    static final int LEAD = Pcm.RATE * 3 / 10, TAIL = Pcm.RATE * 7 / 10;
+
+    /**
+     * The phrases one after another, their words put together. A phrase with no words is passed over; the error kept
+     * is the first one, told when no phrase gave words (no recognizer at all — at once).
+     */
+    static void recognizeAll(final Context c, final float[] y, final List<int[]> phrases, final int i, final StringBuilder text,
+                             final int firstError, final boolean local, final Words got) {
+        if (i >= phrases.size()) {
+            String all = text.toString().trim();
+            got.heard(all.isEmpty() ? null : all, all.isEmpty() ? firstError : 0);
+            return;
+        }
+        int[] p = phrases.get(i);
+        byte[] pcm = pcm16(y, p[0], p[1], LEAD, TAIL);
+        float seconds = (p[1] - p[0] + LEAD + TAIL) / (float) Pcm.RATE;
+        recognize(c, pcm, seconds, local, false, new Words() {
+            @Override
+            public void heard(String words, int error) {
+                if (words != null && !words.trim().isEmpty()) {
+                    if (text.length() > 0) text.append(' ');
+                    text.append(words.trim());
+                } else if (i == 0 && error != SpeechRecognizer.ERROR_NO_MATCH && error != SpeechRecognizer.ERROR_SPEECH_TIMEOUT
+                        && (error == SpeechRecognizer.ERROR_CLIENT || error == SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS)) {
+                    // no recognizer here: the rest would fail the same way
+                    got.heard(null, error);
+                    return;
+                }
+                recognizeAll(c, y, phrases, i + 1, text, firstError != 0 ? firstError : error, local, got);
+            }
+        });
+    }
+
+    /** The language the notes are said in: the phone's if Russian, else Russian (the notes are read in Russian). */
+    static String language() {
+        Locale l = Locale.getDefault();
+        return "ru".equals(l.getLanguage()) ? l.toLanguageTag() : "ru-RU";
+    }
 
     interface Words {
         /** What was said (null: nothing), and the recognizer's error (0: none). */
@@ -406,10 +457,15 @@ final class WatchVoice {
         });
         Intent i = new Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH)
                 .putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
-                .putExtra(RecognizerIntent.EXTRA_LANGUAGE, Locale.getDefault().toLanguageTag())
+                .putExtra(RecognizerIntent.EXTRA_LANGUAGE, language())
+                .putExtra(RecognizerIntent.EXTRA_LANGUAGE_PREFERENCE, language())
                 .putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
-                .putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, true)
+                .putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, !WristLink.voiceOnline(c))
                 .putExtra(RecognizerIntent.EXTRA_CALLING_PACKAGE, c.getPackageName())
+                // the whole phrase is there: not to be ended at a breath inside it
+                .putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 5000L)
+                .putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, 5000L)
+                .putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_MINIMUM_LENGTH_MILLIS, (long) Math.round(seconds * 1000))
                 .putExtra(VoiceTape.EXTRA_SOURCE, pipe[0])
                 .putExtra(VoiceTape.EXTRA_CHANNELS, 1)
                 .putExtra(VoiceTape.EXTRA_ENCODING, android.media.AudioFormat.ENCODING_PCM_16BIT)
