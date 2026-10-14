@@ -32,6 +32,18 @@ public class WristJsTest {
         return out;
     }
 
+    /** Signal to error (dB) of decoded samples against 16-bit PCM bytes. */
+    static double snr(byte[] pcm, float[] dec) {
+        double s = 0, e = 0;
+        int n = Math.min(pcm.length / 2, dec.length);
+        for (int i = 0; i < n; i++) {
+            double x = (short) ((pcm[2 * i] & 0xff) | (pcm[2 * i + 1] << 8)) / 32768.0;
+            s += x * x;
+            e += (x - dec[i]) * (x - dec[i]);
+        }
+        return 10 * Math.log10(s / Math.max(e, 1e-12));
+    }
+
     static void ok(boolean c, String what) {
         if (!c) bad++;
         System.out.println((c ? "ok   " : "FAIL ") + what);
@@ -100,8 +112,17 @@ public class WristJsTest {
         VoiceNote vp = new VoiceNote();
         boolean whole = false;
         for (byte[] p : page) if (vp.packet(p) == VoiceNote.COMPLETE) whole = true;
-        ok(whole && Arrays.equals(vp.bytes(), frames) && vp.codec() == WristGesture.CODEC_RECORDED && vp.rate() == 16000,
-                "VOICE from the Vela page: the recorder's frames whole on the phone (" + frames.length + " bytes, Ogg as recorded)");
+        ok(whole && Arrays.equals(vp.bytes(), frames) && vp.codec() == WristGesture.CODEC_ADPCM && vp.rate() == 16000,
+                "VOICE from the Vela page: the recorder's PCM whole on the phone as ADPCM (" + frames.length + " bytes)");
+        float[] heard = io.github.teoplaydor.semsearch.core.Adpcm.decode(vp.bytes());
+        byte[] pcmPage = read(a[0] + "/vela_voice_pcm.hex").get(0);
+        ok(snr(pcmPage, heard) > 20, String.format(java.util.Locale.ROOT, "…decoded on the phone: the recorder's sound again (%.1f dB)",
+                snr(pcmPage, heard)));
+        // the watch's ADPCM encoder and the phone's decoder: the sound comes through
+        byte[] pcm = read(a[0] + "/adpcm_pcm.hex").get(0);
+        float[] dec = io.github.teoplaydor.semsearch.core.Adpcm.decode(read(a[0] + "/adpcm.hex").get(0));
+        ok(dec.length == pcm.length / 2 && snr(pcm, dec) > 20, String.format(java.util.Locale.ROOT,
+                "ADPCM: the watch's encoder, the phone's decoder — %d samples, %.1f dB signal to error", dec.length, snr(pcm, dec)));
         // (the protocol module alone, and the apps' pages themselves)
         for (String file : new String[]{"vela_turns", "zepp_turns", "vela_s5_turns", "vela_app", "vela_s5_app", "vela_hanging_app", "zepp_app"}) {
             List<byte[]> ps = read(a[0] + "/" + file + ".hex");

@@ -247,6 +247,11 @@ public class VoiceNoteTest {
         ok(o != null && o.channels == 1 && o.preSkip == 312 && Arrays.equals(o.head, head), "Ogg Opus: OpusHead read (1 channel, pre-skip 312)");
         ok(same, "Ogg Opus: the audio packets as they were — 255 bytes exactly, across segments, across pages; OpusTags left out");
         ok(OggOpus.read(Arrays.copyOf(file, file.length - 100)) != null, "a file cut short still gives what it has");
+        // a recorder's stream caught mid-way: junk before the first page, no OpusHead, bytes between pages
+        byte[] mid = cat(new byte[]{9, 9, 9, 9, 9}, p3, new byte[]{1, 2}, p4, p5);
+        OggOpus m = OggOpus.read(mid);
+        ok(m != null && m.packets.size() == audio.size() && Arrays.equals(m.packets.get(4), audio.get(4)) && m.channels == 1,
+                "a stream caught mid-way (junk first, no OpusHead, junk between pages): the packets all the same");
         ok(OggOpus.read("RIFF....WAVE".getBytes(StandardCharsets.US_ASCII)) == null && !OggOpus.looksLike(new byte[]{1, 2}),
                 "not Ogg: nothing");
 

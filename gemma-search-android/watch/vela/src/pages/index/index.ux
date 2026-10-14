@@ -10,6 +10,7 @@
     <input type="button" class="small" show="{{ voiceOn }}" value="Запомнить положение у рта" onclick="teach" />
     <text class="hint" show="{{ voiceOn && poses > 0 }}">{{ 'Запомнено положений: ' + poses }}</text>
     <input type="button" class="small" show="{{ voiceOn && poses > 0 }}" value="Забыть положения" onclick="forget" />
+    <input type="button" class="small" show="{{ voiceOn }}" value="{{ soundsOn ? 'Звуки заметки: вкл' : 'Звуки заметки: выкл' }}" onclick="sounds" />
     <input type="button" class="small" value="{{ screenOn ? 'Экран: не гаснет' : 'Экран: гаснет' }}" onclick="screen" />
   </div>
 </template>
@@ -28,7 +29,8 @@ export default {
     bg: '',
     voiceOn: true,
     screenOn: false,
-    poses: 0
+    poses: 0,
+    soundsOn: true
   },
 
   onInit() {
@@ -43,6 +45,7 @@ export default {
       self.voiceOn = v.voiceOn
       self.screenOn = v.screenOn
       self.poses = v.poses
+      self.soundsOn = v.soundsOn
     })
     this.link.visible(true)
   },
@@ -74,6 +77,11 @@ export default {
 
   forget() {
     this.link.forgetTalk()
+  },
+
+  /** The bells before and after a note: on or off. */
+  sounds() {
+    this.link.setSounds(!this.link.soundsOn)
   },
 
   /** Keep the screen on while this page is open (if the background does not work on this watch). */

@@ -277,8 +277,8 @@ ok(tk3.poses.length === 1 && ang(after, nb) < ang(before, nb) && !tk3.nudge([-1,
 // teaching that never gets a still pose away from the eyes: given up after 15 s
 const tk4 = P.createTalk()
 tk4.teach(0)
-r = talkRun(tk4, [['looking', 16]])
-ok(r.said.length === 1 && r.said[0][0] === 'teach-failed' && tk4.poses.length === 0, 'teaching without a pose held to the mouth: given up after 15 s')
+r = talkRun(tk4, [['looking', 10]])
+ok(r.said.length === 1 && r.said[0][0] === 'teach-unmoved' && tk4.poses.length === 0, 'teaching, the watch left where it was: given up after 9 s («unmoved»)')
 const tk5 = P.createTalk()
 tk5.setHand(true)
 talkRun(tk5, [['looking', 1]])
@@ -287,6 +287,46 @@ r = talkRun(tk5, [['looking', 0.5], ['hanging', 4, 0.5]], 1000)
 ok(r.said.length === 0 && tk5.poses.length === 0, 'teaching: the arm let down after the tap is not taken for the pose')
 tk.forget()
 ok(tk.poses.length === 0, 'forgotten')
+
+// taught on the right hand with the side unknown (the fingers along −x): the pose is taken all the same
+POSE.mouthRight = [-0.85, -0.35, 0.12]
+const tk6 = P.createTalk()
+tk6.setHand(true) // the setting wrong: left
+r = talkRun(tk6, [['looking', 1]])
+tk6.teach(r.t)
+r = talkRun(tk6, [['looking', 0.5], ['mouthRight', 3, 0.5]], r.t)
+ok(r.said.length === 1 && r.said[0][0] === 'taught', 'taught on the other hand than set — taken (whichever way the axes run)')
+
+// the recorder's PCM as IMA ADPCM: a quarter of the bytes, the same however the frames are cut (odd sizes too)
+const pcmN = 16000
+const pcmIn = new Uint8Array(2 * pcmN)
+for (let i = 0; i < pcmN; i++) {
+  const t = i / 16000
+  const v = Math.round(9000 * Math.sin(2 * Math.PI * (200 + 600 * t) * t) * (0.5 + 0.5 * Math.sin(2 * Math.PI * 3 * t)) + 300 * gauss())
+  pcmIn[2 * i] = v & 0xff
+  pcmIn[2 * i + 1] = (v >> 8) & 0xff
+}
+const whole = P.createAdpcm()
+const encAll = Buffer.concat([Buffer.from(whole.encode(pcmIn)), Buffer.from(whole.flush())])
+const cut = P.createAdpcm()
+const parts = []
+for (let o = 0; o < pcmIn.length;) {
+  const n = 1 + Math.floor(rnd() * 999)
+  parts.push(Buffer.from(cut.encode(pcmIn.subarray(o, Math.min(pcmIn.length, o + n)))))
+  o += n
+}
+parts.push(Buffer.from(cut.flush()))
+const encCut = Buffer.concat(parts)
+ok(encAll.length === pcmN / 2 && encCut.equals(encAll) && whole.peak > 0.25,
+  'ADPCM: ' + pcmIn.length + ' bytes → ' + encAll.length + ', the same cut in frames of odd sizes; peak ' + whole.peak.toFixed(2))
+fs.writeFileSync(path.join(out, 'adpcm_pcm.hex'), Buffer.from(pcmIn).toString('hex') + '\n')
+fs.writeFileSync(path.join(out, 'adpcm.hex'), encAll.toString('hex') + '\n')
+const va = P.createVoice(3, 'adpcm', 16000)
+va.add(pcmIn.subarray(0, 1001))
+va.add(pcmIn.subarray(1001))
+va.end(1000)
+ok(va.codec === P.CODEC_ADPCM && Buffer.from(va.bytes()).equals(encAll) && hex(va.next(200)) === hex(P.voiceStart(3, P.CODEC_ADPCM, 16000, 0)),
+  'a voice note from the recorder\'s PCM: START (ADPCM, 16 kHz), the same bytes')
 
 console.log(bad === 0 ? 'WATCH PROTOCOL JS OK' : bad + ' FAILED')
 if (bad) process.exit(1)

@@ -28,7 +28,8 @@ package io.github.teoplaydor.semsearch.core;
  *          [5]=seen by: 1 gravity, 2 the compass [6]=the forearm's slope at rest (cos between «up» and x, × 100, int8)
  *          [7]=how far the slope changed meanwhile (degrees, u8)
  *   VOICE  [0]=0x50 start: [1]=note id (u8) [2]=codec (1 — the recorder's own file, Ogg Opus or WAV, told by its
- *                          first bytes; 2 — PCM 16-bit; 3 — WAV; 4 — Opus packets, each after its length, u16)
+ *                          first bytes; 2 — PCM 16-bit; 3 — WAV; 4 — Opus packets, each after its length, u16;
+ *                          5 — IMA ADPCM of the recorder's PCM, see {@link Adpcm})
  *                          [3..4]=samples per second (u16) [5..8]=bytes (u32, 0 — not known yet)
  *          [0]=0x51 data:  [1]=note id [2..5]=offset (u32) then the bytes (as many as the link takes in one write)
  *          [0]=0x52 end:   [1]=note id [2..5]=bytes in all (u32) [6..9]=how long, ms (u32)
@@ -56,7 +57,7 @@ public final class WristGesture {
     public static final int KIND_HELLO = 0, KIND_ACCEL = 1, KIND_TURN = 2, KIND_SWING = 3, KIND_ROLL = 4, KIND_VOICE = 5,
             KIND_RAW = 6, KIND_DIAG = 7;
     public static final int VOICE_START = 0x50, VOICE_DATA = 0x51, VOICE_END = 0x52;
-    public static final int CODEC_RECORDED = 1, CODEC_PCM16 = 2, CODEC_WAV = 3, CODEC_OPUS_PACKETS = 4;
+    public static final int CODEC_RECORDED = 1, CODEC_PCM16 = 2, CODEC_WAV = 3, CODEC_OPUS_PACKETS = 4, CODEC_ADPCM = 5;
     public static final int EV_IGNORED = 0, EV_NEXT = 1, EV_PREVIOUS = 2, EV_LEARNED = 3, EV_PAUSE = 4, EV_STREAM = 5,
             EV_CONFIG = 6, EV_VOICE_FROM = 8, EV_VOICE_DONE = 9;
     /** EV_CONFIG's flags: the watch on the left hand, voice notes on, the sensor and the watch's doings to the log. */

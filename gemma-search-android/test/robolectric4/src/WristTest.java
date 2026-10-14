@@ -205,6 +205,65 @@ public class WristTest {
                 && server.lastMessage[1] == 7);
         String both = new String(server.lastMessage, 3, server.lastMessage.length - 3, StandardCharsets.UTF_8);
         assertTrue(both, both.toLowerCase().contains("купить молоко и хлеб"));
+
+        // what the watch now sends: its recorder's PCM as IMA ADPCM — decoded, heard
+        final SpeechRecognizer prev = ShadowSpeechRecognizer.getLatestSpeechRecognizer();
+        sendNote(sg, watch, samples, 8, WristGesture.CODEC_ADPCM, adpcm(x), 238, -1, true);
+        Robo.waitFor("ADPCM heard", () -> ShadowSpeechRecognizer.getLatestSpeechRecognizer() != prev);
+        Shadows.shadowOf(ShadowSpeechRecognizer.getLatestSpeechRecognizer()).triggerOnResults(said("Позвонить маме"));
+        Robo.waitFor("ADPCM told", () -> server.lastMessage != null && server.lastMessage[0] == WristGesture.EV_VOICE_DONE
+                && server.lastMessage[1] == 8);
+        assertEquals("ADPCM: saved", WristGesture.VOICE_SAVED, server.lastMessage[2]);
+
+        // bytes that are no sound the phone knows: «not readable», and the recording itself in the log to look at
+        byte[] junk = new byte[3000];
+        new java.util.Random(4).nextBytes(junk);
+        sendNote(sg, watch, samples, 9, WristGesture.CODEC_RECORDED, junk, 238, -1, true);
+        Robo.waitFor("junk told", () -> server.lastMessage != null && server.lastMessage[0] == WristGesture.EV_VOICE_DONE
+                && server.lastMessage[1] == 9);
+        assertEquals("not readable", WristGesture.VOICE_FAILED, server.lastMessage[2]);
+        WristLog.flush();
+        String log = new String(java.nio.file.Files.readAllBytes(WristLog.file(app).toPath()), StandardCharsets.UTF_8);
+        assertTrue("the recording in the log", log.contains(" VOICE-RAW " + android.util.Base64.encodeToString(junk, android.util.Base64.NO_WRAP)));
+    }
+
+    /** The watch's IMA ADPCM (createAdpcm in proto.js) of samples −1…1, for the tests. */
+    static byte[] adpcm(float[] x) {
+        int[] step = {7, 8, 9, 10, 11, 12, 13, 14, 16, 17, 19, 21, 23, 25, 28, 31, 34, 37, 41, 45, 50, 55, 60, 66, 73, 80, 88, 97, 107, 118, 130,
+                143, 157, 173, 190, 209, 230, 253, 279, 307, 337, 371, 408, 449, 494, 544, 598, 658, 724, 796, 876, 963, 1060, 1166, 1282, 1411,
+                1552, 1707, 1878, 2066, 2272, 2499, 2749, 3024, 3327, 3660, 4026, 4428, 4871, 5358, 5894, 6484, 7132, 7845, 8630, 9493, 10442,
+                11487, 12635, 13899, 15289, 16818, 18500, 20350, 22385, 24623, 27086, 29794, 32767};
+        int[] idx = {-1, -1, -1, -1, 2, 4, 6, 8};
+        byte[] out = new byte[(x.length + 1) / 2];
+        int pred = 0, index = 0;
+        for (int i = 0; i < x.length; i++) {
+            int sample = Math.round(x[i] * 32767), diff = sample - pred, st = step[index], c = 0;
+            if (diff < 0) {
+                c = 8;
+                diff = -diff;
+            }
+            int vp = st >> 3;
+            if (diff >= st) {
+                c |= 4;
+                diff -= st;
+                vp += st;
+            }
+            st >>= 1;
+            if (diff >= st) {
+                c |= 2;
+                diff -= st;
+                vp += st;
+            }
+            st >>= 1;
+            if (diff >= st) {
+                c |= 1;
+                vp += st;
+            }
+            pred = Math.max(-32768, Math.min(32767, (c & 8) != 0 ? pred - vp : pred + vp));
+            index = Math.max(0, Math.min(88, index + idx[c & 7]));
+            out[i / 2] |= (byte) ((i & 1) == 0 ? c : c << 4);
+        }
+        return out;
     }
 
     /**

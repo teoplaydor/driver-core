@@ -32,6 +32,7 @@ export const CODEC_RECORDED = 1
 export const CODEC_PCM16 = 2
 export const CODEC_WAV = 3
 export const CODEC_OPUS_PACKETS = 4
+export const CODEC_ADPCM = 5
 export const SOURCE_GRAVITY = 1
 export const SOURCE_COMPASS = 2
 /** HELLO versions: samples follow / the watch finds the turns and ROLL packets follow. */
@@ -226,6 +227,95 @@ export function parseEvent(v) {
   return e
 }
 
+const ADPCM_STEP = [7, 8, 9, 10, 11, 12, 13, 14, 16, 17, 19, 21, 23, 25, 28, 31, 34, 37, 41, 45, 50, 55, 60, 66, 73, 80, 88, 97,
+  107, 118, 130, 143, 157, 173, 190, 209, 230, 253, 279, 307, 337, 371, 408, 449, 494, 544, 598, 658, 724, 796, 876, 963, 1060,
+  1166, 1282, 1411, 1552, 1707, 1878, 2066, 2272, 2499, 2749, 3024, 3327, 3660, 4026, 4428, 4871, 5358, 5894, 6484, 7132, 7845,
+  8630, 9493, 10442, 11487, 12635, 13899, 15289, 16818, 18500, 20350, 22385, 24623, 27086, 29794, 32767]
+const ADPCM_INDEX = [-1, -1, -1, -1, 2, 4, 6, 8]
+
+/**
+ * IMA ADPCM (4 bits a sample, a quarter of 16-bit PCM — 8 KB a second at 16 kHz): the recorder's PCM made small enough
+ * for Bluetooth, in a form the phone surely reads. One stream for the whole note (the state goes on from frame to
+ * frame), two samples a byte, the first in the low half. encode(bytes of 16-bit PCM, little-endian) gives the bytes
+ * so far (an odd byte, an odd sample wait for the next frame); flush() the last; peak — the loudest sample (0…1).
+ */
+export function createAdpcm() {
+  let pred = 0
+  let index = 0
+  let odd = -1 // a byte of a sample cut by the frame
+  let half = -1 // a code waiting for its pair
+  let peak = 0
+  function code(s) {
+    let diff = s - pred
+    let step = ADPCM_STEP[index]
+    let c = 0
+    if (diff < 0) {
+      c = 8
+      diff = -diff
+    }
+    let vp = step >> 3
+    if (diff >= step) {
+      c |= 4
+      diff -= step
+      vp += step
+    }
+    step >>= 1
+    if (diff >= step) {
+      c |= 2
+      diff -= step
+      vp += step
+    }
+    step >>= 1
+    if (diff >= step) {
+      c |= 1
+      vp += step
+    }
+    pred = c & 8 ? pred - vp : pred + vp
+    if (pred > 32767) pred = 32767
+    else if (pred < -32768) pred = -32768
+    index += ADPCM_INDEX[c & 7]
+    if (index < 0) index = 0
+    else if (index > 88) index = 88
+    return c
+  }
+  return {
+    get peak() {
+      return peak / 32768
+    },
+    encode(bytes) {
+      const b = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes)
+      const out = new Uint8Array(((b.length + 2) >> 2) + 2)
+      let n = 0
+      let i = 0
+      const one = (lo, hi) => {
+        const s = ((hi << 8) | lo) << 16 >> 16
+        const a = s < 0 ? -s : s
+        if (a > peak) peak = a
+        const c = code(s)
+        if (half < 0) half = c
+        else {
+          out[n++] = half | (c << 4)
+          half = -1
+        }
+      }
+      if (odd >= 0 && b.length) {
+        one(odd, b[0])
+        odd = -1
+        i = 1
+      }
+      for (; i + 1 < b.length; i += 2) one(b[i], b[i + 1])
+      if (i < b.length) odd = b[i]
+      return out.subarray(0, n)
+    },
+    flush() {
+      if (half < 0) return new Uint8Array(0)
+      const last = new Uint8Array([half])
+      half = -1
+      return last
+    }
+  }
+}
+
 /**
  * A voice note on its way to the phone: the recorder's frames kept in order (add) until the end (end); next(room)
  * gives the next write — START once the codec is known, the bytes from where the phone has them (DATA, at most room
@@ -235,7 +325,13 @@ export function parseEvent(v) {
  */
 export function createVoice(id, format, rate) {
   let buf = new Uint8Array(8192)
+  // PCM from the recorder goes as IMA ADPCM (a quarter of the bytes, a format the phone surely reads)
+  const enc = format === 'adpcm' ? createAdpcm() : null
   const v = {
+    /** The loudest sample so far (0…1; for ADPCM — what the recorder gave), for the watch's log. */
+    get peak() {
+      return enc ? enc.peak : 0
+    },
     id: id & 0xff,
     rate,
     codec: 0,
@@ -246,7 +342,15 @@ export function createVoice(id, format, rate) {
     startSent: false,
     endSent: false,
     add(frame) {
-      const f = frame instanceof Uint8Array ? frame : new Uint8Array(frame)
+      let f = frame instanceof Uint8Array ? frame : new Uint8Array(frame)
+      if (enc) {
+        v.codec = CODEC_ADPCM
+        f = enc.encode(f)
+      }
+      v.put(f)
+    },
+    /** Bytes as they go (already encoded). */
+    put(f) {
       if (!f.length) return
       if (!v.codec) {
         const ogg = f.length >= 4 && f[0] === 0x4f && f[1] === 0x67 && f[2] === 0x67 && f[3] === 0x53
@@ -269,6 +373,10 @@ export function createVoice(id, format, rate) {
       v.len += f.length
     },
     end(ms) {
+      if (enc) {
+        v.codec = CODEC_ADPCM
+        v.put(enc.flush())
+      }
       if (!v.codec) v.codec = format === 'pcm' ? CODEC_PCM16 : CODEC_RECORDED
       v.ended = true
       v.ms = ms
@@ -317,8 +425,8 @@ export function createVoice(id, format, rate) {
  * watch's x the fingers are: +1 on the left hand (the crown toward the hand), −1 on the right — setHand(); and then
  * learnt from where the arm hangs most of the time (the fingers down): fingers(), learnt(). Any units.
  *
- * Or taught: teach(t), then the watch held to the mouth as one talks into it and kept still a second — 'taught' (or
- * 'teach-failed' after 15 s). With taught poses (up to 3, kept in poses), «at the mouth» is the watch within 28° of
+ * Or taught: teach(t), then within two seconds the watch held to the mouth as one talks into it, kept still — 'taught'
+ * (or after 9 s 'teach-failed' — moved but not held still — or 'teach-unmoved' — left where it was). With taught poses (up to 3, kept in poses), «at the mouth» is the watch within 28° of
  * one of them (taken away — farther than 45°), whatever the hand, and it starts sooner (0.45 s); each note said and
  * saved moves its pose a little toward how the watch was held (nudge).
  */
@@ -343,9 +451,10 @@ export function createTalk() {
   const CONE_STOP = 45 // …taken away: farther than this
   const CONE_LOW = 55 // «down»: farther than this from every taught pose
   const HOLD_TAUGHT_MS = 450
-  const TEACH_MOVE = 30 // teaching: moved this far from where the watch was when asked (to the mouth, from the eyes)…
-  const TEACH_STILL_MS = 1000 // …and held still so long
-  const TEACH_MS = 15000
+  const TEACH_WAIT_MS = 2000 // teaching: two seconds to bring the watch to the mouth after the tap…
+  const TEACH_MOVE = 12 // …away from where it was at the tap (not the screen being looked at)…
+  const TEACH_STILL_MS = 600 // …and held still so long
+  const TEACH_MS = 9000
   const TEACH_SAME = 15 // a pose this near one already taught replaces it (their mean)
   const MAX_POSES = 3
   const NUDGE = 0.2
@@ -439,7 +548,7 @@ export function createTalk() {
     },
     /** Teach how the watch is held to the mouth: the next still pose away from where it is now (t — now). */
     teach(t) {
-      teaching = { at: t, u0: null, since: 0, sum: [0, 0, 0] }
+      teaching = { at: t, u0: null, since: 0, sum: [0, 0, 0], moved: false }
       if (state === 1 || state === 2) {
         state = 3
         restAt = t
@@ -503,14 +612,19 @@ export function createTalk() {
       const steady = Math.abs(n - g) <= STEADY * g
       learn(ux, dt)
       if (teaching) {
-        // teaching: away from where the watch was when asked, then still for a second — that is the pose
+        // teaching: two seconds to bring the watch to the mouth, then still there — that is the pose (whichever hand,
+        // whichever way the watch's axes run)
         if (!teaching.u0) teaching.u0 = u
         if (t - teaching.at > TEACH_MS) {
+          const moved = teaching.moved
           teaching = null
-          return 'teach-failed'
+          return moved ? 'teach-failed' : 'teach-unmoved'
         }
-        // (not the arm let down after the tap: the fingers pointing down is no way to talk into a watch)
-        if (angle(u, teaching.u0) >= TEACH_MOVE && steady && side * ux > -0.5) {
+        if (angle(u, teaching.u0) >= TEACH_MOVE) teaching.moved = true
+        // not the arm let down: the forearm plumb, fingers down (if known where down is) or either way (if not) — a
+        // forearm straight up is no usual way to talk into a watch either
+        const hanging = learnt ? side * ux < -0.8 : Math.abs(ux) > 0.95
+        if (t - teaching.at >= TEACH_WAIT_MS && angle(u, teaching.u0) >= TEACH_MOVE && steady && !hanging) {
           if (!teaching.since) {
             teaching.since = t
             teaching.sum = [0, 0, 0]

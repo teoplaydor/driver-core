@@ -30,6 +30,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
 import io.github.teoplaydor.semsearch.R;
+import io.github.teoplaydor.semsearch.core.Adpcm;
 import io.github.teoplaydor.semsearch.core.OggOpus;
 import io.github.teoplaydor.semsearch.core.Pcm;
 import io.github.teoplaydor.semsearch.core.Spoken;
@@ -80,7 +81,9 @@ final class WatchVoice {
                         java.util.Arrays.copyOf(bytes, Math.min(8, bytes.length))) + (x == null ? " -> not readable" : String.format(Locale.ROOT,
                         " -> %.2f s, loudest %.3f", x.length / (float) Pcm.RATE, loudest(x))));
                 if (x == null || x.length < Pcm.RATE / 4) {
-                    finish(app, done, WristGesture.VOICE_FAILED, "Запись с часов не разобрать", null);
+                    // the recording itself to the log (base64), to see what the watch sends
+                    if (bytes.length <= 256 * 1024) WristLog.add(app, "VOICE-RAW", android.util.Base64.encodeToString(bytes, android.util.Base64.NO_WRAP));
+                    finish(app, done, WristGesture.VOICE_FAILED, "Запись с часов не разобрать — включите журнал и пришлите его", null);
                     return;
                 }
                 if (loudest(x) < SILENT) {
@@ -171,26 +174,63 @@ final class WatchVoice {
             Pcm.Wav w = Pcm.readWav(new ByteArrayInputStream(b), MAX_SECONDS);
             mono = w.samples;
             at = w.rate;
-        } else if (OggOpus.looksLike(b)) {
+        } else if (codec != WristGesture.CODEC_ADPCM && codec != WristGesture.CODEC_PCM16 && OggOpus.read(b) != null) {
             OggOpus o = OggOpus.read(b);
-            if (o == null) return null;
             mono = opus(o.head, o.channels, o.preSkip, o.packets);
             at = 48000;
         } else if (codec == WristGesture.CODEC_OPUS_PACKETS) {
             java.util.List<byte[]> packets = OggOpus.lengthPrefixed(b);
             if (packets.isEmpty()) return null;
-            mono = opus(OggOpus.head(1, 312, rate > 0 ? rate : 16000), 1, 312, packets);
-            at = 48000;
+            try {
+                mono = opus(OggOpus.head(1, 312, rate > 0 ? rate : 16000), 1, 312, packets);
+            } catch (IOException e) {
+                mono = null;
+            }
+            if (mono == null || mono.length == 0) {
+                // not Opus after all: the recorder's frames may be plain PCM
+                java.io.ByteArrayOutputStream all = new java.io.ByteArrayOutputStream();
+                for (byte[] p : packets) all.write(p, 0, p.length);
+                mono = pcmIfLikely(all.toByteArray());
+            }
+            at = mono != null && mono.length > 0 && looksPcm ? (rate > 0 ? rate : 16000) : 48000;
+        } else if (codec == WristGesture.CODEC_ADPCM) {
+            // the recorder's PCM, made a quarter by the watch (IMA ADPCM)
+            mono = Adpcm.decode(b);
+            at = rate > 0 ? rate : 16000;
         } else if (codec == WristGesture.CODEC_PCM16) {
             int n = Math.min(b.length / 2, MAX_SECONDS * Math.max(rate, 1));
             mono = new float[n];
             for (int i = 0; i < n; i++) mono[i] = (short) ((b[2 * i] & 0xff) | (b[2 * i + 1] << 8)) / 32768f;
             at = rate;
         } else {
-            return null;
+            // not what it said it was: plain PCM, if it looks like sound
+            mono = pcmIfLikely(b);
+            at = rate > 0 ? rate : 16000;
         }
         if (mono == null || at <= 0) return null;
         return Pcm.resample(mono, at, Pcm.RATE);
+    }
+
+    private static boolean looksPcm;
+
+    /**
+     * Bytes as 16-bit PCM if they look like sound — neighbouring samples alike (sound is smooth from sample to sample,
+     * compressed bytes are not); else null.
+     */
+    static float[] pcmIfLikely(byte[] b) {
+        looksPcm = false;
+        int n = b.length / 2;
+        if (n < 1600) return null;
+        float[] x = new float[n];
+        double sxy = 0, sxx = 0;
+        for (int i = 0; i < n; i++) x[i] = (short) ((b[2 * i] & 0xff) | (b[2 * i + 1] << 8)) / 32768f;
+        for (int i = 1; i < n; i++) {
+            sxy += x[i] * x[i - 1];
+            sxx += x[i] * x[i];
+        }
+        if (sxx <= 0 || sxy / sxx < 0.5) return null;
+        looksPcm = true;
+        return x;
     }
 
     /** Opus packets through the phone's decoder (Android's own, «audio/opus»): mono samples at 48 kHz. */

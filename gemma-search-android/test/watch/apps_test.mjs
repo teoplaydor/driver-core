@@ -213,7 +213,10 @@ async function vela() {
             o && o.success && o.success({}); o && o.complete && o.complete() }) } }
       W.record = R; export default R`,
     '@system.file': `export default { readArrayBuffer(o) { o.fail && o.fail(null, 300) } }`,
-    '@system.audio': `const A = { play() { W.audioPlays = (W.audioPlays || 0) + 1; W.audioOn = true; W.audioSrc = A.src; W.audioLoop = A.loop
+    // like the S5 seems to: a source set while playing is not taken (the old one goes on, with the new «loop») — so the
+    // page must stop the player before it changes the sound
+    '@system.audio': `const A = { _src: '', get src() { return A._src }, set src(v) { if (!W.audioOn) A._src = v },
+        play() { W.audioPlays = (W.audioPlays || 0) + 1; W.audioOn = true; W.audioSrc = A.src; W.audioLoop = A.loop
           W.played = (W.played || []).concat([[A.src, Date.now()]])
           setImmediate(() => A.onplay && A.onplay())
           if (!A.loop) { const src = A.src; setTimeout(() => { if (A.src === src) { W.audioOn = false; A.onended && A.onended() } }, 300) } },
@@ -231,6 +234,7 @@ async function vela() {
   const appMod = await load(path.join(watchDir, 'vela/src/app.ux'), sysMocks, './common/link.js', linkFile)
   const pageMod = await load(path.join(watchDir, 'vela/src/pages/index/index.ux'), {}, '../../common/proto.js')
   const linkMod = await import(pathToFileURL(linkFile).href)
+  const linkProto = await import(pathToFileURL(path.join(dir, 'proto.mjs')).href)
   const sys = {}
   for (const [k, name] of [['ble', '@system.bluetooth.ble'], ['sensor', '@system.sensor'], ['vibrator', '@system.vibrator'],
     ['brightness', '@system.brightness'], ['storage', '@system.storage'], ['record', '@system.record'], ['file', '@system.file'],
@@ -490,15 +494,19 @@ async function vela() {
     if (W.recording && i % 8 === 0) {
       // a frame every 0.4 s: the recorder's Ogg file in pieces
       const f = new Uint8Array(400)
-      for (let k = 0; k < f.length; k++) f[k] = (frames.length * 13 + k * 5) & 0xff
-      if (frames.length === 0) f.set([0x4f, 0x67, 0x67, 0x53])
+      // the recorder's PCM: 16-bit samples of a tone
+      for (let k = 0; k < f.length; k += 2) {
+        const v = Math.round(8000 * Math.sin((2 * Math.PI * 300 * (frames.length * 200 + k / 2)) / 16000))
+        f[k] = v & 0xff
+        f[k + 1] = (v >> 8) & 0xff
+      }
       frames.push(f)
       W.record.onframerecorded({ frameBuffer: f.buffer, isLastFrame: false })
       await flush()
     }
   }
-  ok(W.recStarts === 1 && W.recording && W.recording.format === 'opus' && W.recording.sampleRate === 16000 && W.recording.frameSize > 0
-    && W.buzz[buzz0] === 'short' && /говорите/.test(p5.note), 'vela (voice): held to the mouth — recording Opus 16 kHz in frames, a short buzz, «' + p5.note + '»')
+  ok(W.recStarts === 1 && W.recording && W.recording.format === 'pcm' && W.recording.sampleRate === 16000 && W.recording.frameSize > 0
+    && W.buzz[buzz0] === 'short' && /говорите/.test(p5.note), 'vela (voice): held to the mouth — recording PCM 16 kHz in frames (sent as ADPCM), a short buzz, «' + p5.note + '»')
   const startBells = W.played.filter((p) => p[0] === '/common/start.mp3').pop()
   ok(startBells && startBells[1] < W.recAt && W.recAt - startBells[1] <= 700 && W.played[W.played.length - 1][0] === '/common/quiet.mp3',
     'vela (voice): the rising bells first, the recording as they end (' + (W.recAt - startBells[1]) + ' ms later), then the silence again')
@@ -514,7 +522,8 @@ async function vela() {
   await advance(500)
   const vw = W.writes.slice(w5).filter((w) => w[1] === SAMPLES).map((w) => w[2])
   const endBells = W.played.filter((p) => p[0] === '/common/end.mp3').pop()
-  ok(endBells && endBells[1] >= W.recAt && W.played[W.played.length - 1][0] === '/common/quiet.mp3' && W.audioOn,
+  ok(endBells && endBells[1] >= W.recAt && W.played[W.played.length - 1][0] === '/common/quiet.mp3' && W.audioOn
+    && W.audio.src === '/common/quiet.mp3' && W.audio.loop === true,
     'vela (voice): the recording over — the falling bells, then the silence plays again')
   ok(W.recStops === 1 && vw.some((w) => w.startsWith('50')) && vw[vw.length - 1].startsWith('52') && W.failed === 1,
     'vela (voice): lowered — the recording stopped, START, the bytes, END (' + vw.filter((w) => w.startsWith('51')).length + ' writes of bytes, one lost and written again)')
@@ -529,7 +538,11 @@ async function vela() {
   ok(again.length >= 2 && again[0].startsWith('51' + vw.find((w) => w.startsWith('50')).slice(2, 4) + 'ee000000') && again[again.length - 1].startsWith('52'),
     'vela (voice): «again from 238» — sent again from there, and the end')
   fs.writeFileSync(path.join(out, 'vela_voice_app.hex'), vw.concat(again).join('\n') + '\n')
-  fs.writeFileSync(path.join(out, 'vela_voice_bytes.hex'), Buffer.concat(frames.map((f) => Buffer.from(f))).toString('hex') + '\n')
+  // what the phone should get: the frames as ADPCM (the watch's own encoder, one stream)
+  const ad = linkProto.createAdpcm()
+  const want = Buffer.concat(frames.map((f) => Buffer.from(ad.encode(f))).concat([Buffer.from(ad.flush())]))
+  fs.writeFileSync(path.join(out, 'vela_voice_bytes.hex'), want.toString('hex') + '\n')
+  fs.writeFileSync(path.join(out, 'vela_voice_pcm.hex'), Buffer.concat(frames.map((f) => Buffer.from(f))).toString('hex') + '\n')
   // done: saved
   say5([9, noteId, 0, ...Buffer.from('Сохранено: купить хлеб')])
   ok(W.buzz[W.buzz.length - 1] === 'long' && p5.note === 'Сохранено: купить хлеб' && p5.voices.length === 0,
@@ -559,10 +572,10 @@ async function vela() {
   for (let i = 0; i <= 10; i++) await step(HANG.map((h, j) => h + (LOOK[j] - h) * (i / 10)))
   for (let i = 0; i < 10; i++) await step(LOOK)
   p5.teachTalk()
-  ok(/замрите/.test(p5.note), 'vela (taught): «Запомнить» — «' + p5.note + '»')
+  ok(/поднесите/.test(p5.note), 'vela (taught): «Запомнить» — «' + p5.note + '»')
   for (let i = 0; i < 6; i++) await step(LOOK)
   for (let i = 0; i <= 10; i++) await step(LOOK.map((h, j) => h + (ACROSS[j] - h) * (i / 10)))
-  for (let i = 0; i < 30; i++) await step(ACROSS)
+  for (let i = 0; i < 50; i++) await step(ACROSS)
   const kept = JSON.parse(W.storage.get('wrist_poses') || '[]')
   ok(p5.poses === 1 && kept.length === 1 && W.buzz[W.buzz.length - 1] === 'long' && /запомнил/.test(p5.note),
     'vela (taught): remembered (' + kept[0] + ') — a long buzz, «' + p5.note + '»')

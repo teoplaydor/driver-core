@@ -43,11 +43,12 @@ const VOICE_WRITE_MS = 60
  * clearer the consonants, the better the recognition), ~2.7 KB a second; its frames handed over as they are recorded
  * (small ones: the last of a note is not left in the recorder), so most of it is on the phone by the time the hand is
  * down.
- * If the watch takes no Opus: 8 kHz PCM, 16 KB a second — slow over Bluetooth, so at most 20 s.
+ * But what the S5 hands over in Opus frames is not documented, and the phone could not read it («запись с часов не
+ * разобрать»); so the recorder gives plain 16-bit PCM (16 kHz mono — the format there is no doubt about) and the watch
+ * makes it IMA ADPCM itself (createAdpcm: a quarter of the bytes, 8 KB a second). Opus only if the watch takes no PCM.
  */
+const PCM_REC = { format: 'pcm', sampleRate: 16000, numberOfChannels: 1, encodeBitRate: 256000, frameSize: 1280, voice: 'adpcm' }
 const OPUS = { format: 'opus', sampleRate: 16000, numberOfChannels: 1, encodeBitRate: 22000, frameSize: 512 }
-const PCM = { format: 'pcm', sampleRate: 8000, numberOfChannels: 1, encodeBitRate: 128000, frameSize: 2048 }
-const PCM_MAX_MS = 20000
 
 /** The phone's answer about a note may take a while (recognition): after this long the end is said again. */
 const DONE_MS = 40000
@@ -98,7 +99,7 @@ function characteristic(uuid, value, props) {
  */
 export function createLink(sys) {
   const { ble, sensor, vibrator, brightness, storage, record, file, audio } = sys
-  const view = { on: false, state: 'выключено', diag: '', note: '', voiceOn: true, screenOn: false, bg: '', poses: 0 }
+  const view = { on: false, state: 'выключено', diag: '', note: '', voiceOn: true, screenOn: false, bg: '', poses: 0, soundsOn: true }
   let onChange = null
   function changed() {
     if (onChange) onChange(view)
@@ -186,11 +187,11 @@ export function createLink(sys) {
         self.bg = 'работает и в фоне — можно выйти из приложения'
       }
       audio.onpause = function () {
-        if (self.chiming) return
+        if (self.chiming || Date.now() < (self.quietSwitchUntil || 0)) return
         again('фон: звук приостановлен — включаю снова')
       }
       audio.onstop = function () {
-        if (self.chiming) return
+        if (self.chiming || Date.now() < (self.quietSwitchUntil || 0)) return
         self.logLine('фон: звук остановлен')
         again('фон: звук остановлен — включаю снова')
       }
@@ -199,6 +200,7 @@ export function createLink(sys) {
           self.chimed()
           return
         }
+        if (Date.now() < (self.quietSwitchUntil || 0)) return
         again('')
       }
       audio.onerror = function () {
@@ -223,7 +225,7 @@ export function createLink(sys) {
      * and then(). Without a player, then() at once.
      */
     chime(src, then) {
-      if (!audio) {
+      if (!audio || !this.sounds) {
         if (then) then()
         return
       }
@@ -232,12 +234,29 @@ export function createLink(sys) {
       this.chiming = { then }
       this.chimeTimer = setTimeout(() => self.chimed(), CHIME_MS)
       try {
-        audio.loop = false
+        // the player stopped first: a source changed while playing was kept looping on the S5 (a beep without end)
+        this.halt()
         audio.src = src
+        audio.loop = false
         audio.play()
       } catch (e) {
         this.chimed()
       }
+    },
+
+    /** The player stopped on purpose: its stop and pause told then are not «stopped by the watch». */
+    halt() {
+      this.quietSwitchUntil = Date.now() + 800
+      try {
+        audio.stop()
+      } catch (e) {}
+    },
+
+    /** The note's sounds on or off (the page's button); kept. */
+    setSounds(on) {
+      this.sounds = !!on
+      this.soundsOn = this.sounds
+      storage.set({ key: 'wrist_sounds', value: on ? '1' : '0' })
     },
 
     /** The chime over (ended, failed, or took too long): the silence again, then what waited for it. */
@@ -248,12 +267,8 @@ export function createLink(sys) {
       if (this.chimeTimer) clearTimeout(this.chimeTimer)
       this.chimeTimer = 0
       this.audioPlaying = false
+      this.halt()
       if (this.alive) this.play()
-      else {
-        try {
-          audio.stop()
-        } catch (e) {}
-      }
       if (c.then) c.then()
     },
 
@@ -309,6 +324,14 @@ export function createLink(sys) {
       this.rawBuf = []
       this.rawOut = []
       this.diagOut = []
+      this.sounds = true
+      storage.get({
+        key: 'wrist_sounds',
+        success(v) {
+          if (v === '0') self.sounds = false
+          self.soundsOn = self.sounds
+        }
+      })
       storage.get({
         key: 'wrist_poses',
         success(v) {
@@ -1082,9 +1105,10 @@ export function createLink(sys) {
         this.chime(CHIME_END)
         this.note = 'запомнил, как вы подносите часы ко рту (' + this.poses + ' из 3) — опустите руку'
       } else if (what === 'teach-failed') {
-        this.note = 'не получилось: часы не замерли у рта на секунду — попробуйте ещё раз'
+        this.note = 'не получилось: часы не замерли у рта — попробуйте ещё раз'
+      } else if (what === 'teach-unmoved') {
+        this.note = 'не получилось: часы остались, где были, — после нажатия поднесите их ко рту'
       }
-      if (this.rec && this.rec.opts === PCM && now - this.rec.at >= PCM_MAX_MS) this.stopNote(false)
       // where the arm hangs, kept now and then (which way the fingers are, see createTalk)
       if (now - (this.fingersSaved || 0) > 30000) {
         this.fingersSaved = now
@@ -1107,7 +1131,7 @@ export function createLink(sys) {
       this.chime(CHIME_START, function () {
         if (self.pending !== pending) return // taken away before the bells ended
         self.pending = null
-        self.record(OPUS, Date.now())
+        self.record(PCM_REC, Date.now())
       })
     },
 
@@ -1123,7 +1147,16 @@ export function createLink(sys) {
       }
       this.talk.teach(Date.now())
       vibrator.vibrate({ mode: 'short' })
-      this.note = 'поднесите часы ко рту, как будто говорите, и замрите на секунду'
+      this.note = 'поднесите часы ко рту, как будто говорите…'
+      // in two seconds: a buzz — hold still there
+      const self = this
+      if (this.teachTimer) clearTimeout(this.teachTimer)
+      this.teachTimer = setTimeout(() => {
+        self.teachTimer = 0
+        if (!self.talk.teaching()) return
+        vibrator.vibrate({ mode: 'short' })
+        self.note = 'держите так…'
+      }, 2000)
     },
 
     /** Forget the taught poses: «at the mouth» by the usual rule again. */
@@ -1139,17 +1172,26 @@ export function createLink(sys) {
       storage.set({ key: 'wrist_poses', value: JSON.stringify(p.map((v) => v.map((c) => Math.round(c * 1000) / 1000))) })
     },
 
-    /** Recording in one format; Opus not taken (202 — wrong parameters) — PCM. */
+    /** Recording in one format; PCM not taken (202 — wrong parameters) — Opus. */
     record(opts, now) {
       const self = this
-      const v = createVoice(this.noteId, opts.format, opts.sampleRate)
-      const rec = { v, opts, at: now, ms: 0, stopping: false, cancel: false }
+      const v = createVoice(this.noteId, opts.voice || opts.format, opts.sampleRate)
+      const rec = { v, opts, at: now, ms: 0, stopping: false, cancel: false, frames: 0, raw: 0 }
       this.rec = rec
       this.voices.push(v)
       record.onframerecorded = function (res) {
         if (self.rec !== rec || !res) return
         if (res.frameBuffer && !rec.cancel) {
-          v.add(res.frameBuffer)
+          const f = res.frameBuffer instanceof Uint8Array ? res.frameBuffer : new Uint8Array(res.frameBuffer)
+          rec.frames++
+          rec.raw += f.length
+          if (rec.frames <= 3) {
+            // what the recorder gives, for the log (the first frames' size and first bytes)
+            let h = ''
+            for (let i = 0; i < Math.min(12, f.length); i++) h += (f[i] < 16 ? '0' : '') + f[i].toString(16)
+            self.logLine('кадр записи ' + rec.frames + ': ' + f.length + ' байт, ' + h)
+          }
+          v.add(f)
           self.pump()
         }
         if (res.isLastFrame) self.endNote(rec)
@@ -1172,8 +1214,8 @@ export function createLink(sys) {
           self.logLine('запись не началась: код ' + code)
           self.dropVoice(v)
           self.rec = null
-          if (code === 202 && opts === OPUS) {
-            self.record(PCM, now)
+          if (code === 202 && opts === PCM_REC) {
+            self.record(OPUS, now)
             return
           }
           self.note = 'запись не началась (' + code + ')'
@@ -1234,7 +1276,8 @@ export function createLink(sys) {
       this.talk.done(Date.now())
       this.mute()
       if (this.packer) this.packer.restart()
-      this.logLine('запись кончилась: ' + rec.v.len + ' байт, ' + rec.ms + ' мс' + (rec.cancel ? ', отменена (коротко)' : rec.stopping ? '' : ', прервана часами'))
+      this.logLine('запись кончилась: кадров ' + rec.frames + ', ' + rec.raw + ' байт от записи → ' + rec.v.len + ' к отправке, ' + rec.ms
+        + ' мс, уровень ' + rec.v.peak.toFixed(2) + (rec.cancel ? ', отменена (коротко)' : rec.stopping ? '' : ', прервана часами'))
       if (rec.cancel || rec.v.len === 0) {
         this.resumeAlive()
         this.dropVoice(rec.v)

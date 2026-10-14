@@ -26,13 +26,33 @@ public final class OggOpus {
         return b != null && b.length >= 4 && b[0] == 'O' && b[1] == 'g' && b[2] == 'g' && b[3] == 'S';
     }
 
-    /** Taken apart, or null if it is not Ogg Opus (or broken before its first audio). */
+    /** Where an Ogg page starts at or after {@code from} (−1: none). */
+    static int capture(byte[] b, int from) {
+        for (int i = Math.max(0, from); i + 4 <= b.length; i++) {
+            if (b[i] == 'O' && b[i + 1] == 'g' && b[i + 2] == 'g' && b[i + 3] == 'S') return i;
+        }
+        return -1;
+    }
+
+    /**
+     * Taken apart, or null if it is not Ogg Opus (or broken before its first audio). Tolerant: the stream may start
+     * later than byte 0 or have bytes between pages (a recorder's stream caught mid-way), and may lack its OpusHead —
+     * then mono with no pre-skip is assumed.
+     */
     public static OggOpus read(byte[] b) {
-        if (!looksLike(b)) return null;
+        if (b == null) return null;
+        int o = capture(b, 0);
+        if (o < 0) return null;
         List<byte[]> all = new ArrayList<byte[]>();
         java.io.ByteArrayOutputStream part = new java.io.ByteArrayOutputStream();
-        int o = 0;
-        while (o + 27 <= b.length && b[o] == 'O' && b[o + 1] == 'g' && b[o + 2] == 'g' && b[o + 3] == 'S') {
+        while (o + 27 <= b.length) {
+            if (!(b[o] == 'O' && b[o + 1] == 'g' && b[o + 2] == 'g' && b[o + 3] == 'S')) {
+                int next = capture(b, o + 1);
+                if (next < 0) break;
+                o = next;
+                part.reset();
+                continue;
+            }
             int segs = b[o + 26] & 0xff;
             int data = o + 27 + segs;
             if (data > b.length) break;
@@ -54,15 +74,15 @@ public final class OggOpus {
             o = at;
         }
         if (all.isEmpty()) return null;
-        byte[] head = all.get(0);
-        if (head.length < 19 || !new String(head, 0, 8, java.nio.charset.StandardCharsets.US_ASCII).equals("OpusHead")) return null;
+        byte[] head = null;
         List<byte[]> audio = new ArrayList<byte[]>();
-        for (int i = 1; i < all.size(); i++) {
-            byte[] p = all.get(i);
-            if (i == 1 && p.length >= 8 && new String(p, 0, 8, java.nio.charset.StandardCharsets.US_ASCII).equals("OpusTags")) continue;
-            if (p.length > 0) audio.add(p);
+        for (byte[] p : all) {
+            String tag = p.length >= 8 ? new String(p, 0, 8, java.nio.charset.StandardCharsets.ISO_8859_1) : "";
+            if (tag.equals("OpusHead") && p.length >= 19) head = p;
+            else if (!tag.equals("OpusTags") && p.length > 0) audio.add(p);
         }
-        return new OggOpus(head, audio);
+        if (audio.isEmpty()) return null;
+        return new OggOpus(head != null ? head : head(1, 0, 16000), audio);
     }
 
     /** Packets each after its length (u16, little-endian) — how the watch sends Opus that came without a file around it. */
