@@ -1267,9 +1267,10 @@ final class SettingsPanel extends FrameLayout implements Engine.Listener {
         final Context c = getContext();
         LinearLayout card = section("Разговор с Gemini через часы");
         TextView about = note(card);
-        about.setText("Поднесите часы ко рту и говорите — голос идёт в Gemini Live (через телефон, по вашему ключу API), ответ "
-                + "звучит голосом в часах или в телефоне. Говорите, пока держите руку; опустили — разговор помнится ещё 45 с. "
-                + "«Запиши…», «напомни…» — Gemini сохранит заметку сам; «что у меня записано про…» — найдёт в заметках.");
+        about.setText("Живой голосовой разговор: поднесите часы ко рту и говорите — ваш голос идёт прямо в Gemini Live (через "
+                + "телефон, по вашему ключу API; модель с родным звуком — слышит и говорит сама, без перевода в текст), его голос "
+                + "сразу обратно. Говорите, пока держите руку; опустили — разговор помнится ещё 45 с. С наушниками у телефона "
+                + "ответ звучит в них без задержки, и Gemini можно перебивать. «Запиши…», «напомни…» — сохранит заметку сам.");
         about.setVisibility(VISIBLE);
         talkKey = row(card, "Ключ API Gemini", "Google AI Studio → Get API key; хранится только на телефоне", new Runnable() {
             @Override
@@ -1299,7 +1300,8 @@ final class SettingsPanel extends FrameLayout implements Engine.Listener {
                 Talk.setOnWatch(getContext(), on);
             }
         });
-        talkWatchRow = toggleRow(card, "Ответ звучит в часах", "иначе — в телефоне или в наушниках; часам нужна быстрая связь", talkWatchToggle);
+        talkWatchRow = toggleRow(card, "Ответ звучит в часах", "кусками, с задержкой около секунды; выключено — в динамике телефона. "
+                + "Наушники у телефона — всегда в них", talkWatchToggle);
         talkNote = note(card);
     }
 

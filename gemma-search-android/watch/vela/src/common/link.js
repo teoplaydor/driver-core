@@ -12,7 +12,7 @@ import {
   SERVICE, SAMPLES, EVENTS, EV_NEXT, EV_PREVIOUS, EV_LEARNED, EV_IGNORED, EV_PAUSE, EV_STREAM, EV_CONFIG, EV_VOICE_FROM,
   EV_VOICE_DONE, VOICE_SAVED, VOICE_SILENT, VOICE_KEPT, VOICE_ANSWER, SOURCE_COMPASS, RAW_MAX, advertises, createPacker,
   parseEvent, createTalk, createVoice, rawPacket, diagPacket, diagPackets, EV_TALK_AUDIO, EV_TALK_SEG, EV_TALK_TEXT, EV_TALK_END,
-  voicePlayed
+  voicePlayed, CODEC_ADPCM
 } from './proto.js'
 
 /** The silence that keeps the app running in the background, and how soon it is started again when stopped. */
@@ -1294,12 +1294,20 @@ export function createLink(sys) {
       const live = !!this.talkMode
       this.note = live ? 'говорите с Gemini… опустите руку — конец' : 'говорите… опустите руку — отправлю'
       const pending = { at: now }
+      if (live) {
+        // a conversation: its start told at once, so the phone connects to Gemini while the bells ring
+        const v = createVoice(this.noteId, PCM_REC.voice, PCM_REC.sampleRate, true)
+        v.codec = CODEC_ADPCM
+        this.voices.push(v)
+        pending.v = v
+        this.pump()
+      }
       this.pending = pending
       const self = this
       this.chime(CHIME_START, function () {
         if (self.pending !== pending) return // taken away before the bells ended
         self.pending = null
-        self.record(PCM_REC, Date.now(), live)
+        self.record(PCM_REC, Date.now(), live, pending.v)
       })
     },
 
@@ -1341,12 +1349,12 @@ export function createLink(sys) {
     },
 
     /** Recording in one format; PCM not taken (202 — wrong parameters) — Opus. */
-    record(opts, now, live) {
+    record(opts, now, live, started) {
       const self = this
-      const v = createVoice(this.noteId, opts.voice || opts.format, opts.sampleRate, live)
+      const v = started || createVoice(this.noteId, opts.voice || opts.format, opts.sampleRate, live)
       const rec = { v, opts, at: now, ms: 0, stopping: false, cancel: false, frames: 0, raw: 0, live: !!live }
       this.rec = rec
-      this.voices.push(v)
+      if (!started) this.voices.push(v)
       record.onframerecorded = safe('кадр записи', function (res) {
         if (self.rec !== rec || !res) return
         if (res.frameBuffer && !rec.cancel) {
@@ -1381,8 +1389,16 @@ export function createLink(sys) {
         fail(data, code) {
           if (self.rec !== rec) return
           self.logLine('запись не началась: код ' + code)
-          self.dropVoice(v)
           self.rec = null
+          if (live) {
+            // a conversation needs the recorder's PCM (the phone streams ADPCM on): its end told, nothing more
+            v.end(0)
+            self.pump()
+            self.note = 'запись не началась (' + code + ') — разговор не получится'
+            self.talk.done(Date.now())
+            return
+          }
+          self.dropVoice(v)
           if (code === 202 && opts === PCM_REC) {
             self.record(OPUS, now, live)
             return
@@ -1401,7 +1417,11 @@ export function createLink(sys) {
     /** Taken away from the mouth (cancel: too soon, or voice notes switched off): the recording stops. */
     stopNote(cancel) {
       if (!this.rec && this.pending) {
-        // taken away while the bells still rang: no note
+        // taken away while the bells still rang: no note (a conversation already told — its end told too)
+        if (this.pending.v) {
+          this.pending.v.end(0)
+          this.pump()
+        }
         this.pending = null
         this.note = ''
         this.talk.done(Date.now())

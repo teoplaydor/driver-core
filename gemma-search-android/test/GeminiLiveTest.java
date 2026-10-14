@@ -101,7 +101,8 @@ public class GeminiLiveTest {
         c.model = "gemini-test-native-audio";
         c.systemInstruction = "Ты голосовой помощник.";
         c.voice = "Kore";
-        c.silenceMs = 700;
+        c.silenceMs = 500;
+        c.endSensitivity = "END_SENSITIVITY_HIGH";
         c.functions.add(saveNote());
         Object mine = sorted(camel(MiniJson.parse(GeminiLive.setup(c))));
         Object sdk = sorted(camel(MiniJson.parse(new String(Files.readAllBytes(new File(args[1]).toPath()), StandardCharsets.UTF_8).trim())));

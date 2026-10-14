@@ -461,6 +461,46 @@ public class WristTest {
             Robo.waitFor("answered on the phone", () -> textTold(server).length() > 0);
             assertFalse("no voice to the watch", told(server, WristGesture.EV_TALK_AUDIO));
             System.out.println("on the phone: «" + textTold(server) + "»");
+
+            // headphones on the phone: the answer plays there (not on the watch), the voice goes on all the time, and
+            // Gemini spoken over stops at once (a conversation of its own: the one before closed first)
+            java.lang.reflect.Method stopTalk = Class.forName("io.github.teoplaydor.semsearch.app.Talk").getDeclaredMethod("stop");
+            stopTalk.setAccessible(true);
+            stopTalk.invoke(null);
+            android.media.AudioManager am = (android.media.AudioManager) app.getSystemService(Context.AUDIO_SERVICE);
+            Shadows.shadowOf(am).setOutputDevices(Arrays.asList(org.robolectric.shadows.AudioDeviceInfoBuilder.newBuilder()
+                    .setType(android.media.AudioDeviceInfo.TYPE_BLUETOOTH_A2DP).build()));
+            e.prefs().edit().putBoolean("wrist_talk_watch", true).apply();
+            WristLink.setVoiceNotes(app, true);
+            server.messages.clear();
+            WristLog.flush();
+            final long logFrom = WristLog.file(app).length();
+            cb.onCharacteristicWriteRequest(watch, 407, samples, false, true, 0,
+                    WristGesture.voiceStart(22, WristGesture.CODEC_ADPCM | WristGesture.CODEC_LIVE, 16000, 0));
+            for (int o = 0; o < voice.length; o += 238) {
+                cb.onCharacteristicWriteRequest(watch, 408, samples, false, true, 0,
+                        WristGesture.voiceData(22, o, voice, o, Math.min(238, voice.length - o)));
+                Thread.sleep(10);
+            }
+            try {
+                Robo.waitFor("the answer begun", () -> logSince(app, logFrom).contains("TALK answer in "));
+            } catch (AssertionError err) {
+                throw new AssertionError(err.getMessage() + "\n" + logSince(app, logFrom));
+            }
+            // spoken over: a second more of voice while it plays
+            byte[] more = adpcm(java.util.Arrays.copyOf(x, 16000));
+            for (int o = 0; o < more.length; o += 238) {
+                cb.onCharacteristicWriteRequest(watch, 409, samples, false, true, 0,
+                        WristGesture.voiceData(22, voice.length + o, more, o, Math.min(238, more.length - o)));
+            }
+            Robo.waitFor("stopped when spoken over", () -> logSince(app, logFrom).contains("TALK interrupted: the answer stopped"));
+            String dl = logSince(app, logFrom);
+            assertTrue(dl, dl.contains("answers in the headphones (may be spoken over)"));
+            assertFalse("not to the watch", told(server, WristGesture.EV_TALK_AUDIO));
+            java.util.regex.Matcher lm = java.util.regex.Pattern.compile("TALK answer in (\\d+) ms after the voice").matcher(dl);
+            assertTrue(dl, lm.find());
+            System.out.println("in the headphones: the answer began " + lm.group(1) + " ms after the voice, spoken over — stopped");
+            cb.onCharacteristicWriteRequest(watch, 410, samples, false, true, 0, WristGesture.voiceEnd(22, voice.length + more.length, 2300));
         } finally {
             java.lang.reflect.Method stop = Class.forName("io.github.teoplaydor.semsearch.app.Talk").getDeclaredMethod("stop");
             stop.setAccessible(true);
@@ -470,6 +510,12 @@ public class WristTest {
             e.prefs().edit().putBoolean("wrist_talk", false).apply();
             mock.destroy();
         }
+    }
+
+    static String logSince(Application app, long from) throws Exception {
+        WristLog.flush();
+        byte[] all = java.nio.file.Files.readAllBytes(WristLog.file(app).toPath());
+        return from >= all.length ? "" : new String(all, (int) from, all.length - (int) from, StandardCharsets.UTF_8);
     }
 
     static boolean told(WristLink.Server server, int ev) {

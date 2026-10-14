@@ -521,7 +521,8 @@ public final class WristLink {
         private void sendConfig(Conn k) {
             boolean debug = debug(c);
             boolean talk = Talk.on(c), talkWatch = talk && Talk.onWatch(c) && k.mtu - 3 >= Talk.MIN_ROOM;
-            int flags = (leftHand(c) ? WristGesture.CFG_LEFT_HAND : 0) | (voiceNotes(c) ? WristGesture.CFG_VOICE : 0)
+            // the watch at the mouth works for a conversation even with voice notes off
+            int flags = (leftHand(c) ? WristGesture.CFG_LEFT_HAND : 0) | (voiceNotes(c) || talk ? WristGesture.CFG_VOICE : 0)
                     | (debug ? WristGesture.CFG_DEBUG : 0) | (talk ? WristGesture.CFG_TALK : 0) | (talkWatch ? WristGesture.CFG_TALK_WATCH : 0);
             log("CFG", "left=" + leftHand(c) + " voice=" + voiceNotes(c) + " debug=" + debug + " talk=" + talk + (talk ? " answers on the "
                     + (talkWatch ? "watch" : "phone") : "") + " mtu=" + k.mtu);

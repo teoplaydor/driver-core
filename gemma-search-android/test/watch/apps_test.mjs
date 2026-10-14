@@ -217,7 +217,7 @@ async function vela() {
     '@system.vibrator': `export default { vibrate(o) { W.buzz.push(o.mode) } }`,
     '@system.brightness': `export default { setKeepScreenOn(o) { W.keep = o.keepScreenOn } }`,
     '@system.storage': `const m = new Map(); W.storage = m; export default { get(o) { o.success(m.get(o.key) || '') }, set(o) { m.set(o.key, String(o.value)) } }`,
-    '@system.record': `const R = { start(o) { W.recording = o; W.recStarts = (W.recStarts || 0) + 1; W.recAt = Date.now() },
+    '@system.record': `const R = { start(o) { W.recording = o; W.recStarts = (W.recStarts || 0) + 1; W.recAt = Date.now(); W.recWrites = W.writes.length },
         stop() { const o = W.recording; W.recording = null; W.recStops = (W.recStops || 0) + 1
           setImmediate(() => { R.onframerecorded && R.onframerecorded({ frameBuffer: new Uint8Array(W.lastFrame || [1]).buffer, isLastFrame: true })
             o && o.success && o.success({}); o && o.complete && o.complete() }) } }
@@ -800,6 +800,8 @@ async function vela() {
   const lv = p11.voices[0]
   const tw = W.writes.slice(w11).filter((w) => w[1] === SAMPLES).map((w) => w[2])
   ok(/Gemini/.test(p11.note) && tw.some((w) => w.startsWith('50') && w.slice(4, 6) === '85'), 'vela (talk): at the mouth — «' + p11.note + '», the voice marked live (codec 0x85: ADPCM | live)')
+  const startAt = W.writes.findIndex((w, i) => i >= w11 && w[1] === SAMPLES && w[2].startsWith('50'))
+  ok(startAt >= 0 && startAt < W.recWrites, 'vela (talk): its start told with the first bell, before the recording (the phone connects meanwhile)')
   ok(lv && lv.live && lv.len > 30000 && lv.bytes().length < lv.len - 16000, 'vela (talk): what was sent let go (' + lv.len + ' bytes said, ' + lv.bytes().length + ' kept)')
   const sentLive = tw.filter((w) => w.startsWith('51')).length
   for (let i = 0; i <= 20; i++) await step11(MOUTH11.map((m, j) => m + (HANG11[j] - m) * Math.min(1, i / 10)))

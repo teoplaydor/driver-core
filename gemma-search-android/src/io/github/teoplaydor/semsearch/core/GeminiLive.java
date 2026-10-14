@@ -71,6 +71,8 @@ public final class GeminiLive implements Closeable {
         public final List<Map<String, Object>> functions = new ArrayList<Map<String, Object>>();
         /** The server ends a turn after this much silence (ms); 0 — its default. */
         public int silenceMs;
+        /** How soon the server takes the speech for ended: «END_SENSITIVITY_HIGH» (sooner) or «…_LOW»; null — its default. */
+        public String endSensitivity;
     }
 
     private final WebSocket ws;
@@ -131,8 +133,11 @@ public final class GeminiLive implements Closeable {
             s.put("systemInstruction", map("parts", list(map("text", c.systemInstruction)), "role", "user"));
         }
         if (!c.functions.isEmpty()) s.put("tools", list(map("functionDeclarations", new ArrayList<Object>(c.functions))));
-        if (c.silenceMs > 0) {
-            s.put("realtimeInputConfig", map("automaticActivityDetection", map("silenceDurationMs", c.silenceMs)));
+        if (c.silenceMs > 0 || c.endSensitivity != null) {
+            Map<String, Object> vad = new LinkedHashMap<String, Object>();
+            if (c.endSensitivity != null) vad.put("endOfSpeechSensitivity", c.endSensitivity);
+            if (c.silenceMs > 0) vad.put("silenceDurationMs", c.silenceMs);
+            s.put("realtimeInputConfig", map("automaticActivityDetection", vad));
         }
         s.put("inputAudioTranscription", new LinkedHashMap<String, Object>());
         s.put("outputAudioTranscription", new LinkedHashMap<String, Object>());

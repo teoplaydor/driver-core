@@ -38,8 +38,10 @@ final class Talk {
             PREF_LAST = "gemini_last";
     /** The conversation kept this long after the hand went down and the answer ended. */
     static final long KEEP_MS = 45_000;
-    /** The answer for the watch in pieces: the first this long (heard sooner), the next ones longer (fewer gaps). */
-    static final int FIRST_SEG_MS = 1200, SEG_MS = 2400;
+    /** The answer for the watch in pieces: the first short (heard sooner), the next ones longer (fewer gaps). */
+    static final int FIRST_SEG_MS = 700, SEG_MS = 1800;
+    /** A piece of voice this loud (RMS, of 16-bit) is speech: the answer's delay is counted from the last such. */
+    static final int LOUD = 600;
     /** The answer's voice on the watch: 8 kHz (its speaker is small; ~4 KB a second over Bluetooth). */
     static final int WATCH_RATE = 8000;
     /** Answers on the watch only over a link that takes this much in a notification (MTU ≥ 100). */
@@ -138,6 +140,15 @@ final class Talk {
     /** An answer is coming (its voice arriving) — the voice not passed on; until then it plays on (see {@link #muted}). */
     private boolean answering, turnDone = true;
     private long playingUntil;
+    /**
+     * Headphones on the phone: the answer plays there as it comes, and the voice goes on all the time — Gemini may be
+     * spoken over (it stops at once: «interrupted»). Otherwise (the watch's or the phone's speaker) one at a time.
+     */
+    private boolean duplex;
+    private long lastLoudAt, raisedAt;
+    private boolean firstAudioOfTurn = true;
+    /** Answers stopped (interrupted) so far: what was queued for the phone's speaker before is not played. */
+    private volatile int speakGen;
     private boolean watchAudio;
     private short[] ans = new short[0];
     private int ansN, ansRate = 24000;
@@ -227,9 +238,11 @@ final class Talk {
         expected = 0;
         dec = new Adpcm.Decoder();
         handDown = false;
-        watchAudio = onWatch(c) && watch.room() >= MIN_ROOM && playFailures < 2;
-        log("raised id=" + id + " codec=" + (codec & 0x7f) + " rate=" + rate + " answers " + (watchAudio ? "on the watch" : "on the phone")
-                + (live != null && live.ready() ? " (the conversation goes on)" : ""));
+        raisedAt = SystemClock.elapsedRealtime();
+        duplex = headphones(c);
+        watchAudio = !duplex && onWatch(c) && watch.room() >= MIN_ROOM && playFailures < 2;
+        log("raised id=" + id + " codec=" + (codec & 0x7f) + " rate=" + rate + " answers " + (duplex ? "in the headphones (may be spoken over)"
+                : watchAudio ? "on the watch" : "on the phone's speaker") + (live != null && live.ready() ? " (the conversation goes on)" : ""));
         WristLink.setStatus("разговор с Gemini…");
     }
 
@@ -263,7 +276,9 @@ final class Talk {
     private GeminiLive.Config config(String model) {
         GeminiLive.Config cfg = new GeminiLive.Config();
         cfg.model = model;
-        cfg.silenceMs = 700;
+        // the end of a phrase taken soon (half a second of silence): the answer starts sooner
+        cfg.silenceMs = 500;
+        cfg.endSensitivity = "END_SENSITIVITY_HIGH";
         cfg.systemInstruction = "Ты голосовой помощник, с которым говорят через умные часы: человек подносит часы ко рту и говорит, "
                 + "ответ слушает из маленького динамика. Отвечай по-русски (или на языке, на котором спросили), коротко и по делу — "
                 + "одно-три предложения, если не просят подробнее; без списков и разметки. Если просят что-то запомнить, записать или "
@@ -296,9 +311,21 @@ final class Talk {
         return f;
     }
 
-    /** The voice is not passed on while an answer comes or plays (and a moment after). */
+    /** The voice is not passed on while an answer comes or plays (and a moment after) — unless in headphones. */
     private boolean muted() {
-        return answering || SystemClock.elapsedRealtime() < playingUntil;
+        return !duplex && (answering || SystemClock.elapsedRealtime() < playingUntil);
+    }
+
+    /** Headphones (wired, Bluetooth, USB) on the phone now. */
+    static boolean headphones(Context c) {
+        android.media.AudioManager am = (android.media.AudioManager) c.getSystemService(Context.AUDIO_SERVICE);
+        if (am == null) return false;
+        for (android.media.AudioDeviceInfo d : am.getDevices(android.media.AudioManager.GET_DEVICES_OUTPUTS)) {
+            int t = d.getType();
+            // 3 wired headset, 4 wired headphones, 8 Bluetooth A2DP, 22 USB headset, 26 BLE headset
+            if (t == 3 || t == 4 || t == 8 || t == 22 || t == 26) return true;
+        }
+        return false;
     }
 
     private void voice(long offset, byte[] p, int from, int n) {
@@ -315,6 +342,9 @@ final class Talk {
             if (n <= 0) return;
             expected = offset + n;
             pcm = dec.decode(p, from, n);
+            double e = 0;
+            for (short v : pcm) e += (double) v * v;
+            if (pcm.length > 0 && Math.sqrt(e / pcm.length) >= LOUD) lastLoudAt = SystemClock.elapsedRealtime();
             if (muted()) return;
             if (live == null || !live.ready()) {
                 if (earlySamples < EARLY_S * GeminiLive.IN_RATE) {
@@ -390,6 +420,12 @@ final class Talk {
         public void onAudio(short[] pcm, int rate) {
             List<byte[]> out = null;
             synchronized (Talk.this) {
+                if (firstAudioOfTurn) {
+                    // how soon the answer came: from the end of the voice (its last loud piece) to its first sound here
+                    firstAudioOfTurn = false;
+                    long now = SystemClock.elapsedRealtime();
+                    log("answer in " + (now - Math.max(lastLoudAt, raisedAt)) + " ms after the voice");
+                }
                 answering = true;
                 turnDone = false;
                 if (watchAudio) {
@@ -431,6 +467,7 @@ final class Talk {
                 if (watchAudio && ansN > 0) out = segment(ansN);
                 answering = false;
                 turnDone = true;
+                firstAudioOfTurn = true;
                 if (!watchAudio) playingUntil = Math.max(playingUntil, SystemClock.elapsedRealtime()) + ECHO_MS;
                 you = heard.toString().trim();
                 gem = said.toString().trim();
@@ -454,8 +491,12 @@ final class Talk {
             synchronized (Talk.this) {
                 ansN = 0;
                 answering = false;
+                firstAudioOfTurn = true;
+                speakGen++;
+                playingUntil = 0;
             }
-            log("interrupted");
+            log("interrupted: the answer stopped");
+            hush();
         }
 
         @Override
@@ -586,15 +627,39 @@ final class Talk {
         idleLater();
     }
 
+    /** The answer on the phone stopped at once (spoken over): what is in the player dropped. */
+    private void hush() {
+        try {
+            speaker.execute(new Runnable() {
+                @Override
+                public void run() {
+                    if (track == null) return;
+                    try {
+                        track.pause();
+                        track.flush();
+                        track.play();
+                    } catch (RuntimeException ignored) {
+                        // gone
+                    }
+                }
+            });
+        } catch (java.util.concurrent.RejectedExecutionException ignored) {
+            // closed
+        }
+    }
+
     /** The answer on the phone: its speaker, or the headphones. */
     private void speak(final short[] pcm, final int rate) {
+        final int gen;
         synchronized (this) {
             playingUntil = Math.max(playingUntil, SystemClock.elapsedRealtime()) + 1000L * pcm.length / rate;
+            gen = speakGen;
         }
         try {
             speaker.execute(new Runnable() {
             @Override
             public void run() {
+                if (gen != speakGen) return; // spoken over since: not played
                 try {
                     if (track == null || track.getSampleRate() != rate) {
                         if (track != null) track.release();

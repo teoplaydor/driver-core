@@ -33,7 +33,8 @@ def sdk_config():
         speech_config=types.SpeechConfig(voice_config=types.VoiceConfig(prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name="Kore"))),
         system_instruction="Ты голосовой помощник.",
         tools=[types.Tool(function_declarations=[types.FunctionDeclaration(**f) for f in FUNCTIONS])],
-        realtime_input_config=types.RealtimeInputConfig(automatic_activity_detection=types.AutomaticActivityDetection(silence_duration_ms=700)),
+        realtime_input_config=types.RealtimeInputConfig(automatic_activity_detection=types.AutomaticActivityDetection(
+            silence_duration_ms=500, end_of_speech_sensitivity=types.EndSensitivity.END_SENSITIVITY_HIGH)),
         input_audio_transcription=types.AudioTranscriptionConfig(),
         output_audio_transcription=types.AudioTranscriptionConfig(),
     )
@@ -158,6 +159,29 @@ async def serve(port, log_path):
             await ws.send(out(types.LiveServerMessage(server_content=types.LiveServerContent(
                 model_turn=types.Content(role="model", parts=[types.Part(inline_data=types.Blob(mime_type="audio/pcm;rate=24000", data=part))])))))
             await ws.send(out(types.LiveServerMessage(server_content=types.LiveServerContent(output_transcription=types.Transcription(text=words[i])))))
+            if i == 0:
+                # spoken over? half a second of voice more while the answer has begun (a phone that passes the voice on
+                # all the time — headphones) stops it, as the real server does
+                spoken = 0
+                end = asyncio.get_event_loop().time() + 1.5
+                while spoken < 16000:
+                    left = end - asyncio.get_event_loop().time()
+                    if left <= 0:
+                        break
+                    try:
+                        raw = await asyncio.wait_for(ws.recv(), left)
+                    except asyncio.TimeoutError:
+                        break
+                    text = raw if isinstance(raw, str) else raw.decode()
+                    log.write(text + "\n")
+                    log.flush()
+                    m = types.LiveClientMessage.model_validate_json(text)
+                    if m.realtime_input is not None and m.realtime_input.audio is not None:
+                        spoken += len(m.realtime_input.audio.data)
+                if spoken >= 16000:
+                    await ws.send(out(types.LiveServerMessage(server_content=types.LiveServerContent(interrupted=True))))
+                    await ws.send(out(types.LiveServerMessage(server_content=types.LiveServerContent(turn_complete=True))))
+                    return
         await ws.send(out(types.LiveServerMessage(server_content=types.LiveServerContent(generation_complete=True))))
         await ws.send(out(types.LiveServerMessage(server_content=types.LiveServerContent(turn_complete=True)),))
 
