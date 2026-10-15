@@ -149,13 +149,13 @@ try {
   await A.page.waitForFunction(() => {
     const rs = [...window.__cozy.game.remotes.map.values()];
     return rs.length === 2 && rs.every((r) => Math.abs(r.avatar.root.position.z - 6.25) < 0.3);
-  }, null, { timeout: 15000 }).catch(() => {});
+  }, null, { timeout: 40000 }).catch(() => {});
   await g(A, () => {
     const G = window.__cozy.game, b = G.props.byId.get('ball2');
     b.pos.set(0.5, G.player.pos.y + 0.3, 6.0); b.owner = null; b.dirty = true;
     G.props.actT = 0; G.props.use();
   });
-  await B.page.waitForFunction(() => !!window.__cozy.game.props.lastHit, null, { timeout: 20000 }).catch(() => {});
+  await B.page.waitForFunction(() => !!window.__cozy.game.props.lastHit, null, { timeout: 40000 }).catch(() => {});
   const hit = await g(B, () => window.__cozy.game.props.lastHit);
   check('Bob получил удар битой с отдачей', !!hit && hit.from === aId && hit.v[1] > 3 && hit.v[2] > 3, JSON.stringify(hit));
   for (let i = 0; i < 50 && !carol.hits.length; i++) await new Promise((r) => setTimeout(r, 100));

@@ -464,6 +464,7 @@ export class Props {
     s = s ? 1 : 0;
     if (p.state === s) return;
     p.state = s;
+    if (p === this.holding) this.game.holdKind = this._holdKind(p); // раскрыли зонт — сразу другая поза
     if (local) this.net?.send({ t: 'pst', id: p.id, s });
     const a = this.game.audio;
     if (!quiet) {
