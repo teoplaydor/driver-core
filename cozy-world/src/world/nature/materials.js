@@ -88,8 +88,6 @@ export function plantMaterial({
     side: THREE.DoubleSide,
     map: textured ? foliageAtlas() : null,
     alphaTest: textured ? 0.5 : 0,
-    // с MSAA края листьев сглаживаются (вместо "лесенки" альфа-теста)
-    alphaToCoverage: textured,
   });
   mat.onBeforeCompile = (shader) => {
     bindNature(shader, ['uTime', 'uWindDir', 'uLod', 'uOccA', 'uOccB', 'uOccOn', 'uOccR']);
@@ -179,7 +177,7 @@ const DECOR_VERTEX_BODY = /* glsl */`
 // aAnchor = (основание предмета xyz, ранг для плавного появления), aWind - сила качания.
 export function decorMaterial(fade) {
   const mat = new THREE.MeshLambertMaterial({
-    vertexColors: true, side: THREE.DoubleSide, map: foliageAtlas(), alphaTest: 0.5, alphaToCoverage: true,
+    vertexColors: true, side: THREE.DoubleSide, map: foliageAtlas(), alphaTest: 0.5,
   });
   mat.onBeforeCompile = (shader) => {
     bindNature(shader, ['uTime', 'uWindDir', 'uCamPos', 'uOccA', 'uOccB', 'uOccOn', 'uOccR']);
