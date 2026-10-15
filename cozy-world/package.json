@@ -1,0 +1,24 @@
+{
+  "name": "cozy-world",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Уютный 3D-мир в браузере: комнаты по коду, друзья, мини-игры, голос по расстоянию",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "start": "node server/index.js",
+    "build:preview": "node scripts/build-preview.mjs",
+    "test": "node tests/physics.mjs && node tests/multi.mjs && node tests/touch.mjs",
+    "tour": "node tests/tour.mjs"
+  },
+  "dependencies": {
+    "three": "0.170.0",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "esbuild": "^0.25.0",
+    "playwright-core": "1.56.1",
+    "vite": "^6.0.0"
+  }
+}

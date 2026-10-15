@@ -1,0 +1,18 @@
+[Unit]
+Description=Cozy World (игровой сервер и раздача клиента)
+After=network.target
+
+[Service]
+WorkingDirectory=/opt/cozy-world
+Environment=NODE_ENV=production
+Environment=PORT=3000
+Environment=HOST=127.0.0.1
+# Адреса STUN/TURN для голоса (JSON). Без TURN голос не заработает у людей за строгим NAT.
+#Environment=ICE_SERVERS=[{"urls":"stun:stun.l.google.com:19302"},{"urls":"turn:play.example.com:3478","username":"cozy","credential":"ПАРОЛЬ"}]
+ExecStart=/usr/bin/node server/index.js
+Restart=always
+RestartSec=2
+User=www-data
+
+[Install]
+WantedBy=multi-user.target

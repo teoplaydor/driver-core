@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
+  <meta name="theme-color" content="#cfe4f3" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <title>Cozy World</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Baloo+2:wght@500;700;800&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/src/style.css" />
+</head>
+<body>
+  <canvas id="game"></canvas>
+
+  <!-- Вход: ник, внешность, комната -->
+  <div id="menu" class="screen">
+    <div class="card">
+      <h1>Cozy World</h1>
+      <p class="sub">уютный мир для друзей — прямо в браузере</p>
+
+      <label class="field">
+        <span>Ник</span>
+        <input id="nick" maxlength="16" autocomplete="off" placeholder="Как тебя звать?" />
+      </label>
+
+      <div id="looks" class="looks"></div>
+      <button id="dice" class="ghost" type="button">🎲 Случайный вид</button>
+
+      <label class="field">
+        <span>Комната</span>
+        <input id="room" maxlength="12" autocomplete="off" placeholder="код (пусто — новая)" />
+      </label>
+
+      <button id="play" class="big" type="button">Играть</button>
+      <p id="status" class="status"></p>
+    </div>
+  </div>
+
+  <!-- Интерфейс в игре -->
+  <div id="hud" hidden>
+    <div id="crosshair"></div>
+    <div id="roominfo">
+      <span>Комната <b id="roomcode">—</b></span>
+      <span id="count">1 в сети</span>
+      <button id="copy" type="button">Ссылка</button>
+    </div>
+    <div id="mic" class="pill">🎤 микрофон выкл <kbd>V</kbd></div>
+    <div id="help"></div>
+    <div id="hints"></div>
+    <div id="chatlog"></div>
+    <form id="chatform" autocomplete="off"><input id="chatinput" maxlength="160" placeholder="Сообщение…" /></form>
+    <div id="players" hidden></div>
+    <div id="toast"></div>
+    <div id="pause" hidden><div class="card small"><h2>Пауза</h2><p>Нажми, чтобы продолжить</p></div></div>
+    <div id="fade"></div>
+  </div>
+
+  <!-- Сенсорное управление -->
+  <div id="touch" hidden>
+    <div id="lookpad"></div>
+    <div id="joy"><div id="knob"></div></div>
+    <div class="tbtns">
+      <button data-act="jump" class="b-jump" aria-label="Прыжок">⤒</button>
+      <button data-act="use" class="b-use" aria-label="Взять">✋</button>
+      <button data-act="throw" class="b-throw" aria-label="Бросить">↗</button>
+    </div>
+    <div class="tmini">
+      <button data-act="chat" aria-label="Чат">💬</button>
+      <button data-act="mic" aria-label="Микрофон">🎤</button>
+      <button data-act="emote" aria-label="Привет">👋</button>
+      <button data-act="view" aria-label="Камера">📷</button>
+      <button data-act="sprint" aria-label="Бег">⚡</button>
+      <button data-act="mute" aria-label="Звук">🔊</button>
+    </div>
+  </div>
+
+  <script type="module" src="/src/main.js"></script>
+</body>
+</html>
