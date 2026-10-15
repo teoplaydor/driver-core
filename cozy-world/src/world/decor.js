@@ -486,7 +486,8 @@ function snowdrift(seed) {
   g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
   g.setIndex(idx);
   g.computeVertexNormals();
-  const w = C('#f4f8fd'), sh = C('#c8d8ee');
+  // верх - в тон снегу рельефа (он темнее чистого белого из-за шума и голубых теней)
+  const w = C('#e9eff8'), sh = C('#c2d2e8');
   b.addGeometry(g, { uv: WHITE_UV, color: (p, n, c) => c.copy(sh).lerp(w, smoothstep(0.1, 0.9, n.y)) });
   return b;
 }
@@ -847,7 +848,7 @@ export class Decor {
       if (w.winter < 0.6) continue;
       if (rand() > 0.6) continue;
       const y = heightAt(x, z);
-      if (pathDist(x, z) < 2.4 || this._blocked(x, z) || slopeAt(x, z) > 0.35) continue;
+      if (pathDist(x, z) < 2.4 || this._blocked(x, z) || slopeAt(x, z) > 0.6) continue;
       const s = 0.9 + rand() * 1.3;
       add('drift', x, y - 0.04, z, s, { sy: 0.2 + rand() * 0.14 });
     }
@@ -891,12 +892,15 @@ export class Decor {
         const e = m.elements, ne = nm.elements;
         const tint = it.tint;
         const snow = it.snow > 0.55;
+        // сугроб "накинут" на рельеф: высота каждой вершины - над землёй под ней (на склоне край не висит)
+        const drape = it.t === 'drift';
         for (let k = 0; k < t.nv; k++) {
           const px = t.pos[k * 3], py = t.pos[k * 3 + 1], pz = t.pos[k * 3 + 2];
           const o = (vo + k) * 3;
           pos[o] = e[0] * px + e[4] * py + e[8] * pz + e[12];
           pos[o + 1] = e[1] * px + e[5] * py + e[9] * pz + e[13];
           pos[o + 2] = e[2] * px + e[6] * py + e[10] * pz + e[14];
+          if (drape) pos[o + 1] += heightAt(pos[o], pos[o + 2]) - e[13] - 0.03;
           const nx = t.nor[k * 3], ny = t.nor[k * 3 + 1], nz = t.nor[k * 3 + 2];
           let wx = ne[0] * nx + ne[3] * ny + ne[6] * nz, wy = ne[1] * nx + ne[4] * ny + ne[7] * nz, wz = ne[2] * nx + ne[5] * ny + ne[8] * nz;
           const L = Math.hypot(wx, wy, wz);
