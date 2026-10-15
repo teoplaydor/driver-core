@@ -32,7 +32,7 @@ export const USE_ACTIONS = ['swing', 'strum', 'toggle', 'throw', 'wave'];
 export const STANDS = [
   { id: 'umbSpawn', type: 'umbrellaStand', x: -1.8, z: 6.9 },
   { id: 'batRack', type: 'batRack', x: 4.45, z: 4.45, ry: -0.72 },
-  { id: 'boomCrate', type: 'crateStand', x: 5.9, z: 3.0, ry: 0.35 },
+  { id: 'boomCrate', type: 'crateStand', x: 3.3, z: 3.3, ry: -0.49 }, // в просвете между брёвнами у костра
   { id: 'stump', type: 'stump', x: 6.4, z: 5.6 },
   { id: 'table', type: 'campTable', x: -3.4, z: 6.4, ry: 0.5 },
   { id: 'umbRain', type: 'umbrellaStand', x: 2.2, z: 23.5 },
@@ -79,9 +79,9 @@ export const PROPS = [
   { id: 'crate3', kind: 'crate', x: -7.4, z: -4.2 },
   { id: 'crate4', kind: 'crate', x: 9.5, z: 3 },
   { id: 'crate5', kind: 'crate', x: 10.4, z: 3.8 },
-  // походные эмалированные кружки у брёвен
-  { id: 'mug1', kind: 'mug', v: 'red', x: CAMPFIRE.x + 2.2, z: CAMPFIRE.z - 3.2 },
-  { id: 'mug2', kind: 'mug', v: 'blue', x: CAMPFIRE.x - 3.1, z: CAMPFIRE.z - 2.4 },
+  // походные эмалированные кружки на брёвнах у костра
+  { id: 'mug1', kind: 'mug', v: 'red', x: CAMPFIRE.x + 2.38, z: CAMPFIRE.z - 4.07, rot: [0, 0.8, 0] },
+  { id: 'mug2', kind: 'mug', v: 'blue', x: CAMPFIRE.x - 4.42, z: CAMPFIRE.z + 1.66, rot: [0, -2, 0] },
   { id: 'mug3', kind: 'mug', v: 'green', ...on('table', -0.02, 0.13), rot: [0, 2.2, 0] },
   // биты в стойке у костра и одна у беседки
   bat('bat1', 'wood', -0.33, 0.07),
@@ -96,11 +96,11 @@ export const PROPS = [
   umb('umb5', 'rainbow', 'umbRain', -0.04, 0.04, -0.08, -0.08),
   // фонари: на столике и на брёвнах у костра (горят)
   { id: 'lantern1', kind: 'lantern', ...on('table', -0.22, -0.04), s: 1 },
-  { id: 'lantern2', kind: 'lantern', x: 2.66, z: 3.0, s: 1 },
-  { id: 'lantern3', kind: 'lantern', x: -3.0, z: -3.3, s: 1 },
+  { id: 'lantern2', kind: 'lantern', x: 2.58, z: 3.975, s: 1 }, // на концах брёвен-скамеек
+  { id: 'lantern3', kind: 'lantern', x: -2.58, z: -3.975, s: 1 },
   // гитара прислонена к бревну, бумбокс на ящике
   { id: 'guitar1', kind: 'guitar', x: -2.36, z: 4.5, rot: [-0.42, 0.44, 0] },
-  { id: 'boombox1', kind: 'boombox', ...on('boomCrate', 0, 0), rot: [0, 0.35 - 0.9, 0], s: 0 },
+  { id: 'boombox1', kind: 'boombox', ...on('boomCrate', 0, 0), rot: [0, -0.49, 0], s: 0 },
   // фрисби на траве у спавна
   { id: 'frisbee1', kind: 'frisbee', v: 'orange', x: -1.4, z: 11.2, rot: [0, 0.4, 0] },
   { id: 'frisbee2', kind: 'frisbee', v: 'lime', x: 3.6, z: 9.6, rot: [0, 1.1, 0] },

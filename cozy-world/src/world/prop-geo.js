@@ -308,9 +308,11 @@ export function umbrellaGeo(style, o, d, ribs = o > 0) {
           // сложенный: ткань собирается складками и обмотана вокруг стержня, у ремешка перетянута;
           // раскрытый: слегка провисает между спицами
           const cinch = 1 - 0.55 * Math.exp(-(((s - 0.42) / 0.07) ** 2));
-          const fold = 0.036 * sst(0, 0.45, s) * (1 - 0.25 * sst(0.8, 1, s)) * cinch * (0.6 + 0.4 * w);
-          const bulge = fold * (1 - e) + 0.012 * e * w;
-          P.x += rx * bulge; P.z += rz * bulge;
+          const fold = 0.034 * sst(0, 0.45, s) * (1 - 0.25 * sst(0.8, 1, s)) * cinch * (0.86 + 0.14 * w);
+          // складки — по радиусу самой вершины (у соседних панелей общие края совпадают), провис — к середине панели
+          const rl = Math.hypot(P.x, P.z) || 1;
+          P.x += (P.x / rl) * fold * (1 - e) + rx * 0.012 * e * w;
+          P.z += (P.z / rl) * fold * (1 - e) + rz * 0.012 * e * w;
           P.y -= 0.01 * e * w * s;
           const tw = 0.55 * (1 - e) * s; // обмотка по спирали
           if (tw) { const c = Math.cos(tw), sn = Math.sin(tw), px = P.x; P.x = px * c + P.z * sn; P.z = -px * sn + P.z * c; }
@@ -364,7 +366,7 @@ export function umbrellaGeo(style, o, d, ribs = o > 0) {
   // ремешок с кнопкой: на сложенном охватывает купол, на раскрытом — колечко под бегунком
   const sR = 0.42;
   ribPoint(sR, e, rp);
-  const strapR = (rp.x + 0.036 * 0.45 * 0.65 + 0.007) * (1 - e) + 0.013 * e;
+  const strapR = (rp.x + 0.034 * 0.45 * 0.9 + 0.006) * (1 - e) + 0.013 * e;
   const strapY = rp.y * (1 - e) + (runY - 0.05) * e;
   const strapC = pal[0].clone().multiplyScalar(0.7);
   B.add(cyl(strapR, strapR, 0.026, d ? 16 : 8, true), strapC, MT.fabric, T(0, strapY, 0));

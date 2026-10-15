@@ -32,7 +32,7 @@ try {
   const g = (p, fn, arg) => p.page.evaluate(fn, arg);
 
   check('A онлайн', await g(A, () => window.__cozy.game.online));
-  check('B онлайн', await g(B, () => window.__cozy.game.online));
+  check('B онлайн', await g(B, () => window.__cozy.game.online), await g(B, () => document.getElementById('status')?.textContent || ''));
 
   await A.page.waitForFunction(() => window.__cozy.game.remotes.size === 1, null, { timeout: 15000 }).catch(() => {});
   await B.page.waitForFunction(() => window.__cozy.game.remotes.size === 1, null, { timeout: 15000 }).catch(() => {});
@@ -80,6 +80,58 @@ try {
   const bp = await g(B, () => window.__cozy.game.props.byId.get('ball1').pos.toArray());
   const ap = await g(A, () => window.__cozy.game.props.byId.get('ball1').pos.toArray());
   check('позиция мяча совпадает у A и B', Math.hypot(bp[0] - ap[0], bp[2] - ap[2]) < 0.6, `A=${ap.map((v) => +v.toFixed(2))} B=${bp.map((v) => +v.toFixed(2))}`);
+
+  // WS3: зонт и бумбокс — состояние синхронизируется и отдаётся новичкам в welcome; действие видно у аватара
+  const aId = await g(A, () => window.__cozy.game.net.id);
+  await g(A, () => { const P = window.__cozy.game.props; P.grab(P.byId.get('umb1')); });
+  await B.page.waitForFunction((id) => window.__cozy.game.props.byId.get('umb1').owner === id, aId, { timeout: 8000 }).catch(() => {});
+  await A.page.waitForTimeout(400);
+  await g(A, () => { const P = window.__cozy.game.props; P.actT = 0; P.use(); });
+  await B.page.waitForFunction(() => window.__cozy.game.props.byId.get('umb1').state === 1, null, { timeout: 8000 }).catch(() => {});
+  check('зонт раскрылся у Bob', await g(B, () => window.__cozy.game.props.byId.get('umb1').state === 1));
+  check('у Bob зонт в руке аватара Alice', await g(B, (id) => {
+    const p = window.__cozy.game.props.byId.get('umb1');
+    const r = window.__cozy.game.remotes.get(id);
+    return p.held && !!p.solo?.visible && r && p.pos.distanceTo(r.avatar.root.position) < 2.2;
+  }, aId));
+  check('holdKind Alice = umbrella', await g(A, () => window.__cozy.game.holdKind === 'umbrella'));
+  await g(A, () => { const P = window.__cozy.game.props; P.release(0); P._rest(P.byId.get('umb1')); P.grab(P.byId.get('boombox1')); });
+  await A.page.waitForTimeout(500);
+  await g(A, () => { const P = window.__cozy.game.props; P.actT = 0; P.use(); });
+  await B.page.waitForFunction(() => window.__cozy.game.props.byId.get('boombox1').state === 1, null, { timeout: 8000 }).catch(() => {});
+  check('бумбокс включился у Bob (музыка)', await g(B, () => window.__cozy.game.props.byId.get('boombox1').state === 1 && window.__cozy.game.audio._boxes?.has('boombox1')));
+  const C = await open('Carol');
+  await C.page.waitForTimeout(500);
+  check('новичок видит раскрытый зонт и музыку (welcome)', await g(C, () => {
+    const P = window.__cozy.game.props;
+    return P.byId.get('umb1').state === 1 && P.byId.get('boombox1').state === 1;
+  }));
+  check('нет ошибок на странице C', C.errors.length === 0, C.errors.slice(0, 3).join(' | '));
+  await C.ctx.close();
+  await g(A, () => { const P = window.__cozy.game.props; P.actT = 0; P.use(); P.release(0); P._rest(P.byId.get('boombox1')); });
+
+  // WS3: удар битой — Bob стоит перед Alice: его отбрасывает (через сервер), мяч рядом улетает и становится Alice
+  await g(A, () => { const G = window.__cozy.game; const p = G.player; p.pos.set(0, p.pos.y, 5); p.yaw = Math.PI; G.props.grab(G.props.byId.get('bat1')); });
+  await g(B, () => { const p = window.__cozy.game.player; p.pos.set(0, p.pos.y, 6.3); p.yaw = 0; });
+  await A.page.waitForFunction(() => {
+    const r = [...window.__cozy.game.remotes.map.values()][0];
+    return r && Math.abs(r.avatar.root.position.z - 6.3) < 0.3;
+  }, null, { timeout: 15000 }).catch(() => {});
+  await g(A, () => {
+    const G = window.__cozy.game, b = G.props.byId.get('ball2');
+    b.pos.set(0.5, G.player.pos.y + 0.3, 6.0); b.owner = null; b.dirty = true;
+    G.props.actT = 0; G.props.use();
+  });
+  await B.page.waitForFunction(() => !!window.__cozy.game.props.lastHit, null, { timeout: 20000 }).catch(() => {});
+  const hit = await g(B, () => window.__cozy.game.props.lastHit);
+  check('Bob получил удар битой с отдачей', !!hit && hit.from === aId && hit.v[1] > 3 && hit.v[2] > 3, JSON.stringify(hit));
+  check('Bob видит замах у аватара Alice', await g(B, (id) => {
+    const a = window.__cozy.game.remotes.get(id)?.avatar.anim;
+    return !!a && (a.act?.name === 'swing' || window.__cozy.game.props.byId.get('bat1').held);
+  }, aId));
+  await B.page.waitForFunction((id) => window.__cozy.game.props.byId.get('ball2').owner === id, aId, { timeout: 8000 }).catch(() => {});
+  check('мяч от удара достался Alice (kick)', await g(B, (id) => window.__cozy.game.props.byId.get('ball2').owner === id, aId));
+  await g(A, () => { const P = window.__cozy.game.props; P.release(0); P._rest(P.byId.get('bat1')); });
 
   // голос: Alice включает (фейковый) микрофон, у Bob должно подняться WebRTC-соединение и пойти звук
   await g(A, async () => { await window.__cozy.game.voice.enable(); });
