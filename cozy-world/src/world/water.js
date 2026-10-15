@@ -153,9 +153,10 @@ void main() {
   vec3 body = mix(uShallow, uDeep, smoothstep(0.05, 2.6, dep)) * light * uHemi;
   // пена у кромки: бегущие к берегу полосы, рваные шумом
   float fn = wn(p * 2.2 + vec2(t * 0.15, -t * 0.1)) * 0.6 + wn(p * 5.3 - t * 0.2) * 0.4;
-  float bands = sin(dep * 26.0 - t * 2.2 + fn * 3.0) * 0.5 + 0.5;
-  float foam = (1.0 - smoothstep(0.02, 0.32, dep)) * smoothstep(0.45, 0.85, bands * 0.6 + fn * 0.55);
-  foam = max(foam, 1.0 - smoothstep(0.0, 0.05 + fn * 0.04, dep));
+  // тонкие линии набегающих волн: бегут к берегу, рвутся шумом, гаснут с глубиной
+  float wave = fract(dep * 4.5 + t * 0.3 + fn * 0.5);
+  float line = smoothstep(0.8, 0.93, wave) * (1.0 - smoothstep(0.95, 1.0, wave));
+  float foam = line * (1.0 - smoothstep(0.04, 0.42, dep)) * smoothstep(0.38, 0.7, fn);
   vec3 col;
   float alpha = 1.0;
 #ifdef DEFERRED
@@ -213,12 +214,15 @@ void main() {
     }
   }
   col = mix(refr, refl, fres) + spec * (1.0 - foam);
-  // мягкая кромка: где слой тонкий - пена и плавный переход в дно
-  foam = max(foam, (1.0 - smoothstep(0.0, 0.22 + fn * 0.15, thick)) * 0.8);
-  col = mix(col, uFoam * light * uHemi * 1.15, clamp(foam, 0.0, 1.0) * 0.85);
+  // кромка: тонкая рваная полоса пены там, где слой воды тонкий (дальше - прозрачная вода над дном)
+  float lace = smoothstep(0.35, 0.75, fn + 0.25 * sin(t * 1.7 + p.x * 0.9 - p.y * 0.7));
+  foam = max(foam, (1.0 - smoothstep(0.0, 0.06 + fn * 0.1, thick)) * lace * 0.9);
+  col = mix(col, uFoam * light * uHemi * 1.1, clamp(foam, 0.0, 1.0) * 0.75);
   } else
 #endif
   {
+  // без копии кадра кромку прячет сплошная полоса пены
+  foam = max(foam, (1.0 - smoothstep(0.0, 0.04 + fn * 0.04, dep)) * 0.7);
   alpha = smoothstep(0.0, 0.07, dep / ${f(MAX_DEPTH)} * 4.0);
   vec3 base = mix(body, refl, fres);
   col = base + spec * (1.0 - foam);
