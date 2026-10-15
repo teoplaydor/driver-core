@@ -51,6 +51,8 @@ export class Game {
 
     this.look = { ...this.ui.look };
     this.nick = '';
+    Avatar.lodDistance = { high: 9, medium: 5.5, low: 4 }[this.qualityName] ?? 9; // WS1: детализация персонажей
+    Avatar.shadows = this.quality.shadow > 0;
     this.avatar = new Avatar(this.look, { name: '', local: true });
     this.world.scene.add(this.avatar.root);
     // WS1: стопы аватаров ставятся на рельеф и верх ящиков/столов
@@ -325,9 +327,9 @@ export class Game {
     this.menuT += dt;
     const cam = this.camera;
     // WS1: кадр 3/4 под нового персонажа; он стоит, моргает и поглядывает в камеру
-    cam.position.set(2.15, 1.32, 8.25);
-    cam.lookAt(0.62, 0.86, 5.25);
-    cam.fov = 46;
+    cam.position.set(3.05, 1.3, 7.75);
+    cam.lookAt(0.55, 0.84, 5.2);
+    cam.fov = 42;
     cam.updateProjectionMatrix();
     this.avatar.lookAt(cam.position);
     this.avatar.update(dt, { speed: 0, grounded: true, vy: 0, pitch: 0, holdKind: null, talk: 0 }, this.camera);

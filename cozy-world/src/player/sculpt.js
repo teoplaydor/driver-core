@@ -12,7 +12,6 @@ const _b = new THREE.Vector3();
 const _nm = new THREE.Matrix3();
 const _m = new THREE.Matrix4();
 const _qt = new THREE.Quaternion();
-const _e = new THREE.Euler();
 const _s = new THREE.Vector3();
 
 export const C = (hex) => new THREE.Color(hex);
@@ -75,10 +74,14 @@ class Slot {
 const _w = [0, 0, 0, 0, 0, 0, 0, 0];
 
 export class Sculpt {
-  constructor(slots = 1) {
+  // lod: упрощённая версия — меньше сегментов, мелкие детали (шнурки, швы, пуговицы, блики) пропускаются
+  constructor(slots = 1, lod = false) {
     this.slots = Array.from({ length: slots }, () => new Slot());
     this.slot = 0;
+    this.lod = lod;
   }
+
+  _n(n, min) { return this.lod ? Math.max(min, Math.round(n * 0.5)) : n; }
 
   // Готовые массивы части. color: THREE.Color | fn(x, y, z, out, t); bone: индекс | fn(x, y, z, t) -> [b0, w0, b1, w1, ...]
   part(P, N, I, color, bone, T) {
@@ -99,6 +102,7 @@ export class Sculpt {
 
   // Примитив three (индексированный) с матрицей m.
   geo(g, m, color, bone) {
+    if (this.lod) { g.dispose(); return; }
     const pa = g.getAttribute('position'), na = g.getAttribute('normal');
     _nm.getNormalMatrix(m);
     const P = new Float32Array(pa.count * 3), N = new Float32Array(pa.count * 3);
@@ -116,6 +120,8 @@ export class Sculpt {
   // Параметрическая поверхность fn(u, v, out). wrap — замкнута по u; poles — v = 0 и v = 1 сходятся в точку.
   grid(fn, nu, nv, opts, color, bone) {
     const { wrap = true, poles = false, flip = false } = opts || {};
+    nu = this._n(nu, wrap ? 6 : 3);
+    nv = this._n(nv, poles ? 4 : 2);
     const P = [], I = [], T = [];
     const cols = wrap ? nu : nu + 1;
     const v0 = poles ? 1 : 0, v1 = poles ? nv - 1 : nv;
@@ -148,6 +154,7 @@ export class Sculpt {
 
   // Эллипсоид: центр, радиусы, необязательный поворот (Euler) и деформация deform(dir, out) по направлению.
   ellipsoid(c, r, nu, nv, color, bone, { rot = null, deform = null } = {}) {
+    if (this.lod && Math.max(r[0], r[1], r[2]) < 0.012) return;
     const q = rot ? new THREE.Quaternion().setFromEuler(new THREE.Euler(...rot)) : null;
     const d = new THREE.Vector3();
     this.grid((u, v, out) => {
@@ -162,9 +169,11 @@ export class Sculpt {
   // Трубка вдоль точек pts с радиусами radii (число или массив). Концы скругляются полусферами.
   // opts: radial, caps [начало, конец], closed (кольцо), ref (ось для рамки без закрутки), squash [по N, по B].
   tube(pts, radii, opts, color, bone) {
-    const { radial = 8, caps = [true, true], closed = false, ref = null, squash = null, capSegs = 3 } = opts || {};
+    const { caps = [true, true], closed = false, ref = null, squash = null } = opts || {};
     const n = pts.length;
     const R = (i) => (typeof radii === 'number' ? radii : radii[i]);
+    if (this.lod && (typeof radii === 'number' ? radii : Math.max(...radii)) < 0.0058) return;
+    const radial = this._n(opts?.radial ?? 8, 4), capSegs = this.lod ? 1 : opts?.capSegs ?? 3;
     const T = [], Nn = [], Bn = [];
     for (let i = 0; i < n; i++) {
       const pa = closed ? pts[(i - 1 + n) % n] : pts[Math.max(0, i - 1)];
@@ -238,6 +247,7 @@ export class Sculpt {
 
   // Короткий цилиндр-«таблетка» (пуговицы, заклёпки): центр, нормаль, радиус, толщина.
   disc(c, n, r, h, color, bone, segs = 10) {
+    if (this.lod) return;
     const g = new THREE.CylinderGeometry(r, r * 1.04, h, segs, 1);
     _qt.setFromUnitVectors(_s.set(0, 1, 0), n.clone().normalize());
     _m.compose(c, _qt, _p.set(1, 1, 1));
@@ -280,4 +290,3 @@ export const blend2 = (b0, b1, x0, x1) => (x) => {
   return [b0, 1 - t, b1, t];
 };
 
-export { _e as tmpEuler };

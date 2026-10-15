@@ -111,6 +111,8 @@ function bubbleCanvas(text) {
 }
 
 const bodyMat = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.74, metalness: 0 });
+// невидимый «теневой двойник» из упрощённой геометрии: тень дешевле, а в 1-м лице только он и рисуется
+const shadowMat = new THREE.MeshBasicMaterial({ colorWrite: false, depthWrite: false });
 const glossMat = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.36, metalness: 0 });
 const TAG_H = 0.3;
 
@@ -137,19 +139,25 @@ export class Avatar {
     this.handL = bones[B.handL];
     this.head = bones[B.head];
 
-    const geo = buildCharacter(look);
-    this.top = geo.top;
-    this.body = new THREE.SkinnedMesh(geo.body, this.mat);
-    this.gloss = new THREE.SkinnedMesh(geo.gloss, this.glossMat);
-    for (const m of [this.body, this.gloss]) {
+    this.hi = buildCharacter(look);
+    this.lo = buildCharacter(look, { lod: true });
+    this.top = this.hi.top;
+    this.lod = 0;
+    this.bodyShown = true;
+    this.body = new THREE.SkinnedMesh(this.hi.body, this.mat);
+    this.gloss = new THREE.SkinnedMesh(this.hi.gloss, this.glossMat);
+    this.shadow = new THREE.SkinnedMesh(this.lo.body, shadowMat);
+    for (const m of [this.body, this.gloss, this.shadow]) {
       m.bind(skeleton, new THREE.Matrix4());
       m.boundingSphere = new THREE.Sphere(new THREE.Vector3(0, 0.75, 0), 1.25);
       m.frustumCulled = true;
       this.root.add(m);
     }
-    this.body.castShadow = true;
+    this.body.castShadow = false;
     this.body.receiveShadow = true;
     this.gloss.castShadow = false;
+    this.shadow.castShadow = true;
+    this.shadow.visible = Avatar.shadows;
 
     // точки крепления предметов (контракт C3): +Y — вверх по предмету, −Z — вперёд
     this.anchors = {};
@@ -199,13 +207,24 @@ export class Avatar {
 
   setLook(look) {
     this.look = look;
-    const geo = buildCharacter(look);
-    this.body.geometry.dispose();
-    this.gloss.geometry.dispose();
-    this.body.geometry = geo.body;
-    this.gloss.geometry = geo.gloss;
-    this.top = geo.top;
+    this._disposeGeo();
+    this.hi = buildCharacter(look);
+    this.lo = buildCharacter(look, { lod: true });
+    this.top = this.hi.top;
+    this.shadow.geometry = this.lo.body;
+    this._applyLod();
     this._placeTag();
+  }
+
+  _disposeGeo() {
+    for (const g of [this.hi, this.lo]) { g.body.dispose(); g.gloss.dispose(); }
+  }
+
+  // Детализация: вблизи полная модель, дальше — упрощённая (~4x меньше треугольников).
+  _applyLod() {
+    const g = this.lod ? this.lo : this.hi;
+    this.body.geometry = g.body;
+    this.gloss.geometry = g.gloss;
   }
 
   setName(name) {
@@ -234,12 +253,11 @@ export class Avatar {
   act(name) { if (ACTIONS[name]) this.anim.play(name); }
   wave() { this.act('wave'); }
 
-  // Свой аватар в первом лице невидим, но продолжает отбрасывать тень.
+  // Свой аватар в первом лице невидим, но продолжает отбрасывать тень (её даёт упрощённый двойник).
   setBodyVisible(v) {
-    for (const m of [this.mat, this.glossMat]) {
-      m.colorWrite = v;
-      m.depthWrite = v;
-    }
+    this.bodyShown = v;
+    this.body.visible = v;
+    this.gloss.visible = v;
   }
 
   say(text) {
@@ -275,6 +293,11 @@ export class Avatar {
       this.bubble.sprite.material.opacity = clamp(this.bubble.life, 0, 1);
       if (this.bubble.life <= 0) this.clearBubble();
     }
+    if (camera) {
+      const d = camera.position.distanceTo(this.root.position);
+      const lod = d > Avatar.lodDistance + (this.lod ? -0.6 : 0.6) ? 1 : 0;
+      if (lod !== this.lod) { this.lod = lod; this._applyLod(); }
+    }
     // ник: с расстоянием немного растёт (читается с 10+ м) и плавно гаснет вдали
     if (camera && !this.local) {
       const d = camera.position.distanceTo(this.root.position);
@@ -288,11 +311,15 @@ export class Avatar {
 
   dispose() {
     this.clearBubble();
-    this.body.geometry.dispose();
-    this.gloss.geometry.dispose();
+    this._disposeGeo();
     this.tagTex.dispose();
     this.tag.material.dispose();
     this.skeleton.dispose();
     if (this.local) { this.mat.dispose(); this.glossMat.dispose(); }
   }
 }
+
+// дальше этого расстояния (м) — упрощённая модель; game.js ставит по качеству графики
+Avatar.lodDistance = 9;
+// без карты теней теневой двойник не нужен
+Avatar.shadows = true;
