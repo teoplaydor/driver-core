@@ -221,7 +221,9 @@ void main() {
   col = mix(refr, refl, fres) + spec * (1.0 - foam);
   // кромка: тонкая рваная полоса пены там, где слой воды тонкий (дальше - прозрачная вода над дном)
   float lace = smoothstep(0.35, 0.75, fn + 0.25 * sin(t * 1.7 + p.x * 0.9 - p.y * 0.7));
-  foam = max(foam, (1.0 - smoothstep(0.0, 0.06 + fn * 0.1, thick)) * lace * 0.9);
+  // только у настоящего берега и на мелководье: кувшинки лежат на воде (глубже 0.45 м), и проходящая волна
+  // иначе заливала бы их пеной целиком - они мигали бы белым
+  foam = max(foam, (1.0 - smoothstep(0.0, 0.06 + fn * 0.1, thick)) * lace * 0.9 * smoothstep(0.5, 0.3, dep));
   col = mix(col, uFoam * light * uHemi * 1.1, clamp(foam, 0.0, 1.0) * 0.75);
   } else
 #endif
