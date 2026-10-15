@@ -231,14 +231,47 @@ export function batGeo(variant, d) {
         return;
       }
       g(x, y, z, out);
-      // выжженное клеймо на бочке
-      const ly = (y - 0.2) / 0.06, la = a / 0.5, e = ly * ly + la * la;
-      if (e < 1) {
-        out.lerp(logo, 0.85);
-        if (e < 0.55 && Math.abs(Math.sin(ly * 7)) < 0.45) out.lerp(wood, 0.45);
-      }
       if (y > 0.405) out.multiplyScalar(0.86); // торец темнее
     }, (x, y) => (y < -0.186 && y > -0.388 ? MT.rubber : MT.lacq));
+    // выжженное клеймо на бочке — отдельной частой сеткой поверх (в сетке самой биты оно расплывалось в пятно):
+    // овальная рамка и строка «букв»; вне клейма сетка повторяет цвет дерева под ней
+    if (d) {
+      const rAt = (y) => { // радиус профиля бочки на высоте y
+        for (let i = 1; i < prof.length; i++) {
+          const [r0, y0] = prof[i - 1], [r1, y1] = prof[i];
+          if (y >= y0 && y <= y1) return r0 + ((r1 - r0) * (y - y0)) / (y1 - y0);
+        }
+        return 0.045;
+      };
+      const NU = 36, NV = 30, A0 = 0.54, Y0 = 0.138, Y1 = 0.262, pos = [], idx = [], inside = [];
+      for (let v = 0; v <= NV; v++) {
+        const y = Y0 + ((Y1 - Y0) * v) / NV, r = rAt(y) + 0.0009;
+        for (let u = 0; u <= NU; u++) {
+          const a = -A0 + (2 * A0 * u) / NU;
+          pos.push(Math.sin(a) * r, y, Math.cos(a) * r);
+          inside.push(Math.hypot(a / 0.5, (y - 0.2) / 0.058) < 1.04);
+        }
+      }
+      for (let v = 0; v < NV; v++) {
+        for (let u = 0; u < NU; u++) {
+          const i = v * (NU + 1) + u;
+          // клетки целиком снаружи овала не нужны: там видна сама бита того же цвета
+          if (inside[i] || inside[i + 1] || inside[i + NU + 1] || inside[i + NU + 2]) idx.push(i, i + 1, i + NU + 1, i + 1, i + NU + 2, i + NU + 1);
+        }
+      }
+      const dg = new THREE.BufferGeometry();
+      dg.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+      dg.setIndex(idx);
+      B.add(dg, (x, y, z, out) => {
+        g(x, y, z, out);
+        const la = Math.atan2(x, z) / 0.5, ly = (y - 0.2) / 0.058, e = Math.sqrt(la * la + ly * ly);
+        const ring = sst(0.78, 0.86, e) * (1 - sst(0.94, 1.01, e));
+        // две строки «надписи»: короткие штрихи-буквы поперёк бочки
+        const row = (c, h, w, f, ph) => (1 - sst(h * 0.6, h, Math.abs(ly - c))) * (1 - sst(w - 0.06, w, Math.abs(la))) * sst(-0.2, 0.35, Math.sin(la * f + ph));
+        const text = Math.max(row(0.2, 0.16, 0.64, 26, 0.4), row(-0.24, 0.11, 0.48, 31, 1.3));
+        out.lerp(logo, 0.88 * Math.max(ring, text));
+      }, MT.lacq);
+    }
   } else {
     const paint = C(variant === 'alu2' ? '#2f6fd6' : '#d93a2e'), dark = C('#1d1d22'), silver = C('#cfd3d8'), white = C('#f4f4f0');
     B.add(geo, (x, y, z, out) => {
