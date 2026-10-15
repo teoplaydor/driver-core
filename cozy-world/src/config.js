@@ -14,7 +14,7 @@ export const QUALITY = {
   },
   low: {
     dpr: 1, shadow: 0, shadowRange: 40, grassChunks: 2, grassPerChunk: 380, trees: 0.55,
-    grassRadius: 24, grassChunk: 24, grassBlades: [5, 3, 3], grassDensity: 2.2, grassLod: 6, grassFade: 10, treeNear: 32, treeDetail: 0.5, decorRadius: 26, decorDensity: 0.35,
+    grassRadius: 24, grassChunk: 24, grassBlades: [5, 3, 3], grassDensity: 2.0, grassLod: 6, grassFade: 10, treeNear: 32, treeDetail: 0.5, decorRadius: 26, decorDensity: 0.35,
     terrainLite: true,
   },
 };

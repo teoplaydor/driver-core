@@ -321,6 +321,23 @@ export function broadDetailed({ seed = 1, kind = 'broad', lod = 1, hero = false 
         tint: 1, wind: 1, bend: s * 0.14,
       });
     }
+    if (hero) {
+      // под героическим деревом стоят игроки: снизу по сердцевине - ещё слой листвы вместо гладкого тёмного шара
+      const nUnder = Math.round(r * r * 9);
+      for (let j = 0; j < nUnder; j++) {
+        const a = rand() * TAU, dy = -0.35 - rand() * 0.65;
+        const sxz = Math.sqrt(Math.max(0, 1 - dy * dy));
+        const d = V(Math.cos(a) * sxz, dy, Math.sin(a) * sxz);
+        const p = V(x, y, z).addScaledVector(d, r * (0.55 + rand() * 0.15));
+        const s = 0.95 * (0.8 + rand() * 0.4);
+        const cn = d.clone().add(V(rand() - 0.5, -0.3, rand() - 0.5).multiplyScalar(0.6)).normalize();
+        card(b, p, cn, s, s, rand() * TAU, rect, {
+          sphereN: (q) => sphereN(q),
+          color: (q, c) => { const v = crownShade(q, d, crownC.y, r + 1.5, seed) * 0.9; c.setRGB(v, v, v); },
+          tint: 1, wind: 1, bend: s * 0.12,
+        });
+      }
+    }
   });
   return b.toGeometry();
 }
@@ -337,10 +354,10 @@ export function broadFar({ seed = 1, kind = 'broad', lod = 1 } = {}) {
   });
   const cy = blobs[0][1];
   const k = kind === 'broad' ? 0.64 : kind === 'maple' ? 0.72 : 0.7;
-  // на слабых устройствах - три шара вместо пяти (покрупнее)
+  // на слабых устройствах - три шара вместо пяти (покрупнее), на самых слабых боковые попроще
   const n = lod > 0.7 ? 5 : 3, grow = lod > 0.7 ? 1.12 : 1.2;
   blobs.slice(0, n).forEach(([x, y, z, r], i) => {
-    const g = blobGeometry(r * (i === 0 ? 1.05 : grow), 1, seed * 31 + i, 0.24, 2.4);
+    const g = blobGeometry(r * (i === 0 ? 1.05 : grow), i === 0 || lod > 0.55 ? 1 : 0, seed * 31 + i, 0.24, 2.4);
     g.translate(x, y, z);
     b.addGeometry(g, {
       uv: WHITE_UV, tint: 1,
