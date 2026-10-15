@@ -27,10 +27,11 @@ function parseVec(a, n, lim) {
   return out;
 }
 
+// Внешность: [кожа, наряд, шляпа, очки, цвет волос, причёска, борода]. Старые клиенты шлют 5 чисел.
 function parseLook(a) {
-  const lim = [6, 8, 7, 3, 6];
-  if (!Array.isArray(a) || a.length !== 5) return [0, 0, 0, 0, 0];
-  return a.map((v, i) => (Number.isInteger(v) && v >= 0 && v < lim[i] ? v : 0));
+  const lim = [6, 8, 6, 4, 6, 4, 3];
+  if (!Array.isArray(a) || a.length < 5 || a.length > lim.length) return lim.map(() => 0);
+  return lim.map((n, i) => (Number.isInteger(a[i]) && a[i] >= 0 && a[i] < n ? a[i] : 0));
 }
 
 class TokenBucket {
@@ -101,8 +102,8 @@ export function attachGameServer(httpServer, { path = '/ws', iceServers } = {}) 
 
   wss.on('connection', (ws) => {
     const client = {
-      id: (nextId++).toString(36), ws, room: null, name: '', look: [0, 0, 0, 0, 0],
-      st: { p: [0, 0, 0], r: 0, q: 0, sp: 0, a: 0 }, dirty: false, alive: true,
+      id: (nextId++).toString(36), ws, room: null, name: '', look: [0, 0, 0, 0, 0, 0, 0],
+      st: { p: [0, 0, 0], r: 0, q: 0, sp: 0, a: 0, hk: 0 }, dirty: false, alive: true,
       msgRate: new TokenBucket(80, 120), chatRate: new TokenBucket(0.8, 4),
     };
     ws.on('pong', () => { client.alive = true; });
@@ -126,7 +127,7 @@ export function attachGameServer(httpServer, { path = '/ws', iceServers } = {}) 
         client.room = room;
         room.clients.set(client.id, client);
         const players = [...room.clients.values()].filter((c) => c !== client).map((c) => ({
-          id: c.id, name: c.name, look: c.look, p: c.st.p, r: c.st.r, q: c.st.q, a: c.st.a,
+          id: c.id, name: c.name, look: c.look, p: c.st.p, r: c.st.r, q: c.st.q, a: c.st.a, hk: c.st.hk,
         }));
         const props = [...room.props].map(([id, pr]) => ({ id, p: pr.p, q: pr.q, o: pr.owner, h: pr.held ? 1 : 0 }));
         send({ t: 'welcome', id: client.id, room: code, players, props, ice });
@@ -142,7 +143,9 @@ export function attachGameServer(httpServer, { path = '/ws', iceServers } = {}) 
           const p = parseVec(m.p, 3, 1500);
           const r = num(m.r, -1000, 1000), q = num(m.q, -2, 2), sp = num(m.sp, 0, 40);
           if (!p || r === null || q === null || sp === null) return;
-          client.st = { p: [round(p[0]), round(p[1]), round(p[2])], r: round(r, 1000), q: round(q, 1000), sp: round(sp, 10), a: (m.a | 0) & 15 };
+          // hk — вид удержания предмета: 0 нет, 1 two, 2 one, 3 bat, 4 umbrella
+          const hk = Number.isInteger(m.hk) && m.hk >= 0 && m.hk <= 4 ? m.hk : 0;
+          client.st = { p: [round(p[0]), round(p[1]), round(p[2])], r: round(r, 1000), q: round(q, 1000), sp: round(sp, 10), a: (m.a | 0) & 15, hk };
           client.dirty = true;
           break;
         }
@@ -235,7 +238,7 @@ export function attachGameServer(httpServer, { path = '/ws', iceServers } = {}) 
       if (!room.clients.size) continue;
       const changed = [];
       for (const c of room.clients.values()) {
-        if (c.dirty) { changed.push([c.id, ...c.st.p, c.st.r, c.st.q, c.st.sp, c.st.a]); c.dirty = false; }
+        if (c.dirty) { changed.push([c.id, ...c.st.p, c.st.r, c.st.q, c.st.sp, c.st.a, c.st.hk]); c.dirty = false; }
       }
       const props = [];
       for (const [id, pr] of room.props) {

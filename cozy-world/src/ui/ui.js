@@ -1,14 +1,17 @@
 // HTML-интерфейс: вход, HUD, чат, подсказки. Игровая логика сюда не пишется:
 // UI только показывает состояние и вызывает колбэки.
 
-import { SKINS, OUTFITS, HATS, GLASSES, HAIRS, randomLook } from '../player/avatar.js';
+import { SKINS, OUTFITS, HATS, GLASSES, HAIRS, HAIR_STYLES, FACIAL, randomLook } from '../player/avatar.js';
 
+// WS1: добавлены причёска и борода (look из 7 элементов)
 const LOOK_ROWS = [
-  { key: 'skin', label: 'Кожа', values: SKINS.map((_, i) => `Тон ${i + 1}`) },
+  { key: 'skin', label: 'Кожа', values: SKINS.map((_, i) => `Тон ${i + 1}`), colors: SKINS },
   { key: 'outfit', label: 'Одежда', values: OUTFITS.map((o) => o.name) },
   { key: 'hat', label: 'Шляпа', values: HATS },
   { key: 'glasses', label: 'Очки', values: GLASSES },
-  { key: 'hair', label: 'Волосы', values: HAIRS.map((_, i) => `Цвет ${i + 1}`) },
+  { key: 'hairStyle', label: 'Причёска', values: HAIR_STYLES },
+  { key: 'hair', label: 'Волосы', values: HAIRS.map((_, i) => `Цвет ${i + 1}`), colors: HAIRS },
+  { key: 'facial', label: 'Борода', values: FACIAL },
 ];
 
 const $ = (id) => document.getElementById(id);
@@ -93,13 +96,38 @@ export class UI {
       prev.addEventListener('click', () => step(-1));
       next.addEventListener('click', () => step(1));
       box.appendChild(row);
-      this.rows.push({ r, val: row.querySelector('.val') });
+      this.rows.push({ r, val: row.querySelector('.val'), lbl: row.querySelector('.lbl') });
     }
+    // WS1: строк внешности стало 7 — на невысоких экранах раскладываем их в две колонки без подписей
+    const compact = () => {
+      const on = window.innerHeight < 860 && window.innerWidth > 560;
+      if (on === this._compact) return;
+      this._compact = on;
+      box.style.gridTemplateColumns = on ? 'minmax(0, 1fr) minmax(0, 1fr)' : '';
+      box.style.gap = on ? '5px 10px' : '';
+      for (const { lbl, val } of this.rows) {
+        lbl.style.display = on ? 'none' : '';
+        val.style.fontSize = on ? '15px' : '';
+        val.style.minWidth = on ? '0' : '';
+        for (const b of val.parentNode.querySelectorAll('.arrow')) b.style.width = on ? '32px' : '';
+      }
+      this._refreshLooks();
+    };
+    compact();
+    window.addEventListener('resize', compact);
     this._refreshLooks();
   }
 
   _refreshLooks() {
-    for (const { r, val } of this.rows) val.textContent = r.values[this.look[r.key]];
+    for (const { r, val } of this.rows) {
+      const i = this.look[r.key];
+      if (!r.colors) { val.textContent = r.values[i]; continue; }
+      // тон кожи и цвет волос — с образцом цвета; в компактном режиме подпись строки вместо «Тон N»
+      const sw = document.createElement('i');
+      sw.style.cssText = `display:inline-block;width:14px;height:14px;border-radius:50%;margin-right:6px;vertical-align:-1px;border:2px solid #fff;box-shadow:0 0 0 1px rgba(60,40,20,.25);background:${r.colors[i]}`;
+      val.textContent = '';
+      val.append(sw, document.createTextNode(this._compact ? `${r.label} ${i + 1}` : r.values[i]));
+    }
   }
 
   _play() {
