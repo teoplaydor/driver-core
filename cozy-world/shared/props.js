@@ -15,8 +15,9 @@ export const KINDS = {
   cup: { r: 0.08, rest: 'up', hold: 'one', bounce: 0.1, mass: 0.3 },
   teapot: { r: 0.14, rest: 'up', hold: 'one', bounce: 0.1, mass: 0.8 },
   bat: { r: 0.14, rest: 'side', hold: 'bat', act: 'swing', bounce: 0.3, mass: 0.9 },
-  // зонт держим перед грудью ('one'): в позе 'umbrella' (WS1) кулак уходит внутрь большой головы
-  umbrella: { r: 0.16, rest: 'side', hold: 'one', act: 'toggle', state: true, bounce: 0.2, mass: 0.8 },
+  // зонт: сложенный — на плече, как бита ('bat'); раскрытый клиент держит перед грудью ('one', см. Props._holdKind).
+  // Поза WS1 'umbrella' не годится: кулак в ней уходит внутрь большой головы.
+  umbrella: { r: 0.16, rest: 'side', hold: 'bat', act: 'toggle', state: true, bounce: 0.2, mass: 0.8 },
   lantern: { r: 0.12, rest: 'up', hold: 'one', act: 'toggle', state: true, bounce: 0.1, mass: 0.9 },
   guitar: { r: 0.24, rest: 'flatZ', hold: 'two', act: 'strum', bounce: 0.2, mass: 1.3 },
   boombox: { r: 0.25, rest: 'up', hold: 'two', act: 'toggle', state: true, bounce: 0.12, mass: 1.8 },

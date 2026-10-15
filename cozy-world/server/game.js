@@ -11,7 +11,7 @@ const MAX_PLAYERS = 16;
 const TICK_MS = 66; // ~15 снапшотов в секунду
 const ROOM_TTL_MS = 5 * 60 * 1000; // пустая комната живёт 5 минут, чтобы не терять переставленные предметы
 const ROOM_RE = /^[a-zа-я0-9_-]{1,12}$/;
-const HIT_MS = 400; // удар битой по игроку — не чаще раза в 0.4 с от одного игрока
+const HIT_MS = 400; // удар битой по игроку — не чаще раза в 0.4 с от одного игрока по одному и тому же
 
 const num = (v, min, max) => (typeof v === 'number' && Number.isFinite(v) ? Math.min(max, Math.max(min, v)) : null);
 const round = (v, k = 100) => Math.round(v * k) / k;
@@ -237,9 +237,10 @@ export function attachGameServer(httpServer, { path = '/ws', iceServers } = {}) 
           const target = typeof m.to === 'string' ? room.clients.get(m.to) : null;
           const v = parseVec(m.v, 3, 12);
           if (!target || target === client || !v) return;
-          const now = Date.now();
-          if (now - (client.hitAt || 0) < HIT_MS) return;
-          client.hitAt = now;
+          // лимит на пару «кто — кого»: один замах может задеть двоих, но очередью бить одного нельзя
+          const now = Date.now(), hits = client.hitAt || (client.hitAt = new Map());
+          if (now - (hits.get(target.id) || 0) < HIT_MS) return;
+          hits.set(target.id, now);
           if (target.ws.readyState === 1) target.ws.send(JSON.stringify({ t: 'hit', from: client.id, v: v.map((x) => round(x)) }));
           break;
         }

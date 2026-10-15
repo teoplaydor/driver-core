@@ -22,6 +22,12 @@ async function open(nick) {
   const errors = [];
   page.on('pageerror', (e) => errors.push(e.message));
   page.on('console', (m) => { if (m.type() === 'error') errors.push(m.text()); });
+  // программный WebGL под нагрузкой: первые кадры идут по нескольку секунд, и welcome не успевает обработаться
+  // за 7 с ожидания подключения (клиент уходит в одиночный режим) — в тесте даём на подключение минуту
+  await page.addInitScript(() => {
+    const st = window.setTimeout;
+    window.setTimeout = (f, ms, ...a) => st(f, ms === 7000 ? 60000 : ms, ...a);
+  });
   await page.goto(`${BASE}?autostart=1&nick=${nick}&room=${ROOM}&q=low&dpr=1`, { waitUntil: 'load', timeout: 120000 });
   await page.waitForFunction(() => window.__cozy?.game?.state === 'play', null, { timeout: 120000 });
   return { page, errors, ctx };
@@ -87,6 +93,7 @@ try {
   await g(A, () => { const P = window.__cozy.game.props; P.grab(P.byId.get('umb1')); });
   await B.page.waitForFunction((id) => window.__cozy.game.props.byId.get('umb1').owner === id, aId, { timeout: 8000 }).catch(() => {});
   await A.page.waitForTimeout(400);
+  check('holdKind Alice = bat (сложенный зонт на плече)', await g(A, () => window.__cozy.game.holdKind === 'bat'));
   await g(A, () => { const P = window.__cozy.game.props; P.actT = 0; P.use(); });
   await B.page.waitForFunction(() => window.__cozy.game.props.byId.get('umb1').state === 1, null, { timeout: 8000 }).catch(() => {});
   check('зонт раскрылся у Bob', await g(B, () => window.__cozy.game.props.byId.get('umb1').state === 1));
@@ -95,7 +102,7 @@ try {
     const r = window.__cozy.game.remotes.get(id);
     return p.held && !!p.solo?.visible && r && p.pos.distanceTo(r.avatar.root.position) < 2.2;
   }, aId));
-  check('holdKind Alice = one (зонт в руке)', await g(A, () => window.__cozy.game.holdKind === 'one'));
+  check('holdKind Alice = one (раскрытый зонт перед грудью)', await g(A, () => window.__cozy.game.holdKind === 'one'));
   await g(A, () => { const P = window.__cozy.game.props; P.release(0); P._rest(P.byId.get('umb1')); P.grab(P.byId.get('boombox1')); });
   await A.page.waitForTimeout(500);
   await g(A, () => { const P = window.__cozy.game.props; P.actT = 0; P.use(); });
@@ -120,12 +127,28 @@ try {
   }));
   await g(A, () => { const P = window.__cozy.game.props; P.actT = 0; P.use(); P.release(0); P._rest(P.byId.get('boombox1')); });
 
-  // WS3: удар битой — Bob стоит перед Alice: его отбрасывает (через сервер), мяч рядом улетает и становится Alice
+  // WS3: удар битой — Bob стоит перед Alice: его отбрасывает (через сервер), мяч рядом улетает и становится Alice.
+  // Рядом с Bob стоит Carol (лёгкий клиент): один замах задевает обоих — отдача приходит каждому.
   await g(A, () => { const G = window.__cozy.game; const p = G.player; p.pos.set(0, p.pos.y, 5); p.yaw = Math.PI; G.props.grab(G.props.byId.get('bat1')); });
   await g(B, () => { const p = window.__cozy.game.player; p.pos.set(0, p.pos.y, 6.3); p.yaw = 0; });
+  const yB = await g(B, () => window.__cozy.game.player.pos.y);
+  const carol = await new Promise((resolve) => {
+    const st = { ws: new WebSocket(`${BASE.replace(/^http/, 'ws')}ws`), hits: [] };
+    const t = setTimeout(() => resolve(st), 15000);
+    st.ws.on('open', () => st.ws.send(JSON.stringify({ t: 'join', room: ROOM, name: 'Carol', look: [0, 0, 0, 0, 0, 0, 0] })));
+    st.ws.on('message', (d) => {
+      const m = JSON.parse(d);
+      if (m.t === 'welcome') { st.id = m.id; clearTimeout(t); resolve(st); }
+      if (m.t === 'hit') st.hits.push(m);
+    });
+    st.ws.on('error', () => { clearTimeout(t); resolve(st); });
+  });
+  const carolTimer = setInterval(() => {
+    if (carol.ws.readyState === 1) carol.ws.send(JSON.stringify({ t: 's', p: [0.6, yB, 6.2], r: 0, q: 0, sp: 0, a: 1, hk: 0 }));
+  }, 100);
   await A.page.waitForFunction(() => {
-    const r = [...window.__cozy.game.remotes.map.values()][0];
-    return r && Math.abs(r.avatar.root.position.z - 6.3) < 0.3;
+    const rs = [...window.__cozy.game.remotes.map.values()];
+    return rs.length === 2 && rs.every((r) => Math.abs(r.avatar.root.position.z - 6.25) < 0.3);
   }, null, { timeout: 15000 }).catch(() => {});
   await g(A, () => {
     const G = window.__cozy.game, b = G.props.byId.get('ball2');
@@ -135,6 +158,12 @@ try {
   await B.page.waitForFunction(() => !!window.__cozy.game.props.lastHit, null, { timeout: 20000 }).catch(() => {});
   const hit = await g(B, () => window.__cozy.game.props.lastHit);
   check('Bob получил удар битой с отдачей', !!hit && hit.from === aId && hit.v[1] > 3 && hit.v[2] > 3, JSON.stringify(hit));
+  for (let i = 0; i < 50 && !carol.hits.length; i++) await new Promise((r) => setTimeout(r, 100));
+  check('Carol рядом с Bob тоже получила удар (тем же замахом)', carol.hits.length === 1 && carol.hits[0].from === aId, JSON.stringify(carol.hits));
+  clearInterval(carolTimer);
+  carol.ws.close();
+  await A.page.waitForFunction(() => window.__cozy.game.remotes.size === 1, null, { timeout: 8000 }).catch(() => {});
+  await B.page.waitForFunction(() => window.__cozy.game.remotes.size === 1, null, { timeout: 8000 }).catch(() => {});
   check('Bob видит замах у аватара Alice', await g(B, (id) => {
     const a = window.__cozy.game.remotes.get(id)?.avatar.anim;
     return !!a && (a.act?.name === 'swing' || window.__cozy.game.props.byId.get('bat1').held);

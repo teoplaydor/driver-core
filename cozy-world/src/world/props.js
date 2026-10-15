@@ -14,7 +14,7 @@ import { PROPS, KINDS, STANDS } from '../../shared/props.js';
 import { BOARD } from '../../shared/layout.js';
 import { heightAt } from './terrain-data.js';
 import * as PG from './prop-geo.js';
-import { clamp, damp } from '../util/math.js';
+import { clamp, smoothstep } from '../util/math.js';
 
 const G = 16;
 const REACH = 3.0;
@@ -47,8 +47,13 @@ const H = (p, q = [0, 1, 0], z = [0, 0, 1], s = 1) => ({ p: V3(p), q: BQ(q, z), 
 const ID = [0, 1, 0];
 const HOLD = {
   bat: { tp: H([0, 0.3, 0]), fp: H([0, 0.3, 0]) },
-  // зонт в кулаке перед грудью, купол над головой; от первого лица (уменьшен) видна ручка и край купола сверху
-  umbrella: { tp: H([0.076, 0.531, 0.054], [0.14, 0.985, 0.1], [0, 0, 1], 1.15), fp: H([-0.068, 0.288, -0.038], [-0.227, 0.968, -0.128], [0, 0, 1], 0.62) },
+  // зонт: раскрытый (tp/fp) — кулак перед грудью, стержень вертикально чуть справа от лица (не через него), купол
+  // над головой; от первого лица (уменьшен) видна ручка и край купола сверху. Сложенный (tpClosed/fpClosed) —
+  // на плече, как бита: хват за крюк. Между ними — плавно по степени раскрытия.
+  umbrella: {
+    tp: H([0.065, 0.533, -0.041], [0.12, 0.988, -0.076], [0, 0, 1], 1.15), fp: H([-0.068, 0.288, -0.038], [-0.227, 0.968, -0.128], [0, 0, 1], 0.62),
+    tpClosed: H([0, 0.552, 0], ID, [0, 0, 1], 1.15), fpClosed: H([0, 0.346, 0], ID, [0, 0, 1], 0.72),
+  },
   // от первого лица фонарь держим снизу за бак (иначе он висит ниже кадра)
   lantern: { tp: H([0, -0.205, 0], ID, [0.5, 0, 0.85]), fp: H([-0.01, 0.085, -0.03], ID, [0.45, 0, 0.9], 0.68) },
   mug: { tp: H([-0.085, 0, 0]), fp: H([-0.105, 0, 0.01]) },
@@ -59,7 +64,7 @@ const HOLD = {
   chess: { tp: H([0, 0.05, 0]), fp: H([0, 0.05, 0]) },
   crate: { tp: H([0, 0.04, -0.16]), fp: H([0, -0.06, -0.3], ID, [0.3, 0, 1], 0.62) },
   ball: { tp: H([0, 0.04, -0.15]), fp: H([0, -0.04, -0.3], ID, [0, 0, 1], 0.62) },
-  teddy: { tp: H([0, 0.0, -0.1], ID, [0, 0, -1]), fp: H([0, -0.03, -0.16], [0, 1, 0.12], [0, -0.12, 1], 0.9) },
+  teddy: { tp: H([0, 0.04, 0.04], ID, [0, 0, -1]), fp: H([0, -0.03, -0.16], [0, 1, 0.12], [0, -0.12, 1], 0.9) },
   boombox: { tp: H([0, 0.02, -0.1], ID, [0, 0, -1]), fp: H([0, -0.02, -0.2], [0, 0.97, 0.25], [0, -0.25, 0.97], 0.8) },
   // гитара поперёк живота: гриф влево-вверх; от первого лица дека повёрнута к камере
   guitar: { tp: H([0.08, -0.09, -0.04], [-0.9, 0.4, -0.15], [0.05, 0.15, -1]), fp: H([0.1, -0.11, -0.07], [-0.9, 0.42, -0.1], [0.1, 0.65, 0.75], 0.75) },
@@ -173,6 +178,7 @@ const _m = new THREE.Matrix4();
 const _m2 = new THREE.Matrix4();
 const _s = new THREE.Vector3();
 const _one = new THREE.Vector3(1, 1, 1);
+const _hp = { p: new THREE.Vector3(), q: new THREE.Quaternion(), s: 1 };
 
 export class Props {
   constructor(game) {
@@ -380,7 +386,25 @@ export class Props {
   _setHolding(p) {
     this.holding = p;
     this.game.holding = p;
-    this.game.holdKind = p ? p.k.hold : null; // C2
+    this.game.holdKind = p ? this._holdKind(p) : null; // C2
+  }
+
+  // Вид удержания (C2). Зонт: сложенный несём на плече, как биту ('bat'), раскрытый — перед грудью ('one').
+  // Поза WS1 'umbrella' не подходит: кулак в ней уходит внутрь большой головы.
+  _holdKind(p) {
+    if (p.kind === 'umbrella') return p.state || p.openK > 0.35 ? 'one' : 'bat';
+    return p.k.hold;
+  }
+
+  // Смещение предмета в руке (fp — от первого лица); у зонта — между «сложен» и «раскрыт» по степени раскрытия.
+  _holdPose(p, fp) {
+    const h = HOLD[p.kind], open = fp ? h.fp : h.tp, shut = fp ? h.fpClosed : h.tpClosed;
+    if (!shut) return open;
+    const t = p.openK * p.openK * (3 - 2 * p.openK);
+    _hp.p.lerpVectors(shut.p, open.p, t);
+    _hp.q.slerpQuaternions(shut.q, open.q, t);
+    _hp.s = shut.s + (open.s - shut.s) * t;
+    return _hp;
   }
 
   grab(p) {
@@ -714,6 +738,8 @@ export class Props {
   // Шаг до обновления аватаров: физика своих предметов, догоняние чужих, таймеры действий, отправка в сеть.
   update(dt) {
     this.actT = Math.max(0, this.actT - dt);
+    // зонт раскрыли/сложили — поза руки меняется (до обновления аватара и рук в этом кадре)
+    if (this.holding) this.game.holdKind = this._holdKind(this.holding);
     if (this.swingT >= 0) {
       this.swingT -= dt;
       if (this.swingT < 0 && this.holding?.kind === 'bat') this._impact();
@@ -758,17 +784,17 @@ export class Props {
 
   // Поза предмета у своих рук от первого лица, в мире (через камеру рук) — для броска.
   _fpWorldPose(p) {
-    const g = this.game, hold = HOLD[p.kind].fp;
-    g.hands.anchorWorld(p.k.hold, g.camera, _m);
+    const g = this.game, hold = this._holdPose(p, true);
+    g.hands.anchorWorld(this._holdKind(p), g.camera, _m);
     _m2.compose(hold.p, hold.q, _one);
     _m.multiply(_m2).decompose(p.pos, p.quat, _s);
   }
 
   _attach(p, avatar) {
-    const hold = HOLD[p.kind].tp;
+    const hold = this._holdPose(p, false);
     p.holdScale = hold.s;
     if (avatar?.anchor) {
-      const a = avatar.anchor(p.k.hold);
+      const a = avatar.anchor(this._holdKind(p));
       a.updateWorldMatrix(true, false);
       this._poseFrom(a.matrixWorld, hold, p);
     } else {
@@ -908,14 +934,16 @@ export class Props {
           this.fpMesh.frustumCulled = false;
         }
         if (this.fpMesh.geometry !== geo) { this.fpMesh.geometry = geo; this.fpMesh.updateMorphTargets(); }
-        const hold = HOLD[p.kind].fp;
-        this.fpMesh.position.copy(hold.p);
-        this.fpMesh.quaternion.copy(hold.q);
-        this.fpMesh.scale.setScalar(hold.s);
-        hands.anchor?.(p.k.hold)?.add(this.fpMesh);
       }
     }
-    if (p && umb) this._morph(this.fpMesh, p.openK);
+    if (!p) return;
+    const anchor = hands.anchor?.(this._holdKind(p));
+    if (anchor && this.fpMesh.parent !== anchor) anchor.add(this.fpMesh);
+    const hold = this._holdPose(p, true);
+    this.fpMesh.position.copy(hold.p);
+    this.fpMesh.quaternion.copy(hold.q);
+    this.fpMesh.scale.setScalar(hold.s);
+    if (umb) this._morph(this.fpMesh, p.openK);
   }
 
   // Ореолы горящих фонарей (и свой фонарь в руках — в сцене рук).
@@ -924,6 +952,8 @@ export class Props {
       this.glowSprites = [];
       this.glowMat = new THREE.SpriteMaterial({ map: this.glowTex, color: '#ffc77a', transparent: true, opacity: 0.6, blending: THREE.AdditiveBlending, depthWrite: false, fog: false });
     }
+    // днём под ярким солнцем ореол слабее (не засвечивает траву вокруг), в дождь и в помещении — в полную силу
+    this.glowMat.opacity = 0.6 * (1 - 0.45 * smoothstep(1.2, 3.2, this.world.atmosphere?.sunIntensity ?? 3));
     let n = 0;
     const cam = this.game.camera;
     for (const p of this.list) {
