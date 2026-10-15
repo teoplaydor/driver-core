@@ -14,15 +14,21 @@ const CELL_W = 256, CELL_H = 160, COLS = 4, ROWS = 2;
 // Атлас кучевых облаков: R - освещённость, G - толщина, A - покрытие.
 // Форма - купол из пухлых шаров (крупные внизу, «цветная капуста» сверху) с плоским основанием.
 // Свет: нормаль из градиента сглаженной плотности + самозатенение (шаги к солнцу по плотности) + светлый верх.
-function cloudAtlas() {
-  const W = CELL_W * COLS, H = CELL_H * ROWS;
+// Формы заданы в «эталонных» пикселях ячейки CELL_W x CELL_H; scale - доля разрешения (на слабых - 0.5:
+// считается вчетверо быстрее, облака далеко и крупные - разницы почти не видно).
+function cloudAtlas(scale = 1) {
+  const cw = Math.round(CELL_W * scale), ch = Math.round(CELL_H * scale);
+  const W = cw * COLS, H = ch * ROWS;
   const data = new Uint8Array(W * H * 4);
-  const D = new Float32Array(CELL_W * CELL_H), S = new Float32Array(CELL_W * CELL_H);
+  const D = new Float32Array(cw * ch), T = new Float32Array(cw * ch), S = new Float32Array(cw * ch);
   const Lx = 0.42, Ly = 0.78, Lz = 0.47;
   const lstep = Math.hypot(Lx, Ly);
+  const sp = Math.max(1, Math.round(2 * scale)); // радиус сглаживания и шаг градиента, пикс.
+  const gk = (4 * 2.2 * scale) / (2 * sp);
+  const at = (x, y) => (x < 0 || y < 0 || x >= cw || y >= ch ? 0 : S[y * cw + x]);
   for (let cell = 0; cell < COLS * ROWS; cell++) {
     const rand = mulberry32(1000 + cell * 77);
-    const ox = (cell % COLS) * CELL_W, oy = Math.floor(cell / COLS) * CELL_H;
+    const ox = (cell % COLS) * cw, oy = Math.floor(cell / COLS) * ch;
     const flat = cell >= 6; // вытянутые гряды для горизонта
     const base = CELL_H * 0.16;
     const maxH = flat ? CELL_H * (0.16 + rand() * 0.06) : CELL_H * (0.42 + rand() * 0.3);
@@ -47,53 +53,54 @@ function cloudAtlas() {
     }
     D.fill(0);
     for (const [cx, cy, r] of puffs) {
-      const x0 = Math.max(0, Math.floor(cx - r)), x1 = Math.min(CELL_W - 1, Math.ceil(cx + r));
-      const y0 = Math.max(0, Math.floor(cy - r)), y1 = Math.min(CELL_H - 1, Math.ceil(cy + r));
+      const x0 = Math.max(0, Math.floor((cx - r) * scale)), x1 = Math.min(cw - 1, Math.ceil((cx + r) * scale));
+      const y0 = Math.max(0, Math.floor((cy - r) * scale)), y1 = Math.min(ch - 1, Math.ceil((cy + r) * scale));
       const ir2 = 1 / (r * r);
       for (let y = y0; y <= y1; y++) {
+        const dy = (y + 0.5) / scale - cy;
         for (let x = x0; x <= x1; x++) {
-          const q = 1 - ((x - cx) * (x - cx) + (y - cy) * (y - cy)) * ir2;
-          if (q > 0) D[y * CELL_W + x] += q * q * 1.6;
+          const dx = (x + 0.5) / scale - cx;
+          const q = 1 - (dx * dx + dy * dy) * ir2;
+          if (q > 0) D[y * cw + x] += q * q * 1.6;
         }
       }
     }
     // плоское основание
-    for (let y = 0; y < CELL_H; y++) {
-      const b = Math.min(1, Math.max(0, (y - base * 0.6) / (base * 0.55)));
+    for (let y = 0; y < ch; y++) {
+      const b = Math.min(1, Math.max(0, ((y + 0.5) / scale - base * 0.6) / (base * 0.55)));
       const k = b * b * (3 - 2 * b);
-      for (let x = 0; x < CELL_W; x++) D[y * CELL_W + x] = Math.min(2.5, D[y * CELL_W + x] * k);
+      for (let x = 0; x < cw; x++) D[y * cw + x] = Math.min(2.5, D[y * cw + x] * k);
     }
-    // сглаженная плотность для нормалей
-    for (let y = 0; y < CELL_H; y++) {
-      for (let x = 0; x < CELL_W; x++) {
+    // сглаженная плотность для нормалей: прямоугольное размытие, по строкам и по столбцам
+    for (let y = 0; y < ch; y++) {
+      for (let x = 0; x < cw; x++) {
         let sum = 0, cnt = 0;
-        for (let dy = -2; dy <= 2; dy++) {
-          const yy = y + dy;
-          if (yy < 0 || yy >= CELL_H) continue;
-          for (let dx = -2; dx <= 2; dx++) {
-            const xx = x + dx;
-            if (xx < 0 || xx >= CELL_W) continue;
-            sum += D[yy * CELL_W + xx]; cnt++;
-          }
-        }
-        S[y * CELL_W + x] = sum / cnt;
+        for (let d = -sp; d <= sp; d++) { const xx = x + d; if (xx >= 0 && xx < cw) { sum += D[y * cw + xx]; cnt++; } }
+        T[y * cw + x] = sum / cnt;
+      }
+    }
+    for (let y = 0; y < ch; y++) {
+      for (let x = 0; x < cw; x++) {
+        let sum = 0, cnt = 0;
+        for (let d = -sp; d <= sp; d++) { const yy = y + d; if (yy >= 0 && yy < ch) { sum += T[yy * cw + x]; cnt++; } }
+        S[y * cw + x] = sum / cnt;
       }
     }
     let top = 0;
     for (const p of puffs) top = Math.max(top, p[1] + p[2]);
-    const at = (x, y) => (x < 0 || y < 0 || x >= CELL_W || y >= CELL_H ? 0 : S[y * CELL_W + x]);
-    for (let y = 0; y < CELL_H; y++) {
-      for (let x = 0; x < CELL_W; x++) {
-        const d = D[y * CELL_W + x];
+    const sx = (Lx / lstep) * 4 * scale, sy = (Ly / lstep) * 4 * scale;
+    for (let y = 0; y < ch; y++) {
+      for (let x = 0; x < cw; x++) {
+        const d = D[y * cw + x];
         const a = Math.min(1, Math.max(0, (d - 0.12) / 0.45));
-        const gx = (at(x + 2, y) - at(x - 2, y)) * 2.2, gy = (at(x, y + 2) - at(x, y - 2)) * 2.2;
+        const gx = (at(x + sp, y) - at(x - sp, y)) * gk, gy = (at(x, y + sp) - at(x, y - sp)) * gk;
         const nl = Math.hypot(gx, gy, 1);
         const lam = Math.max(0, (-gx * Lx - gy * Ly + Lz) / nl);
         // самозатенение: сколько облака между точкой и солнцем
         let acc = 0;
-        for (let k = 1; k <= 7; k++) acc += at(Math.round(x + (Lx / lstep) * k * 4), Math.round(y + (Ly / lstep) * k * 4));
+        for (let k = 1; k <= 7; k++) acc += at(Math.round(x + sx * k), Math.round(y + sy * k));
         const sh = Math.exp(-acc * 0.22);
-        const hgt = Math.min(1, Math.max(0, (y - base) / Math.max(1, top - base)));
+        const hgt = Math.min(1, Math.max(0, ((y + 0.5) / scale - base) / Math.max(1, top - base)));
         const shade = Math.min(1, 0.1 + 0.5 * lam * (0.35 + 0.65 * sh) + 0.25 * sh + 0.22 * hgt);
         const i = ((oy + y) * W + ox + x) * 4;
         data[i] = Math.round(shade * 255);
@@ -228,7 +235,7 @@ export class Sky {
     geo.setAttribute('aCloud2', new THREE.InstancedBufferAttribute(a2, 4));
     geo.instanceCount = count;
     this.cloudUniforms = {
-      uAtlas: { value: cloudAtlas() },
+      uAtlas: { value: cloudAtlas(detail >= 1 ? 1 : 0.5) },
       uCam: { value: new THREE.Vector3() },
       uTime: { value: 0 },
       uSunDir: { value: new THREE.Vector3(0, 1, 0) },
