@@ -18,6 +18,7 @@ import { Voice } from './net/voice.js';
 import { DemoBots } from './demo-bots.js';
 import { clamp, TAU } from './util/math.js';
 import { SPAWN } from '../shared/layout.js';
+import { PostFX, postSupported } from './render/post.js';
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const randomRoom = () => Math.random().toString(36).slice(2, 7);
@@ -31,16 +32,28 @@ export class Game {
     document.body.classList.toggle('touch', this.isTouch);
 
     const canvas = this.canvas = document.getElementById('game');
-    const r = this.renderer = new THREE.WebGLRenderer({ canvas, antialias: true, powerPreference: 'high-performance' });
+    // WS4: с постобработкой сглаживание делает SMAA/FXAA, MSAA экранного буфера не нужен
+    const wantPost = !!this.quality.post && params.get('post') !== '0';
+    const r = this.renderer = new THREE.WebGLRenderer({ canvas, antialias: !wantPost, powerPreference: 'high-performance' });
     this.dpr = params.has('dpr') ? Number(params.get('dpr')) : Math.min(window.devicePixelRatio || 1, this.quality.dpr);
     r.setPixelRatio(this.dpr);
     r.shadowMap.enabled = this.quality.shadow > 0;
     r.shadowMap.type = THREE.PCFSoftShadowMap;
     r.toneMapping = params.get('tm') === 'aces' ? THREE.ACESFilmicToneMapping : THREE.NeutralToneMapping;
+    // WS4: счётчики draw calls - за весь кадр (мир + руки + проходы постобработки), сброс в начале кадра
+    r.info.autoReset = false;
+    const q = this.quality;
+    this.post = wantPost && postSupported(r) ? new PostFX(r, {
+      ao: !!q.ao, aoSamples: q.aoSamples, bloomLevels: q.bloomLevels, bloomStart: q.bloomStart, aa: q.aa, water: !!q.waterDeferred,
+    }) : null;
+    // адаптивное разрешение: при долгих кадрах снижаем pixelRatio ступенями до 0.6x, при запасе - возвращаем
+    this.resScale = 1;
+    this.adaptive = !params.has('dpr');
+    this._slowT = 0; this._fastT = 0; this._ftAvg = 16;
 
     this.camera = new THREE.PerspectiveCamera(78, 1, 0.05, 520);
     this.camera.rotation.order = 'YXZ';
-    this.world = new World(r, this.quality);
+    this.world = new World(r, this.quality, { post: !!this.post });
 
     this.ui = new UI();
     this.input = new Input(canvas);
@@ -111,6 +124,7 @@ export class Game {
   resize() {
     const w = window.innerWidth, h = window.innerHeight;
     this.renderer.setSize(w, h, false);
+    if (this.post) this.post.setSize(this.renderer.domElement.width, this.renderer.domElement.height); // WS4
     this.camera.aspect = w / h;
     this.camera.updateProjectionMatrix();
     this.aspect = w / h;
@@ -397,7 +411,10 @@ export class Game {
 
   frame(now) {
     // rAF-метка может оказаться чуть раньше performance.now() из start(), поэтому dt зажимаем с обеих сторон
-    const dt = clamp((now - this._last) / 1000, 0, 0.05);
+    const rawDt = (now - this._last) / 1000;
+    const dt = clamp(rawDt, 0, 0.05);
+    this.renderer.info.reset(); // WS4
+    this._adapt(rawDt);
     this._last = now;
     this.time += dt;
     this.frames++;
@@ -424,16 +441,47 @@ export class Game {
     this.world.setBenders(benders);
     this.world.update(dt, this.time, this.camera, focus);
 
-    const r = this.renderer;
+    this.renderView(dt);
+    requestAnimationFrame((t) => this.frame(t));
+  }
+
+  // WS4: мир -> [вода, AO] -> руки от 1-го лица поверх (до bloom и цвета, чтобы выглядели так же) -> постобработка.
+  // Без постобработки (low) - прямой рендер с тонмаппингом, руки поверх с очисткой глубины.
+  renderView(dt = 0) {
+    const r = this.renderer, p = this.player;
+    const fp = p.cameraMode ? p.cameraMode === 'fp' : !p.wantThird;
+    const handsOn = this.state === 'play' && fp && !p.thirdPerson && !p.wantThird && !this.debugCam;
+    if (this.post) {
+      this.post.render(this.world.scene, this.camera, {
+        hands: handsOn ? this.hands : null, water: this.world.water, grade: this.world.atmosphere.grade, dt,
+      });
+      return;
+    }
+    r.setRenderTarget(null);
     r.autoClear = true;
     r.render(this.world.scene, this.camera);
-    if (this.state === 'play' && !this.player.thirdPerson && !this.player.wantThird && !this.debugCam) {
+    if (handsOn) {
       r.autoClear = false;
       r.clearDepth();
       r.render(this.hands.scene, this.hands.camera);
       r.autoClear = true;
     }
-    requestAnimationFrame((t) => this.frame(t));
+  }
+
+  // WS4: адаптивное разрешение. rawDt - реальное время кадра (не зажатое).
+  _adapt(rawDt) {
+    if (!this.adaptive || !(rawDt > 0) || rawDt > 0.25 || document.hidden) return;
+    this._ftAvg += (rawDt * 1000 - this._ftAvg) * 0.08;
+    this._slowT = this._ftAvg > 22 ? this._slowT + rawDt : 0;
+    this._fastT = this._ftAvg < 14 ? this._fastT + rawDt : 0;
+    let s = this.resScale;
+    if (this._slowT > 2.5 && s > 0.6) s = Math.max(0.6, s * 0.85);
+    else if (this._fastT > 5 && s < 1) s = Math.min(1, s / 0.85);
+    else return;
+    this._slowT = 0; this._fastT = 0;
+    this.resScale = s;
+    this.renderer.setPixelRatio(this.dpr * s);
+    this.resize();
   }
 
   start() {

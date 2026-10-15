@@ -58,7 +58,7 @@ for (const name of names) {
   await page.evaluate((o) => window.__cozy.setCam({ h: 1.2, pitch: 0, ...o, yaw: (o.yaw * Math.PI) / 180, pitch: ((o.pitch ?? 0) * Math.PI) / 180 }), v);
   const f0 = await page.evaluate(() => window.__cozy.frames);
   await page.waitForFunction((n) => window.__cozy.frames >= n, f0 + 3, { timeout: 120000 });
-  await page.screenshot({ path: `tests/out/tour-${name}.png` });
+  await page.screenshot({ path: `tests/out/tour-${name}.png`, timeout: 180000 });
   console.log('saved', name);
 }
 if (problems.length) console.log('--- console ---\n' + [...new Set(problems)].slice(0, 20).join('\n'));
