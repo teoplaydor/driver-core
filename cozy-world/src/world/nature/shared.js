@@ -6,6 +6,9 @@ import * as THREE from 'three';
 
 export const MAX_BENDERS = 8;
 
+// Числовой ключ чанка (без строк в каждом кадре); |ix|, |iz| < 32768.
+export const chunkKey = (ix, iz) => (ix + 32768) * 65536 + (iz + 32768);
+
 export const NATURE = {
   uTime: { value: 0 },
   uWindDir: { value: new THREE.Vector2(0.86, 0.5) },

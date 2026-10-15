@@ -13,7 +13,8 @@ import { groundColor } from './terrain.js';
 import {
   NATURE, GLSL_NOISE, GLSL_WIND, MAX_BENDERS, GLSL_NORMAL_NOFLIP, glslTranslucency, bindNature,
 } from './nature/shared.js';
-import { canopyDensity, flowerPatch } from './nature/forest.js';
+import { canopyDensity, flowerPatch, inLake } from './nature/forest.js';
+import { chunkKey } from './nature/shared.js';
 
 const patchNoise = new Noise2D(909);
 const tallNoise = new Noise2D(4711);
@@ -100,9 +101,9 @@ objectNormal.xz = vec2(gcs * normal.x + gsn * normal.z, -gsn * normal.x + gcs * 
 objectNormal = normalize(mix(objectNormal, vec3(0.0, 1.0, 0.0), 0.45));`)
       .replace('#include <begin_vertex>', `
 float gd = distance(iPos.xz, uCamPos.xz);
-// вдали травинки шире: иначе они тоньше пикселя и поле "лысеет"
+// вдали травинки шире: иначе они тоньше пикселя и поле "лысеет" (по 3D-расстоянию - и при виде сверху)
 vec3 transformed = position;
-transformed.xz += aWide * smoothstep(5.0, 45.0, gd) * 1.8;
+transformed.xz += aWide * smoothstep(5.0, 45.0, distance(iPos.xyz, uCamPos)) * 1.8;
 transformed = vec3(transformed.x * iPrm.x, transformed.y * iPrm.y, transformed.z * iPrm.x);
 transformed.xz = vec2(gcs * transformed.x + gsn * transformed.z, -gsn * transformed.x + gcs * transformed.z);
 float gT = aBlade.x;
@@ -234,6 +235,7 @@ export class GrassField {
     this.group.remove(e.near, e.far);
     this.active.delete(key);
     this.pool.push(e);
+    this._full = false;
   }
 
   _excluded(x, z) {
@@ -283,7 +285,7 @@ export class GrassField {
       const x = x0 + fx, z = z0 + fz;
       const r1 = rand(), r2 = rand(), r3 = rand(), r4 = rand();
       const y = heightAt(x, z);
-      if (y < WATER_Y + 0.12) continue;
+      if (y < WATER_Y + 0.12 && inLake(x, z)) continue; // вода только в озере, низины в других местах сухие
       const winter = bil(gw, 5, 2, fx, fz);
       if (winter > 0.55) continue; // под снегом травы нет
       const pd = pathDist(x, z);
@@ -293,7 +295,8 @@ export class GrassField {
       // песчаный берег озера: травы почти нет
       if (y < WATER_Y + 0.9 && (x - LAKE.x) ** 2 + (z - LAKE.z) ** 2 < (LAKE.r * 1.9) ** 2 && r1 < 0.93) continue;
       const rr = x * x + z * z;
-      if (rr < 74) continue; // мощёная площадка у костра
+      // площадка у костра: край рваный, как у земли в шейдере (там 8.0-8.5 м + шум)
+      if (rr < 64 || (rr < 110 && Math.sqrt(rr) < 8.3 + patchNoise.get(x * 0.9, z * 0.9) * 0.9 + r4 * 0.6)) continue;
       const meadow = bil(gw, 5, 0, fx, fz), autumn = bil(gw, 5, 1, fx, fz), rain = bil(gw, 5, 3, fx, fz), canyon = bil(gw, 5, 4, fx, fz);
       const patch = patchNoise.fbm(x * 0.06, z * 0.06, 2) * 0.5 + 0.5;
       const forest = bil(gs, 2, 1, fx, fz);
@@ -365,36 +368,46 @@ export class GrassField {
   }
 
   // Строит не больше `budget` недостающих чанков за вызов (чтобы не было рывков).
+  // Без выделений памяти: ближайший недостающий чанк ищется перебором окна вокруг камеры.
   update(px, pz, budget = 1) {
     NATURE.uCamPos.value.set(px, NATURE.uCamPos.value.y, pz);
-    const cx = Math.floor(px / this.ch), cz = Math.floor(pz / this.ch);
+    const ch = this.ch;
+    const cx = Math.floor(px / ch), cz = Math.floor(pz / ch);
     const maxD = this.radius + 1;
-    const R = Math.ceil(maxD / this.ch) + 1;
-    for (const [key, e] of this.active) {
-      const nx = Math.max(e.cx * this.ch - px, 0, px - (e.cx + 1) * this.ch), nz = Math.max(e.cz * this.ch - pz, 0, pz - (e.cz + 1) * this.ch);
-      if (Math.hypot(nx, nz) > maxD + 6) this._release(key);
+    const R = Math.ceil(maxD / ch) + 1;
+    for (const e of this.active.values()) {
+      const nx = Math.max(e.cx * ch - px, 0, px - (e.cx + 1) * ch), nz = Math.max(e.cz * ch - pz, 0, pz - (e.cz + 1) * ch);
+      if (Math.hypot(nx, nz) > maxD + 6) this._release(e.key);
       else this._apply(e, px, pz);
     }
-    const need = [];
-    for (let dz = -R; dz <= R; dz++) {
-      for (let dx = -R; dx <= R; dx++) {
-        const ix = cx + dx, iz = cz + dz;
-        const key = `${ix},${iz}`;
-        if (this.active.has(key)) continue;
-        const nx = Math.max(ix * this.ch - px, 0, px - (ix + 1) * this.ch), nz = Math.max(iz * this.ch - pz, 0, pz - (iz + 1) * this.ch);
-        const d = Math.hypot(nx, nz);
-        if (d <= maxD) need.push({ key, ix, iz, d });
+    // всё вокруг уже построено, а камера сдвинулась меньше чем на метр - искать нечего
+    if (this._full && Math.abs(px - this._fpx) + Math.abs(pz - this._fpz) < 1) return 0;
+    let missing = 0;
+    for (;;) {
+      missing = 0;
+      let bd = Infinity, bx = 0, bz = 0;
+      for (let dz = -R; dz <= R; dz++) {
+        for (let dx = -R; dx <= R; dx++) {
+          const ix = cx + dx, iz = cz + dz;
+          if (this.active.has(chunkKey(ix, iz))) continue;
+          const nx = Math.max(ix * ch - px, 0, px - (ix + 1) * ch), nz = Math.max(iz * ch - pz, 0, pz - (iz + 1) * ch);
+          const d = Math.hypot(nx, nz);
+          if (d > maxD) continue;
+          missing++;
+          if (d < bd) { bd = d; bx = ix; bz = iz; }
+        }
       }
-    }
-    need.sort((a, b) => a.d - b.d);
-    for (let i = 0; i < Math.min(budget, need.length); i++) {
-      const { key, ix, iz } = need[i];
+      if (!missing || budget <= 0) break;
       const e = this._acquire();
-      this._fill(e, ix, iz);
+      e.key = chunkKey(bx, bz);
+      this._fill(e, bx, bz);
       this._apply(e, px, pz);
-      this.active.set(key, e);
+      this.active.set(e.key, e);
+      budget--;
     }
-    return need.length;
+    this._full = missing === 0;
+    this._fpx = px; this._fpz = pz;
+    return missing;
   }
 
   // Заполнить всё вокруг сразу (на загрузке).
@@ -405,9 +418,9 @@ export class GrassField {
 
   // Перестроить чанки, задетые новой зоной исключения.
   invalidate(x, z, r) {
-    for (const [key, e] of this.active) {
+    for (const e of this.active.values()) {
       const x0 = e.cx * this.ch, z0 = e.cz * this.ch;
-      if (x + r > x0 && x - r < x0 + this.ch && z + r > z0 && z - r < z0 + this.ch) this._release(key);
+      if (x + r > x0 && x - r < x0 + this.ch && z + r > z0 && z - r < z0 + this.ch) this._release(e.key);
     }
   }
 }

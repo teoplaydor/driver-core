@@ -287,7 +287,7 @@ export function broadDetailed({ seed = 1, kind = 'broad', lod = 1, hero = false 
   };
   const rect = ATLAS[kind === 'maple' ? 'maple' : birch ? 'birch' : 'leaf'];
   // яркость сердцевины и карточек: клёны и берёзы светлее (яркая осенняя/светлая листва)
-  const coreK = kind === 'broad' ? 0.52 : kind === 'maple' ? 0.72 : 0.6, cardK = kind === 'broad' ? 1.08 : 1.2;
+  const coreK = kind === 'broad' ? 0.5 : kind === 'maple' ? 0.62 : 0.46, cardK = kind === 'broad' ? 1.08 : 1.2;
   blobs.forEach(([x, y, z, r], i) => {
     const detail = (i === 0 || hero) && lod > 0.7 ? 2 : 1;
     // тёмная сердцевина меньше у берёзы: крона у неё ажурнее
@@ -296,7 +296,11 @@ export function broadDetailed({ seed = 1, kind = 'broad', lod = 1, hero = false 
     b.addGeometry(g, {
       uv: WHITE_UV, tint: 1, wind: 0,
       normal: (p, n) => n.copy(sphereN(p, n)),
-      color: (p, n, c) => { const v = crownShade(p, n, crownC.y, r + 1.5, seed) * coreK; c.setRGB(v, v, v); },
+      // сердцевина пятнистая (тёмные провалы между пучками), иначе сквозь карточки виден гладкий шар
+      color: (p, n, c) => {
+        const v = crownShade(p, n, crownC.y, r + 1.5, seed) * coreK * (0.62 + 0.5 * noise3(p.x * 2.3, p.y * 2.3, p.z * 2.3, seed + 3));
+        c.setRGB(v, v, v);
+      },
     });
     // карточки листвы поверх кроны: рваный силуэт
     const nCards = Math.round(r * r * (hero ? 20 : birch ? 26 : 18) * lod);
@@ -321,7 +325,10 @@ export function broadDetailed({ seed = 1, kind = 'broad', lod = 1, hero = false 
   return b.toGeometry();
 }
 
-export function broadFar({ seed = 1, kind = 'broad' } = {}) {
+// Дальний LOD лиственного: пять комковатых шаров (силуэт "пучками", как у ближней модели) с пятнами
+// света и тени в цвете вершин; яркость подобрана под ближний LOD (тёмная сердцевина + светлые карточки),
+// чтобы смена LOD на границе не бросалась в глаза.
+export function broadFar({ seed = 1, kind = 'broad', lod = 1 } = {}) {
   const b = new PlantBuilder();
   const birch = kind === 'birch';
   const blobs = CROWNS[kind];
@@ -329,13 +336,19 @@ export function broadFar({ seed = 1, kind = 'broad' } = {}) {
     color: birch ? (t, a, i, k, out) => out.set('#ddd8ce') : (t, a, i, k, out) => out.copy(BARK_FAR), segs: 5, rings: 2, flare: 0.2,
   });
   const cy = blobs[0][1];
-  [0, 1, 2, 3].forEach((i) => {
-    const [x, y, z, r] = blobs[i];
-    const g = blobGeometry(r * 1.08, i === 0 ? 1 : 0, seed * 31 + i, 0.12, 1.2);
+  const k = kind === 'broad' ? 0.64 : kind === 'maple' ? 0.72 : 0.7;
+  // на слабых устройствах - три шара вместо пяти (покрупнее)
+  const n = lod > 0.7 ? 5 : 3, grow = lod > 0.7 ? 1.12 : 1.2;
+  blobs.slice(0, n).forEach(([x, y, z, r], i) => {
+    const g = blobGeometry(r * (i === 0 ? 1.05 : grow), 1, seed * 31 + i, 0.24, 2.4);
     g.translate(x, y, z);
     b.addGeometry(g, {
       uv: WHITE_UV, tint: 1,
-      color: (p, n, c) => { const v = crownShade(p, n, cy, 3.5, seed) * 0.95; c.setRGB(v, v, v); },
+      color: (p, n, c) => {
+        const clump = 0.66 + 0.6 * noise3(p.x * 2.4, p.y * 2.4, p.z * 2.4, seed + 3);
+        const v = crownShade(p, n, cy, 3.5, seed) * k * clump;
+        c.setRGB(v, v, v);
+      },
     });
   });
   return b.toGeometry();

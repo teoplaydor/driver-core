@@ -191,9 +191,13 @@ if (tSnow > 0.4) {
   vec3 blue = ${L('#b7cbe6')};
   float hollow = smoothstep(0.35, 0.75, 1.0 - n1) * 0.35 + steep * 0.35;
   diffuseColor.rgb = mix(diffuseColor.rgb, diffuseColor.rgb * blue, hollow * sk);
-  vec2 sc = floor(tp * 26.0);
+  // искры: круглые точки в случайном месте ячейки, мерцают при движении камеры, вдали гаснут
+  vec2 sp = tp * 14.0;
+  vec2 sc = floor(sp);
+  vec2 sf = fract(sp) - 0.25 - 0.5 * vec2(nzHash(sc + 3.1), nzHash(sc + 7.7));
   float tw = nzHash(sc + floor(uCamPos.xz * 1.7));
-  tSpark = step(0.992, nzHash(sc)) * step(0.4, tw) * sk;
+  tSpark = step(0.975, nzHash(sc)) * step(0.4, tw) * sk * (1.0 - smoothstep(0.035, 0.09, length(sf)))
+    * (1.0 - smoothstep(9.0, 22.0, tViewD));
   tH = n1 * 0.7 + n2 * 0.25;
   tBumpK = 0.7;
   tRough = 0.8;
@@ -229,8 +233,9 @@ if (walkM > 0.001) {
   vec3 plaza = mix(${L('#c2b49a')}, ${L('#a99d86')}, n2);
   vec3 ground = mix(dirt, plaza, plazaM);
   // колеи
-  float rut = (1.0 - smoothstep(0.1, 0.32, abs(pd - 0.62))) * (0.6 + 0.4 * n2) * (1.0 - plazaM);
-  ground *= 1.0 - rut * 0.22;
+  // (мягкие и только вблизи: вдали две колеи сливаются в тёмный "шов" посреди тропы)
+  float rut = (1.0 - smoothstep(0.08, 0.38, abs(pd - 0.62))) * (0.6 + 0.4 * n2) * (1.0 - plazaM) * tFw1;
+  ground *= 1.0 - rut * 0.16;
   // камешки
   vec3 pb = tPebble(tp, 3.1, 0.2 - plazaM * 0.13, tFw1);
   // камешек: светлый верх, тёмная кромка-тень снизу (без резкого bump - вдали он рисует "дырки")

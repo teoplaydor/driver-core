@@ -14,7 +14,8 @@ import {
 } from './geo.js';
 import { ATLAS, WHITE_UV } from './nature/atlas.js';
 import { decorMaterial } from './nature/materials.js';
-import { canopyDensity as forestDensity, flowerPatch } from './nature/forest.js';
+import { canopyDensity as forestDensity, flowerPatch, inLake } from './nature/forest.js';
+import { chunkKey } from './nature/shared.js';
 
 const CH = 40;
 const V = (x = 0, y = 0, z = 0) => new THREE.Vector3(x, y, z);
@@ -277,7 +278,7 @@ function stone(seed, snow = false, moss = false) {
   b.addGeometry(g, {
     uv: WHITE_UV,
     color: (p, n, c) => {
-      const v = 0.62 + 0.3 * noise3(p.x * 3, p.y * 3, p.z * 3, seed);
+      const v = 0.46 + 0.26 * noise3(p.x * 3, p.y * 3, p.z * 3, seed);
       c.setRGB(v, v * 1.01, v * 1.04);
       if (moss) c.lerp(mossC, smoothstep(0.5, 0.85, n.y) * 0.8);
       if (snow) c.lerp(snowC, smoothstep(0.25, 0.6, n.y));
@@ -381,19 +382,26 @@ function reeds(seed) {
 function lilyPad(seed, flower) {
   const b = new PlantBuilder();
   const rand = mulberry32(seed);
-  const segs = 14, notch = 0.45;
-  const green = C('#4a9a3a'), light = C('#86c457'), edge = C('#6f9a3a');
+  const segs = 22, notch = 0.42;
+  const green = C('#3f8f34'), light = C('#86c457'), vein = C('#9fd06a'), edge = C('#5b7d2c'), rim = C('#7a4a3a');
   const n = V(0, 1, 0);
-  // лист: светлый центр, средняя полоса, тёмно-зелёная кайма; жилки - чередованием оттенка секторов
+  // лист: светлый центр, жилки по границам секторов (светлые) и тёмная середина сектора,
+  // край чуть загнут вверх и темнее (у кувшинки он красноватый)
+  const ring = (a, r, y) => V(Math.cos(a) * r, y, Math.sin(a) * r);
+  const ctr = V(0, 0.022, 0);
   for (let i = 0; i < segs; i++) {
-    const a0 = notch / 2 + (i / segs) * (TAU - notch), a1 = notch / 2 + ((i + 1) / segs) * (TAU - notch);
-    const p0 = V(Math.cos(a0), 0.015, Math.sin(a0)), p1 = V(Math.cos(a1), 0.015, Math.sin(a1));
-    const m0 = p0.clone().multiplyScalar(0.62).setY(0.018), m1 = p1.clone().multiplyScalar(0.62).setY(0.018);
-    const ctr = V(0, 0.02, 0);
-    const mid = green.clone().multiplyScalar(i % 2 ? 1 : 0.92);
-    b.vert(ctr, n, light, WHITE_UV, 1, 0); b.vert(m1, n, mid, WHITE_UV, 1, 0); b.vert(m0, n, mid, WHITE_UV, 1, 0);
-    b.vert(m0, n, mid, WHITE_UV, 1, 0); b.vert(m1, n, mid, WHITE_UV, 1, 0); b.vert(p1, n, edge, WHITE_UV, 1, 0);
-    b.vert(m0, n, mid, WHITE_UV, 1, 0); b.vert(p1, n, edge, WHITE_UV, 1, 0); b.vert(p0, n, edge, WHITE_UV, 1, 0);
+    const a0 = notch / 2 + (i / segs) * (TAU - notch), a1 = notch / 2 + ((i + 1) / segs) * (TAU - notch), am = (a0 + a1) / 2;
+    const wob = 1 + (rand() - 0.5) * 0.04;
+    const m0 = ring(a0, 0.55, 0.02), m1 = ring(a1, 0.55, 0.02), mm = ring(am, 0.55, 0.02);
+    const o0 = ring(a0, 0.93 * wob, 0.018), o1 = ring(a1, 0.93 * wob, 0.018), om = ring(am, 0.93 * wob, 0.018);
+    const r0 = ring(a0, 1.0 * wob, 0.04), r1 = ring(a1, 1.0 * wob, 0.04), rm = ring(am, 1.0 * wob, 0.04);
+    const mid = green.clone().multiplyScalar(0.92 + rand() * 0.12);
+    const tri = (p, cp, q, cq, r, cr) => { b.vert(p, n, cp, WHITE_UV, 1, 0); b.vert(q, n, cq, WHITE_UV, 1, 0); b.vert(r, n, cr, WHITE_UV, 1, 0); };
+    tri(ctr, light, m1, vein, mm, mid); tri(ctr, light, mm, mid, m0, vein);
+    tri(m0, vein, mm, mid, o0, vein); tri(mm, mid, om, mid, o0, vein);
+    tri(mm, mid, m1, vein, om, mid); tri(m1, vein, o1, vein, om, mid);
+    tri(o0, edge, om, edge, r0, rim); tri(om, edge, rm, rim, r0, rim);
+    tri(om, edge, o1, edge, rm, rim); tri(o1, edge, r1, rim, rm, rim);
   }
   if (flower) {
     const pink = C('#f29ac0'), white = C('#fdf3f6');
@@ -446,14 +454,39 @@ function pumpkin(seed) {
   return b;
 }
 
+// Сугроб: гладкий холмик, край касается земли по касательной и уходит под неё -
+// нормаль у края смотрит вверх, поэтому сугроб сливается со снегом рельефа без "блина".
 function snowdrift(seed) {
   const b = new PlantBuilder();
-  const g = blobGeometry(1, 2, seed, 0.18, 1.1);
-  const P = g.getAttribute('position');
-  for (let i = 0; i < P.count; i++) if (P.getY(i) < 0) P.setY(i, P.getY(i) * 0.08);
+  const RINGS = 6, SEG = 20, SINK = 0.35;
+  const pos = [], idx = [];
+  const outline = (a) => 1 + 0.45 * (noise3(Math.cos(a) * 1.2 + 4, Math.sin(a) * 1.2, 0.5, seed) - 0.5);
+  for (let i = 0; i <= RINGS; i++) {
+    const r = i / RINGS;
+    for (let j = 0; j < (i ? SEG : 1); j++) {
+      const a = (j / SEG) * TAU;
+      const k = 1 - r * r;
+      // гребень сдвинут к одной стороне - сугроб "надут" ветром
+      const lump = 0.8 + 0.45 * noise3(Math.cos(a) * r * 1.6, Math.sin(a) * r * 1.6, 2.5, seed + 1) + 0.25 * Math.cos(a) * r;
+      const h = (1 + SINK) * k * k * lump - SINK;
+      const R = r * outline(a);
+      pos.push(Math.cos(a) * R, h, Math.sin(a) * R);
+    }
+  }
+  const at = (i, j) => (i === 0 ? 0 : 1 + (i - 1) * SEG + (j % SEG));
+  for (let j = 0; j < SEG; j++) idx.push(0, at(1, j + 1), at(1, j));
+  for (let i = 1; i < RINGS; i++) {
+    for (let j = 0; j < SEG; j++) {
+      const a = at(i, j), bb = at(i, j + 1), c = at(i + 1, j), d = at(i + 1, j + 1);
+      idx.push(a, bb, c, bb, d, c);
+    }
+  }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  g.setIndex(idx);
   g.computeVertexNormals();
   const w = C('#f4f8fd'), sh = C('#c8d8ee');
-  b.addGeometry(g, { uv: WHITE_UV, color: (p, n, c) => c.copy(sh).lerp(w, smoothstep(-0.2, 0.8, n.y)) });
+  b.addGeometry(g, { uv: WHITE_UV, color: (p, n, c) => c.copy(sh).lerp(w, smoothstep(0.1, 0.9, n.y)) });
   return b;
 }
 
@@ -641,7 +674,7 @@ export class Decor {
         zoneWeights(x, z, w);
         if (w.canyon > 0.4) continue;
         const y = heightAt(x, z);
-        if (y < WATER_Y + 0.5 || pathDist(x, z) < 3 || slopeAt(x, z) > 0.4 || this._blocked(x, z, 3)) continue;
+        if ((y < WATER_Y + 0.5 && inLake(x, z)) || pathDist(x, z) < 3 || slopeAt(x, z) > 0.4 || this._blocked(x, z, 3)) continue;
         if (r0 < 0.1 * forest) {
           // пень
           if (nearTree(x, z, 1.6)) continue;
@@ -694,7 +727,7 @@ export class Decor {
       const patch = flowerPatch(x, z);
       if (patch < 0.16) continue;
       const y = heightAt(x, z);
-      if (y < WATER_Y + 0.4) continue;
+      if (y < WATER_Y + 0.4 && inLake(x, z)) continue;
       env(x, z);
       const pref = w.meadow + w.rain * 0.35 + w.autumn * 0.25;
       if (r1 > pref * smoothstep(0.16, 0.42, patch)) continue;
@@ -713,7 +746,7 @@ export class Decor {
       const x = x0 + rand() * CH, z = z0 + rand() * CH;
       if (speciesNoise.get(x * 0.11 + 9, z * 0.11) < 0.25) continue;
       const y = heightAt(x, z);
-      if (y < WATER_Y + 0.4 || env(x, z).meadow + w.rain < 0.5) continue;
+      if ((y < WATER_Y + 0.4 && inLake(x, z)) || env(x, z).meadow + w.rain < 0.5) continue;
       if (pathDist(x, z) < 1.5 || this._blocked(x, z) || forestDensity(x, z) > 0.6) continue;
       add('clover', x, y, z, 0.9 + rand() * 0.5);
     }
@@ -726,7 +759,7 @@ export class Decor {
       env(x, z);
       if (w.winter > 0.45 || w.canyon > 0.4) continue;
       const y = heightAt(x, z);
-      if (y < WATER_Y + 0.5 || pathDist(x, z) < 2 || this._blocked(x, z) || slopeAt(x, z) > 0.7) continue;
+      if ((y < WATER_Y + 0.5 && inLake(x, z)) || pathDist(x, z) < 2 || this._blocked(x, z) || slopeAt(x, z) > 0.7) continue;
       if (rand() < 0.22 + w.autumn * 0.25) {
         add(rand() < 0.45 ? 'agaric' : 'bolete', x, y - 0.01, z, 0.9 + rand() * 0.6);
       } else {
@@ -738,7 +771,7 @@ export class Decor {
       const x = x0 + rand() * CH, z = z0 + rand() * CH;
       const y = heightAt(x, z);
       const pd = pathDist(x, z);
-      const shore = lakeNear && y > WATER_Y - 0.3 && y < WATER_Y + 0.8;
+      const shore = lakeNear && y > WATER_Y - 0.3 && y < WATER_Y + 0.8 && inLake(x, z);
       const edge = pd > 1.0 && pd < 2.8;
       const r1 = rand();
       if (!(shore && r1 < 0.7) && !(edge && r1 < 0.45) && r1 > 0.02) continue;
@@ -751,7 +784,7 @@ export class Decor {
       const x = x0 + rand() * CH, z = z0 + rand() * CH;
       if (rand() > 0.5) continue;
       const y = heightAt(x, z);
-      if (y < WATER_Y + 0.1 || pathDist(x, z) < 2.2 || this._blocked(x, z)) continue;
+      if ((y < WATER_Y + 0.1 && inLake(x, z)) || pathDist(x, z) < 2.2 || this._blocked(x, z)) continue;
       env(x, z);
       const s = 0.2 + rand() * 0.35;
       if (w.winter > 0.55) add('stoneSnow', x, y - s * 0.1, z, s * 1.4);
@@ -766,7 +799,7 @@ export class Decor {
         const ln = lilyNoise.fbm(x * 0.09, z * 0.09, 2);
         const r1 = rand();
         if (segDist(x, z, this.pier) < 2.6) continue;
-        if (y > WATER_Y - 0.5 && y < WATER_Y + 0.15) {
+        if (inLake(x, z) && y > WATER_Y - 0.5 && y < WATER_Y + 0.15) {
           if (ln < -0.05 || r1 > 0.55) continue;
           add('reeds', x, y - 0.05, z, 0.8 + rand() * 0.5);
         }
@@ -776,7 +809,7 @@ export class Decor {
         const x = x0 + rand() * CH, z = z0 + rand() * CH;
         const r1 = rand(), r2 = rand(), r3 = rand();
         const y = heightAt(x, z);
-        if (!(y < WATER_Y - 0.45 && y > WATER_Y - 2.6)) continue;
+        if (!(y < WATER_Y - 0.45 && y > WATER_Y - 2.6) || !inLake(x, z)) continue;
         if (lilyNoise.fbm(x * 0.07 + 5, z * 0.07, 2) < -0.02 || r1 > 0.7) continue;
         if (segDist(x, z, this.pier) < 2.4) continue;
         add(r2 < 0.22 ? 'lilyFlower' : 'lily', x, WATER_Y + 0.02, z, 0.36 + r3 * 0.3, { sy: 1 });
@@ -792,7 +825,7 @@ export class Decor {
       const forest = forestDensity(x, z);
       if (r1 > w.autumn * (0.25 + forest * 0.75)) continue;
       const y = heightAt(x, z);
-      if (y < WATER_Y + 0.3 || this._blocked(x, z, -3)) continue;
+      if ((y < WATER_Y + 0.3 && inLake(x, z)) || this._blocked(x, z, -3)) continue;
       add('leaves', x, y, z, 0.9 + rand() * 0.6);
     }
     for (let i = 0; i < Math.round(30 * D); i++) {
@@ -813,9 +846,9 @@ export class Decor {
       if (w.winter < 0.6) continue;
       if (rand() > 0.6) continue;
       const y = heightAt(x, z);
-      if (pathDist(x, z) < 2.4 || this._blocked(x, z)) continue;
+      if (pathDist(x, z) < 2.4 || this._blocked(x, z) || slopeAt(x, z) > 0.35) continue;
       const s = 0.9 + rand() * 1.3;
-      add('drift', x, y - 0.12, z, s, { sy: 0.25 + rand() * 0.15 });
+      add('drift', x, y - 0.04, z, s, { sy: 0.3 + rand() * 0.2 });
     }
     // каньон: полынь
     for (let i = 0; i < Math.round(60 * D); i++) {
@@ -825,7 +858,7 @@ export class Decor {
       if (w.canyon < 0.4) continue;
       if (rand() > 0.5) continue;
       const y = heightAt(x, z);
-      if (y < WATER_Y + 0.5 || pathDist(x, z) < 2 || this._blocked(x, z) || slopeAt(x, z) > 0.5) continue;
+      if ((y < WATER_Y + 0.5 && inLake(x, z)) || pathDist(x, z) < 2 || this._blocked(x, z) || slopeAt(x, z) > 0.5) continue;
       add('sage', x, y - 0.03, z, 0.8 + rand() * 0.7);
     }
     // брёвна и пни из общего списка
@@ -906,35 +939,44 @@ export class Decor {
     if (!e) return;
     for (const m of e.meshes) { this.group.remove(m); m.geometry.dispose(); }
     this.active.delete(key);
+    this._full = false;
   }
 
+  // Строит не больше `budget` недостающих чанков за вызов; без выделений памяти в обычном кадре.
   update(px, pz, budget = 1) {
     const maxD = this.radius + 2;
-    for (const [key, e] of this.active) {
+    for (const e of this.active.values()) {
       const nx = Math.max(e.cx * CH - px, 0, px - (e.cx + 1) * CH), nz = Math.max(e.cz * CH - pz, 0, pz - (e.cz + 1) * CH);
-      if (Math.hypot(nx, nz) > maxD + 8) this._release(key);
+      if (Math.hypot(nx, nz) > maxD + 8) this._release(e.key);
     }
     const cx = Math.floor(px / CH), cz = Math.floor(pz / CH);
+    if (this._full && Math.abs(px - this._fpx) + Math.abs(pz - this._fpz) < 1) return 0;
     const R = Math.ceil(maxD / CH) + 1;
-    const need = [];
-    for (let dz = -R; dz <= R; dz++) {
-      for (let dx = -R; dx <= R; dx++) {
-        const ix = cx + dx, iz = cz + dz;
-        const key = `${ix},${iz}`;
-        if (this.active.has(key)) continue;
-        const nx = Math.max(ix * CH - px, 0, px - (ix + 1) * CH), nz = Math.max(iz * CH - pz, 0, pz - (iz + 1) * CH);
-        const d = Math.hypot(nx, nz);
-        if (d <= maxD) need.push({ key, ix, iz, d });
+    let missing = 0;
+    for (;;) {
+      missing = 0;
+      let bd = Infinity, bx = 0, bz = 0;
+      for (let dz = -R; dz <= R; dz++) {
+        for (let dx = -R; dx <= R; dx++) {
+          const ix = cx + dx, iz = cz + dz;
+          if (this.active.has(chunkKey(ix, iz))) continue;
+          const nx = Math.max(ix * CH - px, 0, px - (ix + 1) * CH), nz = Math.max(iz * CH - pz, 0, pz - (iz + 1) * CH);
+          const d = Math.hypot(nx, nz);
+          if (d > maxD) continue;
+          missing++;
+          if (d < bd) { bd = d; bx = ix; bz = iz; }
+        }
       }
-    }
-    need.sort((a, b) => a.d - b.d);
-    for (let i = 0; i < Math.min(budget, need.length); i++) {
-      const { key, ix, iz } = need[i];
-      const e = this._build(ix, iz);
+      if (!missing || budget <= 0) break;
+      const e = this._build(bx, bz);
+      e.key = chunkKey(bx, bz);
       for (const m of e.meshes) this.group.add(m);
-      this.active.set(key, e);
+      this.active.set(e.key, e);
+      budget--;
     }
-    return need.length;
+    this._full = missing === 0;
+    this._fpx = px; this._fpz = pz;
+    return missing;
   }
 
   prefill(px, pz) {
@@ -943,9 +985,9 @@ export class Decor {
   }
 
   invalidate(x, z, r) {
-    for (const [key, e] of this.active) {
+    for (const e of this.active.values()) {
       const x0 = e.cx * CH, z0 = e.cz * CH;
-      if (x + r > x0 && x - r < x0 + CH && z + r > z0 && z - r < z0 + CH) this._release(key);
+      if (x + r > x0 && x - r < x0 + CH && z + r > z0 && z - r < z0 + CH) this._release(e.key);
     }
   }
 }

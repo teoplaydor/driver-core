@@ -17,6 +17,7 @@ import {
 } from './nature/trees.js';
 import { plantMaterial } from './nature/materials.js';
 import { NATURE } from './nature/shared.js';
+import { inLake } from './nature/forest.js';
 
 const FAR_CHUNK = 120;
 const ROCK_CHUNK = 120;
@@ -81,95 +82,107 @@ function scatter() {
   const w = { meadow: 1, autumn: 0, winter: 0, rain: 0, canyon: 0 };
   const STEP = 5;
   const add = (type, o) => { o.type = type; out.trees.push(o); return o; };
+  // Одна ячейка сетки: дерево, куст, камень или валун (rand - свой генератор у каждого прохода).
+  const place = (x, z, y, r, rand) => {
+    zoneWeights(x, z, w);
+    const slope = slopeAt(x, z);
+    const pd = pathDist(x, z);
+    const site = nearSite(x, z, 3);
+
+    // --- валуны каньона: крупные оранжевые глыбы по склонам и россыпью ---
+    if (w.canyon > 0.25 && !site && pd > 5) {
+      const rockN = noise.fbm(x * 0.03 + 3, z * 0.03 - 9, 2) * 0.5 + 0.5;
+      const p = w.canyon * (0.1 + smoothstep(0.35, 0.9, slope) * 0.9) * (0.4 + rockN);
+      if (rand() < p * 0.55) {
+        const s = 1.6 + rand() * rand() * 6.5;
+        out.boulder.push({ x, y: y - s * 0.3, z, ry: rand() * TAU, sx: s * (0.9 + rand() * 0.5), sy: s * (0.6 + rand() * 0.45), sz: s * (0.9 + rand() * 0.5), color: new THREE.Color().setHSL(0.045 + rand() * 0.03, 0.72 + rand() * 0.15, 0.42 + rand() * 0.1), cr: s * 0.78 });
+        return;
+      }
+    }
+
+    if (site || pd < 4.2) return;
+
+    // --- деревья: пятна леса, поляна вокруг хаба ---
+    const f = noise.fbm(x * 0.017 + 11, z * 0.017 - 7, 3) * 0.5 + 0.5;
+    const forest = smoothstep(0.36, 0.66, f);
+    let dens = forest * 0.95 + 0.035;
+    dens *= smoothstep(30, 64, r);
+    dens *= 1 - w.canyon * 0.82;
+    dens *= slope > 0.85 ? 0.15 : 1;
+    if (rand() < dens * 0.85) {
+      const pFir = 0.62 + 0.38 * w.winter + 0.1 * w.rain - 0.4 * w.autumn - 0.35 * w.canyon;
+      const s = 0.75 + rand() * 0.65;
+      const inst = { x, y: y - 0.1, z, ry: rand() * TAU, sx: s * (0.9 + rand() * 0.2), sy: s, sz: s * (0.9 + rand() * 0.2) };
+      if (rand() < pFir) {
+        const v = 0.88 + rand() * 0.26;
+        inst.color = new THREE.Color(v, v, v);
+        const snowy = w.winter > 0.5 || rand() < w.winter * 1.15 - 0.1;
+        if (w.winter > 0.4) inst.color.multiply(new THREE.Color(0.86, 0.97, 1.06));
+        add(snowy ? 'firSnow' : 'fir', inst);
+      } else if (w.winter > 0.55) {
+        inst.color = new THREE.Color(1, 1, 1);
+        add('bare', inst);
+      } else if (rand() < w.autumn) {
+        inst.color = (rand() < 0.82 ? pick(AUTUMN_COLORS, rand) : pick(AUTUMN_GREENS, rand)).clone().offsetHSL((rand() - 0.5) * 0.02, 0, (rand() - 0.5) * 0.05);
+        inst.sx *= 1.05; inst.sz *= 1.05;
+        add('maple', inst);
+      } else if (w.meadow > 0.5 && forest < 0.55 && rand() < 0.5) {
+        // берёзы по краям луга
+        inst.color = pick(BIRCH_GREENS, rand).clone().offsetHSL((rand() - 0.5) * 0.02, 0, (rand() - 0.5) * 0.05);
+        inst.sx *= 0.95; inst.sz *= 0.95;
+        add('birch', inst);
+      } else {
+        let c;
+        if (rand() < w.rain) c = pick(RAIN_GREENS, rand);
+        else if (w.canyon > 0.3) c = pick(CANYON_GREENS, rand);
+        else c = pick(MEADOW_GREENS, rand);
+        inst.color = c.clone().offsetHSL((rand() - 0.5) * 0.02, 0, (rand() - 0.5) * 0.06);
+        add('broad', inst);
+      }
+      return;
+    }
+
+    // --- кусты и камни в просветах (у опушек гуще) ---
+    const pBush = (0.1 + forest * 0.16) * (1 - w.winter * 0.6) * (1 - w.canyon * 0.6);
+    if (rand() < pBush && r > 14) {
+      const s = 0.7 + rand() * 0.8;
+      const inst = { x, y: y - 0.05, z, ry: rand() * TAU, sx: s * 1.15, sy: s * (0.85 + rand() * 0.25), sz: s * 1.15 };
+      if (w.winter > 0.5) {
+        inst.color = new THREE.Color(0.75, 0.82, 0.78);
+        add('bushSnow', inst);
+      } else {
+        let c;
+        if (rand() < w.autumn * 0.8) c = pick(AUTUMN_COLORS, rand).clone().multiplyScalar(0.92);
+        else c = (w.rain > 0.5 ? RAIN_GREENS : BUSH_GREENS)[Math.floor(rand() * 3)].clone();
+        inst.color = c.offsetHSL((rand() - 0.5) * 0.02, 0, (rand() - 0.5) * 0.05);
+        add(rand() < 0.28 && w.autumn < 0.5 ? 'berry' : 'bush', inst);
+      }
+    } else if (rand() < 0.05 && r > 12) {
+      const s = 0.35 + rand() * 0.9;
+      const v = 0.42 + rand() * 0.24; // серый камень, а не белый (на солнце светлые тона выгорают)
+      const c = w.canyon > 0.3 ? new THREE.Color().setHSL(0.07, 0.55, 0.45 + rand() * 0.15) : new THREE.Color(v, v * 1.02, v * 1.06);
+      const mossy = w.canyon < 0.3 && w.winter < 0.5 && rand() < 0.5;
+      (mossy ? out.rockMoss : out.rock).push({ x, y: y - s * 0.2, z, ry: rand() * TAU, sx: s * 1.2, sy: s * 0.75, sz: s, color: c, cr: s * 0.7 });
+    }
+  };
+  // Сухие низины (ниже уровня воды, но вдали от озера) - вторым проходом со своим генератором:
+  // раскладка остального мира от этого не меняется.
+  const dry = [];
   for (let gz = -WORLD_RADIUS; gz < WORLD_RADIUS; gz += STEP) {
     for (let gx = -WORLD_RADIUS; gx < WORLD_RADIUS; gx += STEP) {
       const x = gx + (rand() - 0.5) * STEP * 0.95, z = gz + (rand() - 0.5) * STEP * 0.95;
       const r = Math.hypot(x, z);
       if (r > WORLD_RADIUS - 4) continue;
       const y = heightAt(x, z);
-      if (y < WATER_Y + 0.45) continue;
-      zoneWeights(x, z, w);
-      const slope = slopeAt(x, z);
-      const pd = pathDist(x, z);
-      const site = nearSite(x, z, 3);
-
-      // --- валуны каньона: крупные оранжевые глыбы по склонам и россыпью ---
-      if (w.canyon > 0.25 && !site && pd > 5) {
-        const rockN = noise.fbm(x * 0.03 + 3, z * 0.03 - 9, 2) * 0.5 + 0.5;
-        const p = w.canyon * (0.1 + smoothstep(0.35, 0.9, slope) * 0.9) * (0.4 + rockN);
-        if (rand() < p * 0.55) {
-          const s = 1.6 + rand() * rand() * 6.5;
-          out.boulder.push({ x, y: y - s * 0.3, z, ry: rand() * TAU, sx: s * (0.9 + rand() * 0.5), sy: s * (0.6 + rand() * 0.45), sz: s * (0.9 + rand() * 0.5), color: new THREE.Color().setHSL(0.045 + rand() * 0.03, 0.72 + rand() * 0.15, 0.42 + rand() * 0.1), cr: s * 0.78 });
-          continue;
-        }
-      }
-
-      if (site || pd < 4.2) continue;
-
-      // --- деревья: пятна леса, поляна вокруг хаба ---
-      const f = noise.fbm(x * 0.017 + 11, z * 0.017 - 7, 3) * 0.5 + 0.5;
-      const forest = smoothstep(0.36, 0.66, f);
-      let dens = forest * 0.95 + 0.035;
-      dens *= smoothstep(30, 64, r);
-      dens *= 1 - w.canyon * 0.82;
-      dens *= slope > 0.85 ? 0.15 : 1;
-      if (rand() < dens * 0.85) {
-        const pFir = 0.62 + 0.38 * w.winter + 0.1 * w.rain - 0.4 * w.autumn - 0.35 * w.canyon;
-        const s = 0.75 + rand() * 0.65;
-        const inst = { x, y: y - 0.1, z, ry: rand() * TAU, sx: s * (0.9 + rand() * 0.2), sy: s, sz: s * (0.9 + rand() * 0.2) };
-        if (rand() < pFir) {
-          const v = 0.88 + rand() * 0.26;
-          inst.color = new THREE.Color(v, v, v);
-          const snowy = w.winter > 0.5 || rand() < w.winter * 1.15 - 0.1;
-          if (w.winter > 0.4) inst.color.multiply(new THREE.Color(0.86, 0.97, 1.06));
-          add(snowy ? 'firSnow' : 'fir', inst);
-        } else if (w.winter > 0.55) {
-          inst.color = new THREE.Color(1, 1, 1);
-          add('bare', inst);
-        } else if (rand() < w.autumn) {
-          inst.color = (rand() < 0.82 ? pick(AUTUMN_COLORS, rand) : pick(AUTUMN_GREENS, rand)).clone().offsetHSL((rand() - 0.5) * 0.02, 0, (rand() - 0.5) * 0.05);
-          inst.sx *= 1.05; inst.sz *= 1.05;
-          add('maple', inst);
-        } else if (w.meadow > 0.5 && forest < 0.55 && rand() < 0.5) {
-          // берёзы по краям луга
-          inst.color = pick(BIRCH_GREENS, rand).clone().offsetHSL((rand() - 0.5) * 0.02, 0, (rand() - 0.5) * 0.05);
-          inst.sx *= 0.95; inst.sz *= 0.95;
-          add('birch', inst);
-        } else {
-          let c;
-          if (rand() < w.rain) c = pick(RAIN_GREENS, rand);
-          else if (w.canyon > 0.3) c = pick(CANYON_GREENS, rand);
-          else c = pick(MEADOW_GREENS, rand);
-          inst.color = c.clone().offsetHSL((rand() - 0.5) * 0.02, 0, (rand() - 0.5) * 0.06);
-          add('broad', inst);
-        }
+      if (y < WATER_Y + 0.45) {
+        if (!inLake(x, z)) dry.push(x, z, y, r);
         continue;
       }
-
-      // --- кусты и камни в просветах (у опушек гуще) ---
-      const pBush = (0.1 + forest * 0.16) * (1 - w.winter * 0.6) * (1 - w.canyon * 0.6);
-      if (rand() < pBush && r > 14) {
-        const s = 0.7 + rand() * 0.8;
-        const inst = { x, y: y - 0.05, z, ry: rand() * TAU, sx: s * 1.15, sy: s * (0.85 + rand() * 0.25), sz: s * 1.15 };
-        if (w.winter > 0.5) {
-          inst.color = new THREE.Color(0.75, 0.82, 0.78);
-          add('bushSnow', inst);
-        } else {
-          let c;
-          if (rand() < w.autumn * 0.8) c = pick(AUTUMN_COLORS, rand).clone().multiplyScalar(0.92);
-          else c = (w.rain > 0.5 ? RAIN_GREENS : BUSH_GREENS)[Math.floor(rand() * 3)].clone();
-          inst.color = c.offsetHSL((rand() - 0.5) * 0.02, 0, (rand() - 0.5) * 0.05);
-          add(rand() < 0.28 && w.autumn < 0.5 ? 'berry' : 'bush', inst);
-        }
-      } else if (rand() < 0.05 && r > 12) {
-        const s = 0.35 + rand() * 0.9;
-        const v = 0.62 + rand() * 0.28;
-        const c = w.canyon > 0.3 ? new THREE.Color().setHSL(0.07, 0.55, 0.45 + rand() * 0.15) : new THREE.Color(v, v * 1.02, v * 1.06);
-        const mossy = w.canyon < 0.3 && w.winter < 0.5 && rand() < 0.5;
-        (mossy ? out.rockMoss : out.rock).push({ x, y: y - s * 0.2, z, ry: rand() * TAU, sx: s * 1.2, sy: s * 0.75, sz: s, color: c, cr: s * 0.7 });
-      }
+      place(x, z, y, r, rand);
     }
   }
+  const rand2 = mulberry32(7331);
+  for (let i = 0; i < dry.length; i += 4) place(dry[i], dry[i + 1], dry[i + 2], dry[i + 3], rand2);
   return out;
 }
 
@@ -235,13 +248,13 @@ function detailedGeometry(type, lod) {
   }
 }
 
-function farGeometry(type) {
+function farGeometry(type, lod) {
   switch (type) {
     case 'fir': return firFar({ seed: 3 });
     case 'firSnow': return firFar({ seed: 3, snow: true });
-    case 'broad': return broadFar({ seed: 5, kind: 'broad' });
-    case 'maple': return broadFar({ seed: 7, kind: 'maple' });
-    case 'birch': return broadFar({ seed: 9, kind: 'birch' });
+    case 'broad': return broadFar({ seed: 5, kind: 'broad', lod });
+    case 'maple': return broadFar({ seed: 7, kind: 'maple', lod });
+    case 'birch': return broadFar({ seed: 9, kind: 'birch', lod });
     case 'bare': return bareFar({ seed: 11 });
     case 'bushSnow': return bushFar({ seed: 17, snow: true });
     default: return bushFar({ seed: 13 });
@@ -301,7 +314,7 @@ class TreeLOD {
     // дальний LOD: все типы чанка склеены в одну статичную геометрию (1 draw call на чанк)
     const farMat = plantMaterial({ sway: 0.006, swayY0: 2.0, far: true, occlusion: false, textured: false, anchored: true });
     const tpls = {};
-    for (const type of Object.keys(this.byType)) tpls[type] = compactTemplate(farGeometry(type));
+    for (const type of Object.keys(this.byType)) tpls[type] = compactTemplate(farGeometry(type, detail));
     for (const items of chunked(trees, FAR_CHUNK)) {
       const list = items.map((it) => ({
         tpl: tpls[it.type],

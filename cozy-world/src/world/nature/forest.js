@@ -2,6 +2,7 @@
 // (папоротники и грибы в тени леса, подстилка, реже трава под кронами).
 
 import { Noise2D, smoothstep } from '../../util/math.js';
+import { LAKE } from '../terrain-data.js';
 
 const forestNoise = new Noise2D(31337);
 
@@ -21,4 +22,11 @@ export function canopyDensity(x, z) {
 const flowerNoise = new Noise2D(5150);
 export function flowerPatch(x, z) {
   return flowerNoise.fbm(x * 0.065, z * 0.065, 2);
+}
+
+// Вода есть только у озера (квадрат меша воды из buildWater, сторона LAKE.r * 3.6). Низины ниже WATER_Y
+// в остальных местах - сухая земля: там растут трава, цветы и деревья.
+const LAKE_HALF = LAKE.r * 1.8;
+export function inLake(x, z) {
+  return Math.abs(x - LAKE.x) < LAKE_HALF && Math.abs(z - LAKE.z) < LAKE_HALF;
 }
