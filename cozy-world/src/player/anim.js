@@ -114,6 +114,7 @@ export class Animator {
     this.hold = { two: 0, one: 0, bat: 0, umbrella: 0 };
     this.act = null;   // { name, t, dur }
     this.actW = 0;
+    this.waveSide = 1;
     this.headLook = new THREE.Vector2();
     this.fingerCurl = [0.3, 0.3];
     // кэш мировых величин
@@ -324,7 +325,8 @@ export class Animator {
     b[B.belly].scale.set(1 + 0.012 * breath, 1, bs);
     for (const side of [-1, 1]) {
       const c = b[side < 0 ? B.clavL : B.clavR];
-      c.quaternion.setFromEuler(_eX.set(0, 0, side * (0.012 * breath + air * 0.08 * rise)));
+      const shrug = this.act && this.act.name === 'wave' && side === this.waveSide ? 0.16 * this.actW : 0; // плечо приподнято, когда машет
+      c.quaternion.setFromEuler(_eX.set(0, 0, side * (0.012 * breath + air * 0.08 * rise + shrug)));
     }
 
     // действия и удержание: веса
@@ -376,7 +378,7 @@ export class Animator {
     this.headLook.y = damp(this.headLook.y, lookPitch, 6, dt);
     const talk = st.talk || 0;
     const nod = talk * 0.045 * Math.sin(t * 6.3) + 0.012 * breath * idleW;
-    const waveTilt = act && act.name === 'wave' ? 0.12 * actK : 0;
+    const waveTilt = act && act.name === 'wave' ? 0.1 * actK * (this.waveSide || 1) : 0;
     const strumBob = act && act.name === 'strum' ? 0.08 * actK * Math.sin(act.t * 9) : 0;
     // желаемая ориентация головы в системе корня → локальные шея/голова
     _q1.copy(b[B.pelvis].quaternion).multiply(b[B.spine].quaternion).multiply(b[B.chest].quaternion); // грудь относительно корня
@@ -448,13 +450,29 @@ export class Animator {
         const W = 0.05;
         const hr = this._groundAt(gx + cy * W, gz - sy * W, P.y), hl = this._groundAt(gx - cy * W, gz + sy * W, P.y);
         f.gr = damp(f.gr, clamp(Math.atan2(hr - hl, 2 * W), -0.5, 0.5), 18, dt);
-        if (f.mode === 0) gy = Math.max(gy, Math.max(hh, ht) - 0.02 * Math.abs(f.gp));
       } else { f.gp = damp(f.gp, 0, 10, dt); f.gr = damp(f.gr, 0, 10, dt); }
       const total = pitch + (f.mode === 0 ? f.gp : f.gp * (1 - f.prog * 0.5));
       f.pitch = total;
-      // лодыжка: перекат вокруг пятки (носок вверх) или вокруг подушечки (пятка вверх)
-      const pz = total >= 0 ? HEEL_Z : TOE_Z + 0.045;
+      // лодыжка: перекат вокруг пятки (носок вверх) или вокруг подушечки (пятка вверх) — относительно земли,
+      // поэтому выбор опоры — по наклону походки без уклона склона (иначе в гору стопа «перекатывалась» на пятке
+      // и подушечка повисала над землёй)
+      const pz = pitch >= 0 ? HEEL_Z : TOE_Z + 0.045;
       const cp = Math.cos(total), sp = Math.sin(total);
+      if (this.ground && grounded) {
+        // Точка опоры подошвы (пятка/подушечка) стоит на земле ПОД НЕЙ, а не под лодыжкой: иначе на склоне
+        // подошва висит над землёй (лицом в гору — на 4–6 см). Дальний конец подошвы тоже не должен уходить в землю.
+        const gPv = this._groundAt(gx + sy * pz, gz + cy * pz, P.y);
+        const ez = pz > 0 ? TOE_Z : HEEL_Z;
+        const de = pz + (ez - pz) * cp;
+        const gEnd = this._groundAt(gx + sy * de, gz + cy * de, P.y) - (pz - ez) * sp;
+        const pivotY = Math.max(gPv, gEnd);
+        if (f.mode === 0) gy = pivotY;
+        else {
+          // в переносе — плавно к той же высоте опоры к моменту постановки (без щелчка при касании)
+          const base = f.from.y + (f.target.y - f.from.y) * smoother(f.prog);
+          gy += sstep(0.55, 1, f.prog) * (pivotY - base);
+        }
+      }
       // вектор от точки опоры до лодыжки в системе стопы: (0, ANKLE_Y, -pz), повёрнут на pitch вокруг X
       const ly = ANKLE_Y * cp + pz * sp;
       const lz = ANKLE_Y * sp - pz * cp;
@@ -483,7 +501,7 @@ export class Animator {
       const reach = LEG * 0.985;
       const h2 = reach * reach - dx * dx - dz * dz;
       const maxHip = f.ankle.y + Math.sqrt(Math.max(0.0004, h2));
-      const w = f.mode === 0 ? 1 : 0.35;
+      const w = f.mode === 0 ? 1 : 0.35 + 0.65 * sstep(0.6, 1, f.prog); // к постановке стопы таз заранее опускается
       need = Math.max(need, (hip.y - maxHip) * w);
     }
     need = Math.max(0, Math.min(0.22, need)) * (1 - this.airW);
@@ -521,6 +539,8 @@ export class Animator {
     const act = this.act;
     const actK = this.actW;
     const A = (0.3 + 0.42 * run) * gw;
+    const h = this.hold;
+    if (!act || act.name !== 'wave' || act.t < 0.05) this.waveSide = h.one + h.bat + h.umbrella > 0.3 ? -1 : 1;
     for (const side of [-1, 1]) {
       const i = side < 0 ? 0 : 1;
       const bA = b[i ? B.armR : B.armL], bFo = b[i ? B.foreR : B.foreL], bH = b[i ? B.handR : B.handL];
@@ -557,30 +577,20 @@ export class Animator {
       // действия
       if (act && actK > 0.001) {
         const u = act.t / act.dur;
-        if (act.name === 'wave' && right) {
-          const w = actK;
-          const wv = Math.sin(act.t * 13);
-          _q1.setFromEuler(_eX.set(0.35, 0.2, side * 2.45));
-          bA.quaternion.slerp(_q1, w);
-          _q1.setFromEuler(_eX.set(0.55, 0, side * (0.25 + 0.42 * wv)));
-          bFo.quaternion.slerp(_q1, w);
-          _q1.setFromEuler(_eX.set(-0.2, 0, side * 0.15 * wv));
-          bH.quaternion.slerp(_q1, w);
-          curl = curl * (1 - w) + w * 0.05;
-          ikW *= 1 - w;
-        } else if (act.name !== 'wave') {
-          if (this._actTarget(act.name, u, side, _v1, _d1, _d2)) {
-            // смешиваем цель действия с целью удержания
-            if (ikW > 0.001) {
-              _v2.lerp(_v1, actK); _v3.lerp(_d1, actK).normalize(); _v4.lerp(_d2, actK).normalize();
-            } else {
-              _v2.copy(_v1); _v3.copy(_d1); _v4.copy(_d2);
-              this._defaultPole(side, _pole);
-            }
-            ikW = Math.max(ikW, actK);
-            mode = 'grip';
-            curl = curl * (1 - actK) + actK * (act.name === 'throw' && u > 0.42 ? 0.05 : act.name === 'strum' && !right ? 0.8 : 0.95);
+        if (this._actTarget(act.name, u, side, _v1, _d1, _d2)) {
+          const wave = act.name === 'wave';
+          // смешиваем цель действия с целью удержания
+          if (ikW > 0.001) {
+            _v2.lerp(_v1, actK); _v3.lerp(_d1, actK).normalize(); _v4.lerp(_d2, actK).normalize();
+          } else {
+            _v2.copy(_v1); _v3.copy(_d1); _v4.copy(_d2);
+            this._defaultPole(side, _pole);
           }
+          // приветствие: локоть вниз-наружу, открытая ладонь (кисть рядом с головой, а не за ней)
+          if (wave) _pole.lerp(_v1.set(side, -0.55, 0.3).transformDirection(this.chestM), actK).normalize();
+          ikW = Math.max(ikW, actK);
+          mode = wave ? 'two' : 'grip';
+          curl = curl * (1 - actK) + actK * (wave ? 0.06 : act.name === 'throw' && u > 0.42 ? 0.05 : act.name === 'strum' && !right ? 0.8 : 0.95);
         }
       }
       if (ikW > 0.001) this._armIK(side, _v2, _v3, _v4, _pole, ikW, mode);
@@ -642,6 +652,16 @@ export class Animator {
       outUp.set(a[4] + (c[4] - a[4]) * f, a[5] + (c[5] - a[5]) * f, a[6] + (c[6] - a[6]) * f).transformDirection(M);
     };
     switch (name) {
+      case 'wave': {
+        // машем той рукой, что свободна (правая занята битой/зонтом/кружкой — левой)
+        if (side !== this.waveSide) return false;
+        const wv = Math.sin(u * ACTIONS.wave * 11);
+        const a = 0.18 + 0.38 * wv; // кисть качается из стороны в сторону вокруг запястья
+        outPos.set(side * (0.43 + 0.02 * wv), 0.23, -0.12).applyMatrix4(M);
+        outUp.set(side * Math.sin(a), Math.cos(a), -0.08).transformDirection(M);
+        outPalm.set(side * 0.15, 0.05, -1).transformDirection(M);
+        return true;
+      }
       case 'swing':
         if (!right) return false;
         key([[0, 0.16, 0.0, -0.2, 0.45, 0.75, 0.5], [0.28, 0.24, 0.14, -0.05, 0.35, 0.55, 0.75], [0.42, 0.12, -0.02, -0.4, -0.3, 0.2, -0.95],

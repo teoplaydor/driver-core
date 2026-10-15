@@ -147,6 +147,47 @@ const num = await page.evaluate(() => {
     }
     out[`slide${speed}`] = slide; out[`stances${speed}`] = stances; out[`sink${speed}`] = sink;
   }
+  // склон (~17°): подошва лежит на земле — не висит и не тонет; стоя лицом в гору, под гору и поперёк,
+  // и на ходу (опорная стопа касается земли пяткой или подушечкой)
+  const sole = (name, pts) => {
+    const b = A.bones.find((x) => x.name === name);
+    b.updateWorldMatrix(true, false);
+    return pts.map(([x, z]) => { const p = new T.Vector3(x, -0.08, z).applyMatrix4(b.matrixWorld); return p.y - G.world.collisions.supportY(p.x, p.z, p.y + 0.5); });
+  };
+  const hs = (x, z) => G.world.collisions.supportY(x, z, 80);
+  const sx = -84, sz = -14;
+  const upYaw = Math.atan2(-(hs(sx + 0.5, sz) - hs(sx - 0.5, sz)), -(hs(sx, sz + 0.5) - hs(sx, sz - 0.5)));
+  out.slopeDeg = Math.atan(Math.hypot(hs(sx + 0.5, sz) - hs(sx - 0.5, sz), hs(sx, sz + 0.5) - hs(sx, sz - 0.5))) * 57.3;
+  out.slopeStand = 0;
+  for (const yaw of [upYaw, upYaw + Math.PI, upYaw + Math.PI / 2]) {
+    window.__place(sx, sz, yaw);
+    A.anim.inited = false;
+    window.__ctl = (p) => { p.vel.set(0, 0, 0); p.speed = 0; p.onGround = true; };
+    window.__step(60);
+    A.root.updateMatrixWorld(true);
+    for (const n of ['footL', 'footR']) for (const g of sole(n, [[0.03, 0.05], [-0.03, 0.05], [0.03, -0.14], [-0.03, -0.14]])) out.slopeStand = Math.max(out.slopeStand, Math.abs(g));
+  }
+  out.slopeHover = 0; out.slopeSink = 0;
+  for (const turn of [0, Math.PI / 2]) {
+    const yaw = upYaw + turn, v = 2.5;
+    window.__place(sx + Math.sin(yaw) * 1.4, sz + Math.cos(yaw) * 1.4, yaw);
+    A.anim.inited = false;
+    window.__ctl = (p, dt) => {
+      p.pos.x -= Math.sin(yaw) * v * dt; p.pos.z -= Math.cos(yaw) * v * dt;
+      p.vel.set(-Math.sin(yaw) * v, 0, -Math.cos(yaw) * v); p.speed = v; p.onGround = true;
+      p.pos.y = G.world.collisions.supportY(p.pos.x, p.pos.z, p.pos.y + 0.5);
+    };
+    for (let i = 0; i < 66; i++) {
+      window.__step(1);
+      if (i < 20) continue;
+      A.root.updateMatrixWorld(true);
+      A.anim.feet.forEach((f, k) => {
+        if (f.mode !== 0) return;
+        const c = Math.min(...sole(k ? 'footR' : 'footL', [[0, 0.05], [0, -0.11]]));
+        out.slopeHover = Math.max(out.slopeHover, c); out.slopeSink = Math.min(out.slopeSink, c);
+      });
+    }
+  }
   window.__ctl = (p) => { p.vel.set(0, 0, 0); p.speed = 0; };
   // чужие аватары (боты) анимируются: кости ног двигаются
   const bot = [...G.remotes.map.values()][0].avatar;
@@ -188,6 +229,8 @@ check('мешей на персонажа ≤ 24', num.meshes <= 24, `${num.mesh
 check('ходьба: стопа в опоре не скользит (< 1.5 см)', num['slide4.2'] < 0.015 && num['stances4.2'] >= 2, `slide=${num['slide4.2'].toFixed(4)} опор=${num['stances4.2']}`);
 check('бег: стопа в опоре не скользит (< 1.5 см)', num['slide7.4'] < 0.015 && num['stances7.4'] >= 2, `slide=${num['slide7.4'].toFixed(4)} опор=${num['stances7.4']}`);
 check('стопа не проваливается в землю (< 1 см)', Math.max(num['sink4.2'], num['sink7.4']) < 0.01, `${Math.max(num['sink4.2'], num['sink7.4']).toFixed(4)}`);
+check('склон: стоя подошва лежит на земле (±1 см)', num.slopeStand < 0.01, `${num.slopeStand.toFixed(4)} (уклон ${num.slopeDeg.toFixed(0)}°)`);
+check('склон: на ходу опорная стопа не висит и не тонет (±1.5 см)', num.slopeHover < 0.015 && num.slopeSink > -0.015, `висит ${num.slopeHover.toFixed(4)} тонет ${num.slopeSink.toFixed(4)}`);
 check('чужой аватар (бот) идёт и двигает ногами', num.botMoved > 0.2 && num.botLegAnim > 1e-4, `путь=${num.botMoved.toFixed(2)} поворот кости=${num.botLegAnim.toExponential(1)}`);
 check('якорь зонта: +Y вверх, у кисти', num.umbrellaUp > 0.8 && num.anchorToHand < 0.15, `up=${num.umbrellaUp.toFixed(2)} d=${num.anchorToHand.toFixed(3)}`);
 check('якорь «двумя руками» на груди', num.anchorTwo);

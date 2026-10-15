@@ -74,7 +74,8 @@ function buildHandParts(S, side, bi) {
   // рукав и закатанная манжета
   S.tube([V(0, 0, 0.62), V(0, 0, 0.3), V(0, 0, 0.2)], [0.07, 0.068, 0.066], { radial: 18, caps: [false, false], squash: [1, 1.1] },
     (x, y, z, out) => out.setRGB(PARTS.sleeve / 10, 0.92, 0), bi.fore);
-  for (const [z, R, tr, part] of [[0.205, 0.06, 0.019, PARTS.cuff], [0.174, 0.057, 0.016, PARTS.cuff]]) {
+  // закатанный рукав: один толстый мягкий валик и тонкий край под ним (а не две отдельные «баранки»)
+  for (const [z, R, tr, part] of [[0.198, 0.06, 0.022, PARTS.cuff], [0.18, 0.058, 0.012, PARTS.cuff]]) {
     const ring = [];
     for (let i = 0; i < 24; i++) {
       const f = (i / 24) * TAU;
@@ -108,9 +109,9 @@ function buildHandParts(S, side, bi) {
   for (const [x, z, rx, rz, ry] of [[-0.042, -0.042, 0.034, 0.04, 0.019], [0.045, -0.045, 0.03, 0.044, 0.016], [-0.02, -0.098, 0.034, 0.018, 0.012], [0.028, -0.098, 0.03, 0.018, 0.012]]) {
     S.ellipsoid(V(x * sx, -0.03, z), [rx, ry, rz], 12, 8, (xx, yy, zz, out) => out.setRGB(PARTS.palm / 10, 1.02, 0), bi.wrist);
   }
-  // костяшки
+  // костяшки: едва заметные, сливаются с тыльной стороной (крупные «шишки» читались как наросты)
   for (const fg of FINGERS) {
-    S.ellipsoid(V(fg.x * sx, 0.022, KNUCKLE_Z + 0.006), [fg.r * 1.05, 0.009, fg.r * 1.1], 10, 6,
+    S.ellipsoid(V(fg.x * sx, 0.015, KNUCKLE_Z + 0.004), [fg.r * 1.12, 0.0085, fg.r * 1.05], 10, 6,
       (x, y, z, out) => out.setRGB(PARTS.knuckle / 10, 1, 0), bi.wrist);
   }
   // пальцы

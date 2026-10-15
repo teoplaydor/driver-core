@@ -603,7 +603,8 @@ function buildHair(ctx) {
       case 1: return 0.015 + 0.006 * sstep(0, 0.9, d.y) + 0.004 * Math.sin(az * 30 + d.y * 4)
         + 0.07 * Math.exp(-((d.y - 0.55) ** 2) / 0.022) * Math.max(0, -d.z) ** 1.5 * (1 + 0.6 * d.x);
       case 2: return 0.006;
-      case 3: return 0.022 + 0.006 * Math.sin(az * 9) * Math.sin(el * 7);
+      // венчик сходит на нет к вискам (без «шнурка» через лоб)
+      case 3: return (0.016 + 0.005 * Math.sin(az * 9) * Math.sin(el * 7)) * sstep(0.27, 0.42, Math.abs(((az + Math.PI) % TAU) - Math.PI) / Math.PI);
       // короткая: виски и затылок коротко (почти «под машинку»), объём сверху и чуть приподнятая чёлка
       default: return 0.005 + 0.019 * sstep(0.3, 0.72, d.y) + 0.0025 * Math.sin(az * 46 + el * 8) * sstep(0.2, 0.6, d.y)
         + 0.01 * Math.exp(-((d.y - 0.6) ** 2) / 0.03) * Math.max(0, -d.z);
@@ -614,10 +615,10 @@ function buildHair(ctx) {
     const az = u * TAU;
     const f = Math.abs(((az + Math.PI) % TAU) - Math.PI) / Math.PI;
     let lo, hi;
-    if (style === 3) { // лысина с венчиком: полоса над ушами и по затылку
-      lo = 0.24 - 0.58 * sstep(0.58, 0.7, f);
-      hi = 0.33 - 0.17 * sstep(0.55, 0.75, f);
-      hi = lo + (hi - lo) * sstep(0.3, 0.42, f);
+    if (style === 3) { // лысина с венчиком: от висков над ушами и низко по затылку (лоб и темя голые)
+      lo = 0.1 - 0.56 * sstep(0.52, 0.85, f);
+      hi = 0.27 - 0.07 * sstep(0.55, 0.85, f) + 0.02 * Math.sin(az * 11);
+      hi = lo + (hi - lo) * sstep(0.27, 0.42, f);
     } else {
       lo = hairEdge(az > Math.PI ? az - TAU : az, style);
       hi = 1;
@@ -646,7 +647,7 @@ function buildHair(ctx) {
 
 // Высота ленты шляпы (dy на лбу); у каждой шляпы своя посадка.
 function hatBand(kind) {
-  return [1, 0.26, 0.28, 0.2, 0.3, 0.27][kind] ?? 1;
+  return [1, 0.26, 0.28, 0.17, 0.3, 0.27][kind] ?? 1;
 }
 
 // Кольцо ленты на голове: точки по азимуту на высоте, наклонённой назад (затылок ниже лба).
@@ -757,10 +758,11 @@ function buildHat(ctx) {
         }
       });
       ribbon(0.002, 0.04, 1.02, C('#3a2418'));
-      brim(1.9, 0.02, felt, tint(felt, 0.7), (p, f) => {
-        const lx = (p.x - center.x) / 0.48;
-        p.y += 0.085 * f * f * lx * lx * 1.6;
-        p.y -= 0.025 * f * f * (1 - Math.min(1, lx * lx * 4));
+      // поля поменьше, бока симметрично загнуты вверх, перед и зад чуть опущены
+      brim(1.62, 0.016, felt, tint(felt, 0.7), (p, f) => {
+        const lx = (p.x - center.x) / 0.4;
+        p.y += 0.075 * f * f * lx * lx;
+        p.y -= 0.022 * f * f * (1 - Math.min(1, lx * lx * 3));
       }, 6);
       S.slot = 1;
       const pc = outward(ring[10], 1.03).addScaledVector(axis, 0.022);
@@ -769,19 +771,26 @@ function buildHat(ctx) {
       ctx.top = center.y + 0.2;
       break;
     }
-    case 3: { // армейская каска: оливковый купол и рыже-коричневый кожаный обод (как в референсе)
+    case 3: { // армейская каска: высокий оливковый купол заметно больше головы и рыже-коричневый кожаный обод (как в референсе)
       const olive = C('#5f6b2e'), leather = C('#a8542c');
-      const prof = [[-0.012, 1.1], [0.035, 1.13], [0.085, 1.11], [0.135, 0.99], [0.175, 0.77], [0.198, 0.46], [0.205, 0]];
+      const prof = [[0.014, 1.17], [0.065, 1.18], [0.125, 1.14], [0.185, 1.02], [0.235, 0.8], [0.27, 0.48], [0.283, 0]];
       crown(S, ring, axis, center, prof, (x, y, z, out) => {
-        out.copy(olive).multiplyScalar(0.8 + 0.2 * sstep(center.y, center.y + 0.16, y) + 0.06 * (hash3(Math.round(x * 30), Math.round(y * 30), Math.round(z * 30)) - 0.5));
+        out.copy(olive).multiplyScalar(0.8 + 0.2 * sstep(center.y, center.y + 0.18, y) + 0.06 * (hash3(Math.round(x * 30), Math.round(y * 30), Math.round(z * 30)) - 0.5));
       });
-      // широкий кожаный обод по краю
+      // широкий кожаный обод по краю купола
+      const lth = (x, y, z, out) => out.copy(leather).multiplyScalar(0.9 + 0.1 * hash3(Math.round(x * 60), Math.round(y * 60), Math.round(z * 60)));
       S.grid((u, v, out) => {
-        const p = outward(ring[Math.round(u * 40) % 40], 1.115 + 0.02 * v);
-        return out.copy(p).addScaledVector(axis, -0.022 + 0.034 * v);
-      }, 40, 2, { wrap: true }, (x, y, z, out) => out.copy(leather).multiplyScalar(0.9 + 0.1 * hash3(Math.round(x * 60), Math.round(y * 60), Math.round(z * 60))), B.head);
-      S.tube(ring.map((p) => outward(p, 1.12).addScaledVector(axis, -0.022)), 0.011, { radial: 6, closed: true, squash: [1, 0.8] }, tint(leather, 0.85), B.head);
-      ctx.top = center.y + 0.21;
+        const p = outward(ring[Math.round(u * 40) % 40], 1.155 + 0.02 * v);
+        return out.copy(p).addScaledVector(axis, -0.03 + 0.046 * v);
+      }, 40, 2, { wrap: true }, lth, B.head);
+      // снизу обод закрыт кольцом до головы — в щель между каской и головой не видно неба
+      S.grid((u, v, out) => {
+        const p = outward(ring[Math.round(u * 40) % 40], 1.155 - 0.155 * v);
+        return out.copy(p).addScaledVector(axis, -0.03 + 0.03 * v);
+      }, 40, 2, { wrap: true, flip: true }, (x, y, z, out) => lth(x, y, z, out).multiplyScalar(0.55), B.head);
+      S.tube(ring.map((p) => outward(p, 1.16).addScaledVector(axis, -0.03)), 0.012, { radial: 6, closed: true, squash: [1, 0.8] }, tint(leather, 0.85), B.head);
+      S.tube(ring.map((p) => outward(p, 1.172).addScaledVector(axis, 0.016)), 0.007, { radial: 5, closed: true }, tint(olive, 0.7), B.head);
+      ctx.top = center.y + 0.29;
       break;
     }
     case 4: { // кепка: мягкая округлая тулья, пуговка, короткий козырёк
