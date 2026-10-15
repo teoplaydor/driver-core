@@ -511,7 +511,7 @@ export class Props {
     };
     let hits = 0;
     for (const p of this.list) {
-      if (p.held || p === this.holding) continue;
+      if (p.held || p === this.holding || p.kind === 'chess') continue; // партию в шахматы битой не сносим
       if (p.owner && p.owner !== 'me') continue; // предмет в чужой симуляции не трогаем
       if (!inCone(p.pos.x, p.pos.y, p.pos.z, p.k.r)) continue;
       this._kick(p, fx, fz);

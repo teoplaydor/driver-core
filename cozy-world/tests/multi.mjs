@@ -3,6 +3,7 @@
 
 import { chromium } from 'playwright-core';
 import fs from 'node:fs';
+import WebSocket from 'ws';
 
 const BASE = process.env.BASE_URL || 'http://127.0.0.1:5173/';
 const ROOM = `t${Date.now().toString(36).slice(-5)}`;
@@ -21,7 +22,7 @@ async function open(nick) {
   const errors = [];
   page.on('pageerror', (e) => errors.push(e.message));
   page.on('console', (m) => { if (m.type() === 'error') errors.push(m.text()); });
-  await page.goto(`${BASE}?autostart=1&nick=${nick}&room=${ROOM}&q=low&dpr=1`, { waitUntil: 'load' });
+  await page.goto(`${BASE}?autostart=1&nick=${nick}&room=${ROOM}&q=low&dpr=1`, { waitUntil: 'load', timeout: 120000 });
   await page.waitForFunction(() => window.__cozy?.game?.state === 'play', null, { timeout: 120000 });
   return { page, errors, ctx };
 }
@@ -61,7 +62,7 @@ try {
 
   await g(B, () => { window.__cozy.game.player.wantThird = false; });
   await B.page.waitForTimeout(1200);
-  await B.page.screenshot({ path: 'tests/out/multi-B-view.png' });
+  await B.page.screenshot({ path: 'tests/out/multi-B-view.png', timeout: 180000 }); // программный рендер под нагрузкой бывает очень медленным
 
   // предметы: Alice берёт мяч, Bob видит нового хозяина; бросок и покой синхронизируются
   await g(A, () => { const G = window.__cozy.game; G.props.grab(G.props.byId.get('ball1')); });
@@ -100,14 +101,23 @@ try {
   await g(A, () => { const P = window.__cozy.game.props; P.actT = 0; P.use(); });
   await B.page.waitForFunction(() => window.__cozy.game.props.byId.get('boombox1').state === 1, null, { timeout: 8000 }).catch(() => {});
   check('бумбокс включился у Bob (музыка)', await g(B, () => window.__cozy.game.props.byId.get('boombox1').state === 1 && window.__cozy.game.audio._boxes?.has('boombox1')));
-  const C = await open('Carol');
-  await C.page.waitForTimeout(500);
-  check('новичок видит раскрытый зонт и музыку (welcome)', await g(C, () => {
-    const P = window.__cozy.game.props;
-    return P.byId.get('umb1').state === 1 && P.byId.get('boombox1').state === 1;
+  // новичок (лёгкий клиент без рендера): сервер хранит состояние предметов и отдаёт его в welcome
+  const welcome = await new Promise((resolve) => {
+    const ws = new WebSocket(`${BASE.replace(/^http/, 'ws')}ws`);
+    const t = setTimeout(() => { ws.close(); resolve(null); }, 15000);
+    ws.on('open', () => ws.send(JSON.stringify({ t: 'join', room: ROOM, name: 'Carol', look: [0, 0, 0, 0, 0, 0, 0] })));
+    ws.on('message', (d) => { const m = JSON.parse(d); if (m.t === 'welcome') { clearTimeout(t); ws.close(); resolve(m); } });
+    ws.on('error', () => { clearTimeout(t); resolve(null); });
+  });
+  const st = (id) => welcome?.props?.find((e) => e.id === id)?.s;
+  check('новичок получает раскрытый зонт и включённую музыку (welcome)', st('umb1') === 1 && st('boombox1') === 1, `umb1=${st('umb1')} boombox1=${st('boombox1')}`);
+  check('клиент применяет состояние из welcome', await g(B, () => {
+    const P = window.__cozy.game.props, l = P.byId.get('lantern2');
+    P.applyWelcome({ props: [{ id: 'lantern2', s: 0 }] });
+    const ok = l.state === 0;
+    P.setState(l, 1, false, true);
+    return ok;
   }));
-  check('нет ошибок на странице C', C.errors.length === 0, C.errors.slice(0, 3).join(' | '));
-  await C.ctx.close();
   await g(A, () => { const P = window.__cozy.game.props; P.actT = 0; P.use(); P.release(0); P._rest(P.byId.get('boombox1')); });
 
   // WS3: удар битой — Bob стоит перед Alice: его отбрасывает (через сервер), мяч рядом улетает и становится Alice
