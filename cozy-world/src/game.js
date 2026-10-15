@@ -397,6 +397,15 @@ export class Game {
       this.camera.rotation.set(d.pitch, d.yaw, 0);
       focus = this._dbgFocus;
     }
+    // WS2 (C6): трава приминается под своим игроком и чужими
+    const benders = this._benders || (this._benders = []);
+    benders.length = 0;
+    benders.push(this.state === 'play' ? this.player.pos : this.avatar.root.position);
+    for (const r of this.remotes.map.values()) {
+      if (benders.length >= 8) break;
+      benders.push(r.avatar.root.position);
+    }
+    this.world.setBenders(benders);
     this.world.update(dt, this.time, this.camera, focus);
 
     const r = this.renderer;
