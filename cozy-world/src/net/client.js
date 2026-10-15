@@ -86,6 +86,9 @@ export class Net {
       case 'owner': this.handlers.owner?.(m); break;
       case 'deny': this.handlers.deny?.(m); break;
       case 'rtc': this.handlers.rtc?.(m); break;
+      case 'use': this.handlers.use?.(m); break; // WS3: действия предметами, их состояние, удар битой
+      case 'pst': this.handlers.pst?.(m); break;
+      case 'hit': this.handlers.hit?.(m); break;
       default:
     }
   }
