@@ -14,14 +14,13 @@ import {
 } from './geo.js';
 import { ATLAS, WHITE_UV } from './nature/atlas.js';
 import { decorMaterial } from './nature/materials.js';
-import { forestDensity } from './nature/forest.js';
+import { canopyDensity as forestDensity, flowerPatch } from './nature/forest.js';
 
 const CH = 40;
 const V = (x = 0, y = 0, z = 0) => new THREE.Vector3(x, y, z);
 const C = (h) => new THREE.Color(h);
 const UP = V(0, 1, 0);
 
-const flowerNoise = new Noise2D(5150);
 const speciesNoise = new Noise2D(6262);
 const lilyNoise = new Noise2D(7373);
 
@@ -72,8 +71,8 @@ function daisy(b, x, z, h, rand) {
   const white = C('#fbfbf6'), tipc = C('#f2eee8');
   const n = 11;
   const a0 = rand() * TAU;
-  for (let i = 0; i < n; i++) petal(b, top, a0 + (i / n) * TAU, 0.05, 0.016, 0.18, white, { tip: tipc, cup: 0.002 });
-  blob(b, 0.017, 0, 1, top.clone().add(V(0, 0.006, 0)), V(1, 0.55, 1), C('#f3c21c'), 1, 0.05);
+  for (let i = 0; i < n; i++) petal(b, top, a0 + (i / n) * TAU, 0.072, 0.022, 0.18, white, { tip: tipc, cup: 0.003 });
+  blob(b, 0.024, 0, 1, top.clone().add(V(0, 0.006, 0)), V(1, 0.55, 1), C('#f3c21c'), 1, 0.05);
 }
 
 function poppy(b, x, z, h, rand) {
@@ -81,9 +80,9 @@ function poppy(b, x, z, h, rand) {
   stem(b, V(x, 0, z), top, 0.006, STEM, 0.5);
   const red = C('#e3241e'), deep = C('#a5120f');
   const a0 = rand() * TAU;
-  for (let i = 0; i < 4; i++) petal(b, top, a0 + (i / 4) * TAU, 0.06, 0.06, 0.75, deep, { tip: red, cup: -0.008 });
-  for (let i = 0; i < 4; i++) petal(b, top.clone().add(V(0, 0.004, 0)), a0 + ((i + 0.5) / 4) * TAU, 0.05, 0.05, 0.95, deep, { tip: red, cup: -0.006 });
-  blob(b, 0.013, 0, 2, top.clone().add(V(0, 0.012, 0)), V(1, 0.8, 1), C('#2a2018'), 1, 0.05);
+  for (let i = 0; i < 4; i++) petal(b, top, a0 + (i / 4) * TAU, 0.085, 0.085, 0.7, deep, { tip: red, cup: -0.01 });
+  for (let i = 0; i < 4; i++) petal(b, top.clone().add(V(0, 0.005, 0)), a0 + ((i + 0.5) / 4) * TAU, 0.07, 0.07, 0.9, deep, { tip: red, cup: -0.008 });
+  blob(b, 0.018, 0, 2, top.clone().add(V(0, 0.012, 0)), V(1, 0.8, 1), C('#2a2018'), 1, 0.05);
 }
 
 function bluebell(b, x, z, h, rand) {
@@ -95,8 +94,8 @@ function bluebell(b, x, z, h, rand) {
   for (let i = 0; i < 4; i++) {
     const t = 0.35 + i * 0.2;
     const p = pts[1].clone().lerp(pts[3], t);
-    const g = new THREE.CylinderGeometry(0.004, 0.02, 0.034, 6, 1, true);
-    g.translate(0, -0.03, 0);
+    const g = new THREE.CylinderGeometry(0.006, 0.028, 0.045, 6, 1, true);
+    g.translate(0, -0.035, 0);
     g.rotateZ((rand() - 0.5) * 0.4);
     g.translate(p.x + (rand() - 0.5) * 0.02, p.y, p.z + (rand() - 0.5) * 0.02);
     b.addGeometry(g, { uv: WHITE_UV, wind: 1, color: (q, n, c) => c.copy(blue).lerp(blueL, Math.max(0, n.y) * 0.6 + 0.2) });
@@ -107,7 +106,21 @@ function dandelion(b, x, z, h, rand, puff) {
   const top = V(x + (rand() - 0.5) * 0.04, h, z + (rand() - 0.5) * 0.04);
   stem(b, V(x, 0, z), top, 0.004, C('#6a9a3a'));
   if (puff) {
-    blob(b, 0.042, 1, 3, top.clone().add(V(0, 0.03, 0)), V(1, 1, 1), (q, n, c) => c.setRGB(0.92, 0.93, 0.9).multiplyScalar(0.85 + 0.15 * Math.max(0, n.y)), 1, 0.25);
+    // пушок: белые лучики-парашютики во все стороны + серая серединка
+    const c = top.clone().add(V(0, 0.035, 0));
+    const white = C('#fbfbf7'), gray = C('#dedcd0');
+    const nP = 46;
+    for (let i = 0; i < nP; i++) {
+      const yy = 1 - (2 * (i + 0.5)) / nP, rr = Math.sqrt(1 - yy * yy), a = i * 2.39996;
+      const d = V(Math.cos(a) * rr, yy, Math.sin(a) * rr);
+      const tip = c.clone().addScaledVector(d, 0.045);
+      const side = d.clone().cross(Math.abs(d.y) > 0.9 ? V(1, 0, 0) : UP).normalize().multiplyScalar(0.007);
+      const n = d;
+      b.vert(c, n, gray, WHITE_UV, 0, 1);
+      b.vert(tip.clone().add(side), n, white, WHITE_UV, 0, 1);
+      b.vert(tip.clone().sub(side), n, white, WHITE_UV, 0, 1);
+    }
+    blob(b, 0.012, 0, 3, c, V(1, 1, 1), gray, 1, 0.1);
   } else {
     const yel = C('#f7c514'), yl = C('#ffe066');
     const n = 14;
@@ -146,10 +159,10 @@ function flowerCluster(kind, seed) {
   for (let i = 0; i < n; i++) {
     const a = rand() * TAU, r = i === 0 ? 0 : 0.06 + rand() * 0.14;
     const x = Math.cos(a) * r, z = Math.sin(a) * r;
-    if (kind === 'daisy') daisy(b, x, z, 0.18 + rand() * 0.14, rand);
-    else if (kind === 'poppy') poppy(b, x, z, 0.3 + rand() * 0.18, rand);
-    else if (kind === 'bluebell') bluebell(b, x, z, 0.22 + rand() * 0.1, rand);
-    else dandelion(b, x, z, 0.2 + rand() * 0.14, rand, i % 2 === 0);
+    if (kind === 'daisy') daisy(b, x, z, 0.3 + rand() * 0.16, rand);
+    else if (kind === 'poppy') poppy(b, x, z, 0.42 + rand() * 0.2, rand);
+    else if (kind === 'bluebell') bluebell(b, x, z, 0.32 + rand() * 0.12, rand);
+    else dandelion(b, x, z, 0.3 + rand() * 0.16, rand, i % 2 === 0);
   }
   return b;
 }
@@ -672,7 +685,7 @@ export class Decor {
     for (let i = 0; i < nFlower; i++) {
       const x = x0 + rand() * CH, z = z0 + rand() * CH;
       const r1 = rand(), r2 = rand();
-      const patch = flowerNoise.fbm(x * 0.065, z * 0.065, 2);
+      const patch = flowerPatch(x, z);
       if (patch < 0.16) continue;
       const y = heightAt(x, z);
       if (y < WATER_Y + 0.4) continue;
@@ -687,7 +700,7 @@ export class Decor {
       if (w.autumn > 0.5) kind = sp < 0.5 ? 'dandelion' : 'poppy';
       else if (w.rain > 0.5) kind = sp < 0.5 ? 'bluebell' : 'daisy';
       else kind = sp < 0.24 ? 'daisy' : sp < 0.42 ? 'poppy' : sp < 0.6 ? 'bluebell' : sp < 0.78 ? 'dandelion' : 'daisy';
-      add(kind, x, y - 0.01, z, 0.85 + rand() * 0.4);
+      add(kind, x, y - 0.01, z, 0.95 + rand() * 0.45);
     }
     // клевер ковриками
     for (let i = 0; i < Math.round(70 * D); i++) {
@@ -753,7 +766,7 @@ export class Decor {
         } else if (y < WATER_Y - 0.55 && y > WATER_Y - 2.4) {
           if (ln < 0.1 || r1 > 0.45) continue;
           const fl = rand() < 0.18;
-          add(fl ? 'lilyFlower' : 'lily', x, WATER_Y + 0.005, z, 0.28 + rand() * 0.2, { sy: 1 });
+          add(fl ? 'lilyFlower' : 'lily', x, WATER_Y + 0.02, z, 0.28 + rand() * 0.2, { sy: 1 });
         }
       }
     }
@@ -775,7 +788,7 @@ export class Decor {
       env(x, z);
       if (wc.autumn < 0.3) break;
       if (w.autumn < 0.55) continue;
-      if (flowerNoise.get(x * 0.05 + 40, z * 0.05) < 0.35 || forestDensity(x, z) > 0.3) continue;
+      if (speciesNoise.get(x * 0.05 + 40, z * 0.05) < 0.35 || forestDensity(x, z) > 0.3) continue;
       const y = heightAt(x, z);
       if (pathDist(x, z) < 2 || this._blocked(x, z) || slopeAt(x, z) > 0.4) continue;
       add('pumpkin', x, y - 0.05, z, 0.22 + rand() * 0.18);

@@ -8,7 +8,7 @@ import { Noise2D, smoothstep } from '../util/math.js';
 import {
   N, CELL, MIN, WATER_Y, LAKE, getHeightGrid, heightAt, pathDist, slopeAt, zoneWeights, GRID_HALF,
 } from './terrain-data.js';
-import { forestDensity } from './nature/forest.js';
+import { canopyDensity } from './nature/forest.js';
 import { GLSL_NOISE, NATURE } from './nature/shared.js';
 
 const noise = new Noise2D(4242);
@@ -37,7 +37,7 @@ export function groundColor(x, z, h, slope, out = _c) {
   const n1 = noise.fbm(x * 0.045, z * 0.045, 3) * 0.5 + 0.5;
   const n2 = noise.fbm(x * 0.2 + 30, z * 0.2, 2) * 0.5 + 0.5;
   const w = zoneWeights(x, z, _w);
-  const forest = forestDensity(x, z);
+  const forest = canopyDensity(x, z);
 
   out.setRGB(0, 0, 0);
   // луг: под кронами - подстилка темнее и оливковее
@@ -241,7 +241,15 @@ if (walkM > 0.001) {
   tRough = mix(tRough, 0.95, walkM);
 }
 tRough = mix(tRough, 0.06, tPuddle);
-tH *= 1.0 - tPuddle;`)
+tH *= 1.0 - tPuddle;
+// травяной "ковёр": штрихи по ветру и светлый налёт кончиков вдали, где трава уже не рисуется
+{
+  float grassy = clamp(diffuseColor.g * 1.6 - diffuseColor.r * 1.2 - diffuseColor.b * 0.4, 0.0, 1.0) * (1.0 - walkM) * (1.0 - smoothstep(0.4, 0.6, tSnow));
+  float streak = nzValue(vec2(dot(tp, vec2(0.86, 0.5)) * 9.0, dot(tp, vec2(-0.5, 0.86)) * 2.2));
+  diffuseColor.rgb *= 1.0 + (streak - 0.5) * 0.18 * grassy;
+  float farK = smoothstep(22.0, 60.0, tViewD) * grassy;
+  diffuseColor.rgb = mix(diffuseColor.rgb, diffuseColor.rgb * vec3(1.12, 1.1, 0.86), farK * 0.6);
+}`)
       .replace('#include <normal_fragment_maps>', `#include <normal_fragment_maps>
 {
   // ложный рельеф: высота из шума -> возмущение нормали через производные
@@ -256,7 +264,7 @@ roughnessFactor = min(roughnessFactor, tRough);`)
 {
   // лужи отражают небо (окружения нет - берём цвет дымки)
   float fres = 0.25 + 0.75 * pow(1.0 - clamp(dot(normal, normalize(vViewPosition)), 0.0, 1.0), 3.0);
-  totalEmissiveRadiance += fogColor * fres * tPuddle * 0.55;
+  totalEmissiveRadiance += fogColor * fres * tPuddle * 0.3;
 }
 #endif
 totalEmissiveRadiance += vec3(tSpark) * 1.6;`);

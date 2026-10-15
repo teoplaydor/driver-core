@@ -47,7 +47,7 @@ function roots(b, n, r0, len, seed, color) {
       V().addScaledVector(d, r0 + L * 0.35).setY(0.12),
       V().addScaledVector(d, r0 + L).setY(-0.12),
     ];
-    tube(b, pts, (t) => lerp(r0 * 0.55, r0 * 0.12, t), { segs: 5, color });
+    tube(b, pts, (t) => lerp(r0 * 0.55, r0 * 0.12, t), { segs: 5, color, uv: WHITE_UV });
   }
 }
 
@@ -62,7 +62,7 @@ function trunk(b, h, r0, r1, seed, { color, segs = 8, flare = 0.35, bendAmp = 0.
     const base = lerp(r0, r1, Math.pow(t, 0.75));
     const fl = t < 0.12 ? flare * (1 - t / 0.12) * (0.65 + 0.35 * Math.sin(a * 5 + seed)) : 0;
     return base * (1 + fl);
-  }, { segs, color });
+  }, { segs, color, uv: WHITE_UV });
   return pts;
 }
 
@@ -122,28 +122,33 @@ export function firDetailed({ seed = 1, snow = false, lod = 1 } = {}) {
   trunk(b, H - 0.6, 0.34, 0.05, seed, { color: bark, segs: lod > 0.7 ? 8 : 6 });
   roots(b, lod > 0.7 ? 5 : 3, 0.3, 0.9, seed + 3, bark);
 
-  const T = 7;
+  // ярусы почти горизонтальные, кончики слегка свисают: классический конус ели
+  const T = lod > 0.7 ? 9 : 7;
   const segs = lod > 0.7 ? 4 : 3;
   for (let i = 0; i < T; i++) {
     const t = i / (T - 1);
-    const y = 2.4 + Math.pow(t, 0.95) * 7.0;
-    const R = 3.0 * (1 - t * 0.8) + 0.3;
+    const y = 2.1 + Math.pow(t, 0.92) * 7.3;
+    const R = 2.9 * (1 - t * 0.82) + 0.3;
     const bright = 0.82 + t * 0.26;
-    // тёмная "сердцевина" яруса: закрывает просветы между лапами
-    const core = firTier({
-      radius: R * 0.46, height: 1.3 - t * 0.35, y: y - 0.15, spikes: 9, droop: 0.35, rot: i * 0.7, seed: seed * 13 + i,
-      cDark: FIR.deep, cLight: FIR.mid, bright: 0.75 + t * 0.15,
-    });
-    b.addGeometry(core, { uv: WHITE_UV, tint: 1, wind: 0 });
-    const k = Math.max(4, Math.round(lerp(9, 5, t) * (lod > 0.7 ? 1 : 0.75)));
+    // внутренний тёмный слой: короткие крутые лапы у ствола закрывают просветы (без плоских конусов)
+    const kin = lod > 0.7 ? 5 : 4;
+    for (let j = 0; j < kin; j++) {
+      const a = i * 1.3 + (j / kin) * TAU + rand() * 0.5;
+      const L = R * (0.5 + rand() * 0.12);
+      const o = V(Math.cos(a) * 0.08, y + 0.15 + rand() * 0.2, Math.sin(a) * 0.08);
+      firFrond(b, o, a, L, L * 0.8, L * 0.4, L * 0.35, L * 0.12, 2, (s, p, out) => {
+        out.copy(FIR.deep).lerp(FIR.mid, s * 0.7).multiplyScalar(0.8 + t * 0.15);
+      });
+    }
+    const k = Math.max(4, Math.round(lerp(10, 5, t) * (lod > 0.7 ? 1 : 0.75)));
     const rot = i * 0.95 + rand() * 0.6;
     for (let j = 0; j < k; j++) {
       const a = rot + (j / k) * TAU + (rand() - 0.5) * 0.55;
       const L = R * (0.85 + rand() * 0.3);
-      const W = L * (0.72 + rand() * 0.15);
+      const W = L * (0.6 + rand() * 0.14);
       const o = V(Math.cos(a) * 0.1, y + (rand() - 0.5) * 0.4, Math.sin(a) * 0.1);
       const tone = 0.9 + rand() * 0.2;
-      const lift = L * (0.16 + rand() * 0.12), droop = L * (0.45 + rand() * 0.25);
+      const lift = L * (0.1 + rand() * 0.1), droop = L * (0.24 + rand() * 0.16);
       const frondColor = (s, p, out) => {
         if (s < 0.45) out.copy(FIR.deep).lerp(FIR.mid, s / 0.45);
         else out.copy(FIR.mid).lerp(FIR.outer, (s - 0.45) / 0.55).lerp(FIR.tip, smoothstep(0.75, 1, s) * 0.45);
@@ -195,7 +200,8 @@ export function firFar({ seed = 1, snow = false } = {}) {
 const CROWNS = {
   broad: [[0, 4.7, 0, 2.05], [1.45, 4.15, 0.55, 1.5], [-1.35, 4.3, -0.5, 1.55], [0.25, 5.95, -0.3, 1.35], [-0.45, 3.8, 1.25, 1.25], [0.6, 3.95, -1.3, 1.2]],
   maple: [[0, 4.9, 0, 2.2], [1.6, 4.2, 0.6, 1.55], [-1.5, 4.4, -0.55, 1.6], [0.2, 6.2, -0.2, 1.45], [-0.5, 3.9, 1.4, 1.3], [0.7, 4.0, -1.45, 1.3]],
-  birch: [[0, 5.7, 0, 1.35], [0.65, 6.7, 0.25, 1.05], [-0.55, 4.9, -0.3, 1.15], [0.25, 4.3, 0.65, 0.95], [-0.2, 7.5, -0.1, 0.8], [-0.6, 6.2, 0.45, 0.9]],
+  birch: [[0, 5.7, 0, 1.45], [0.95, 6.4, 0.35, 1.1], [-0.95, 5.3, -0.35, 1.2], [0.45, 4.6, 0.95, 1.0], [-0.25, 7.3, -0.15, 0.95],
+    [-0.85, 6.4, 0.75, 1.0], [0.85, 5.0, -0.85, 1.0]],
   hero: [[0, 5.0, 0, 2.3], [1.75, 4.4, 0.6, 1.7], [-1.6, 4.6, -0.55, 1.75], [0.3, 6.5, -0.3, 1.6], [-0.5, 4.0, 1.5, 1.45],
     [0.7, 4.2, -1.55, 1.45], [1.3, 5.8, 1.0, 1.2], [-1.2, 6.0, 0.9, 1.25], [-0.9, 5.5, -1.4, 1.2]],
 };
@@ -233,31 +239,34 @@ export function broadDetailed({ seed = 1, kind = 'broad', lod = 1, hero = false 
     const start = V(top.x * 0.8, trunkH * (0.62 + rand() * 0.3), top.z * 0.8);
     const end = V(x * 0.85, y - r * 0.25, z * 0.85);
     const mid = start.clone().lerp(end, 0.5).add(V(0, 0.35, 0));
-    tube(b, [start, mid, end], (t) => lerp(birch ? 0.08 : 0.16, 0.04, t), { segs: 5, color: barkC });
+    tube(b, [start, mid, end], (t) => lerp(birch ? 0.08 : 0.16, 0.04, t), { segs: 5, color: barkC, uv: WHITE_UV });
   });
   // вертикальный лидер в главную крону
-  tube(b, [top.clone(), V(blobs[0][0], blobs[0][1], blobs[0][2])], (t) => lerp(birch ? 0.11 : 0.19, 0.06, t), { segs: 6, color: barkC });
+  tube(b, [top.clone(), V(blobs[0][0], blobs[0][1], blobs[0][2])], (t) => lerp(birch ? 0.11 : 0.19, 0.06, t), { segs: 6, color: barkC, uv: WHITE_UV });
 
   const sphereN = (p, n) => {
     const d = p.clone().sub(crownC).normalize();
     return (n ? n.clone().multiplyScalar(0.5).addScaledVector(d, 0.6) : d).addScaledVector(UP, 0.2).normalize();
   };
   const rect = ATLAS[kind === 'maple' ? 'maple' : birch ? 'birch' : 'leaf'];
+  // яркость сердцевины и карточек: клёны и берёзы светлее (яркая осенняя/светлая листва)
+  const coreK = kind === 'broad' ? 0.52 : kind === 'maple' ? 0.72 : 0.6, cardK = kind === 'broad' ? 1.08 : 1.2;
   blobs.forEach(([x, y, z, r], i) => {
     const detail = (i === 0 || hero) && lod > 0.7 ? 2 : 1;
-    const g = blobGeometry(r * 0.68, detail, seed * 31 + i, 0.15, 1.4);
+    // тёмная сердцевина меньше у берёзы: крона у неё ажурнее
+    const g = blobGeometry(r * (birch ? 0.45 : 0.6), detail, seed * 31 + i, 0.15, 1.4);
     g.translate(x, y, z);
     b.addGeometry(g, {
       uv: WHITE_UV, tint: 1, wind: 0,
       normal: (p, n) => n.copy(sphereN(p, n)),
-      color: (p, n, c) => { const v = crownShade(p, n, crownC.y, r + 1.5, seed) * 0.52; c.setRGB(v, v, v); },
+      color: (p, n, c) => { const v = crownShade(p, n, crownC.y, r + 1.5, seed) * coreK; c.setRGB(v, v, v); },
     });
     // карточки листвы поверх кроны: рваный силуэт
-    const nCards = Math.round(r * r * (hero ? 19 : 15) * lod);
+    const nCards = Math.round(r * r * (hero ? 20 : birch ? 26 : 18) * lod);
     for (let j = 0; j < nCards; j++) {
       const u = rand() * 2 - 1, a = rand() * TAU;
       let dy = u;
-      if (dy < -0.6) dy = -0.6 + (dy + 0.6) * 0.4; // снизу карточек меньше
+      if (dy < -0.6 && !hero) dy = -0.6 + (dy + 0.6) * 0.4; // снизу карточек меньше (у героя снизу тоже густо)
       const sxz = Math.sqrt(Math.max(0, 1 - dy * dy));
       const d = V(Math.cos(a) * sxz, dy, Math.sin(a) * sxz).normalize();
       const p = V(x, y, z).addScaledVector(d, r * (0.62 + Math.sqrt(rand()) * 0.38));
@@ -266,7 +275,7 @@ export function broadDetailed({ seed = 1, kind = 'broad', lod = 1, hero = false 
       const cn = d.clone().add(V(rand() - 0.5, rand() - 0.3, rand() - 0.5).multiplyScalar(0.9)).normalize();
       card(b, p, cn, s, s, rand() * TAU, rect, {
         sphereN: (q) => sphereN(q),
-        color: (q, c) => { const v = Math.min(1.12, crownShade(q, d, crownC.y, r + 1.5, seed) * 1.08); c.setRGB(v, v, v); },
+        color: (q, c) => { const v = Math.min(1.15, crownShade(q, d, crownC.y, r + 1.5, seed) * cardK); c.setRGB(v, v, v); },
         tint: 1, wind: 1, bend: s * 0.14,
       });
     }
@@ -308,7 +317,7 @@ export function bareDetailed({ seed = 1, lod = 1 } = {}) {
       d.add(V((rand() - 0.5) * 0.35, 0.12, (rand() - 0.5) * 0.35)).normalize();
       pts.push(pts[i - 1].clone().addScaledVector(d, len / 3));
     }
-    tube(b, pts, (t) => lerp(r0, r0 * 0.3, t), { segs: depth === 0 ? 5 : depth === 1 ? 4 : 3, color: barkC });
+    tube(b, pts, (t) => lerp(r0, r0 * 0.3, t), { segs: depth === 0 ? 5 : depth === 1 ? 4 : 3, color: barkC, uv: WHITE_UV });
     if (depth >= (lod > 0.7 ? 2 : 1)) return;
     const kids = depth === 0 ? 3 : 2;
     for (let k = 0; k < kids; k++) {
@@ -359,7 +368,7 @@ export function bareFar({ seed = 1 } = {}) {
     const a = (i / 5) * TAU + rand() * 0.6;
     const y = 2.0 + (i / 5) * 2.2;
     const s = V(0, y, 0), e = V(Math.cos(a) * 2.0, y + 2.0, Math.sin(a) * 2.0);
-    tube(b, [s, e], (t) => lerp(0.12, 0.03, t), { segs: 3, color: barkC });
+    tube(b, [s, e], (t) => lerp(0.12, 0.03, t), { segs: 3, color: barkC, uv: WHITE_UV });
   }
   snowOnTop(b, 0.35);
   return b.toGeometry();

@@ -199,7 +199,7 @@ export function foliageAtlas() {
 
   drawClump(g, RECTS.leaf, 11, { count: 150, size: 1.0 });
   drawFrond(g, RECTS.fir, 21, {
-    stem: 8, bend: 0.0, leaflets: 19, angle: 1.0, angleDrop: 0.35, width: 22, serr: 4,
+    stem: 7, bend: 0.0, leaflets: 25, angle: 1.0, angleDrop: 0.35, width: 17, serr: 3,
     profile: (t) => Math.pow(1 - t, 0.55) * Math.min(1, 0.55 + t * 3),
   });
   drawClump(g, RECTS.maple, 31, { count: 70, size: 1.1, kind: 'maple' });

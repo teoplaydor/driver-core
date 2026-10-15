@@ -294,7 +294,7 @@ export function tube(b, pts, radius, { segs = 7, color, uv, tint = 0, wind = 0, 
     rings.push(row);
   }
   const c = new THREE.Color();
-  const W = uv || [0.5, 0.5];
+  const W = uv || [0.875, 0.125]; // по умолчанию - непрозрачный белый участок атласа листвы
   for (let i = 0; i < n - 1; i++) {
     const t0 = typeof tint === 'function' ? tint(i / (n - 1)) : tint;
     const w0 = typeof wind === 'function' ? wind(i / (n - 1)) : wind;

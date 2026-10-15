@@ -13,7 +13,7 @@ import { groundColor } from './terrain.js';
 import {
   NATURE, GLSL_NOISE, GLSL_WIND, MAX_BENDERS, GLSL_NORMAL_NOFLIP, glslTranslucency, bindNature,
 } from './nature/shared.js';
-import { forestDensity } from './nature/forest.js';
+import { canopyDensity, flowerPatch } from './nature/forest.js';
 
 const patchNoise = new Noise2D(909);
 const tallNoise = new Noise2D(4711);
@@ -21,7 +21,7 @@ const tallNoise = new Noise2D(4711);
 // Пучок: blades травинок по segs сегментов. Атрибут aBlade = (доля высоты, случайное, сторона).
 function buildTuft(blades, segs, seed) {
   const rand = mulberry32(seed);
-  const pos = [], nor = [], bl = [], idx = [];
+  const pos = [], nor = [], bl = [], wide = [], idx = [];
   for (let b = 0; b < blades; b++) {
     const a = (b / blades) * TAU + rand() * 0.9;
     const r0 = 0.02 + rand() * 0.07;
@@ -29,8 +29,8 @@ function buildTuft(blades, segs, seed) {
     // наклон наружу + немного вбок, изгиб растёт к кончику
     const lean = 0.22 + rand() * 0.38;
     const dx = Math.cos(a + (rand() - 0.5) * 0.8), dz = Math.sin(a + (rand() - 0.5) * 0.8);
-    const h = 0.62 + rand() * 0.48;
-    const w = 0.026 + rand() * 0.014;
+    const h = 0.42 + rand() * 0.36;
+    const w = 0.02 + rand() * 0.011;
     const px = -dz, pz = dx; // поперёк лезвия
     // лицевая нормаль лезвия: смотрит по направлению наклона
     const rnd = rand();
@@ -43,12 +43,14 @@ function buildTuft(blades, segs, seed) {
       if (s < segs) {
         const ww = w * (1 - Math.pow(t, 1.4) * 0.82);
         pos.push(x - px * ww, y, z - pz * ww, x + px * ww, y, z + pz * ww);
+        wide.push(-px * ww, -pz * ww, px * ww, pz * ww);
         // скруглённая нормаль: края слегка развёрнуты в стороны
         const nx = dx * 0.6, nz = dz * 0.6;
         nor.push(nx - px * 0.45, 0.65, nz - pz * 0.45, nx + px * 0.45, 0.65, nz + pz * 0.45);
         bl.push(t, rnd, -1, t, rnd, 1);
       } else {
         pos.push(x + dx * 0.02, y, z + dz * 0.02);
+        wide.push(0, 0);
         nor.push(dx * 0.6, 0.7, dz * 0.6);
         bl.push(1, rnd, 0);
       }
@@ -64,6 +66,7 @@ function buildTuft(blades, segs, seed) {
   g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
   g.setAttribute('normal', new THREE.Float32BufferAttribute(nor, 3));
   g.setAttribute('aBlade', new THREE.Float32BufferAttribute(bl, 3));
+  g.setAttribute('aWide', new THREE.Float32BufferAttribute(wide, 2));
   g.setIndex(idx);
   return g;
 }
@@ -76,6 +79,7 @@ function grassMaterial(far, receive) {
     shader.vertexShader = shader.vertexShader
       .replace('#include <common>', `#include <common>
 attribute vec3 aBlade;
+attribute vec2 aWide;
 attribute vec4 iPos;
 attribute vec4 iPrm;
 attribute vec4 iBase;
@@ -93,17 +97,20 @@ vec3 objectNormal = normal;
 objectNormal.xz = vec2(gcs * normal.x + gsn * normal.z, -gsn * normal.x + gcs * normal.z);
 objectNormal = normalize(mix(objectNormal, vec3(0.0, 1.0, 0.0), 0.45));`)
       .replace('#include <begin_vertex>', `
-vec3 transformed = vec3(position.x * iPrm.x, position.y * iPrm.y, position.z * iPrm.x);
+float gd = distance(iPos.xz, uCamPos.xz);
+// вдали травинки шире: иначе они тоньше пикселя и поле "лысеет"
+vec3 transformed = position;
+transformed.xz += aWide * smoothstep(5.0, 45.0, gd) * 1.8;
+transformed = vec3(transformed.x * iPrm.x, transformed.y * iPrm.y, transformed.z * iPrm.x);
 transformed.xz = vec2(gcs * transformed.x + gsn * transformed.z, -gsn * transformed.x + gcs * transformed.z);
 float gT = aBlade.x;
 // плотность по расстоянию: ранг экземпляра против доли видимых
-float gd = distance(iPos.xz, uCamPos.xz);
 float dens = 1.0 - smoothstep(uGrassFade.x, uGrassFade.y, gd);
 float keep = clamp((dens - iPrm.z) * 14.0, 0.0, 1.0);
 // граница LOD с дизерингом по рангу, чтобы не было ровной линии
 float split = uGrassFade.z + (iPrm.z - 0.5) * 3.0;
 ${far ? 'keep *= step(split, gd);' : 'keep *= step(gd, split);'}
-float shrink = mix(1.0, 0.65, smoothstep(uGrassFade.x, uGrassFade.y, gd));
+float shrink = mix(1.0, 0.78, smoothstep(uGrassFade.x, uGrassFade.y, gd));
 transformed *= keep * shrink;
 // ветер: большие волны порывов + мелкая дрожь
 vec2 wp = iPos.xz;
@@ -201,7 +208,7 @@ export class GrassField {
       const mk = (tpl, mat) => {
         const g = new THREE.InstancedBufferGeometry();
         g.index = tpl.index;
-        for (const k of ['position', 'normal', 'aBlade']) g.setAttribute(k, tpl.getAttribute(k));
+        for (const k of ['position', 'normal', 'aBlade', 'aWide']) g.setAttribute(k, tpl.getAttribute(k));
         g.setAttribute('iPos', iPos); g.setAttribute('iPrm', iPrm);
         g.setAttribute('iBase', iBase); g.setAttribute('iTip', iTip);
         g.instanceCount = 0;
@@ -258,7 +265,7 @@ export class GrassField {
         zoneWeights(sx, sz, w);
         gw[k * 5] = w.meadow; gw[k * 5 + 1] = w.autumn; gw[k * 5 + 2] = w.winter; gw[k * 5 + 3] = w.rain; gw[k * 5 + 4] = w.canyon;
         gs[k * 2] = sl;
-        gs[k * 2 + 1] = forestDensity(sx, sz);
+        gs[k * 2 + 1] = canopyDensity(sx, sz);
       }
     }
     const bil = (arr, stride, off, fx, fz) => {
@@ -288,7 +295,7 @@ export class GrassField {
       const patch = patchNoise.fbm(x * 0.06, z * 0.06, 2) * 0.5 + 0.5;
       const forest = bil(gs, 2, 1, fx, fz);
       let dens = meadow + autumn * 0.85 + rain * 0.95 + canyon * 0.16;
-      dens *= 0.5 + 0.65 * smoothstep(0.25, 0.6, patch);
+      dens *= 0.72 + 0.4 * smoothstep(0.25, 0.6, patch);
       dens *= 1 - forest * 0.6; // в тени леса трава реже
       if (canyon > 0.3) dens *= smoothstep(0.62, 0.72, patch) * 1.5 + 0.12;
       if (r2 > dens) continue;
@@ -297,7 +304,9 @@ export class GrassField {
       if (this._excluded(x, z)) continue;
 
       const tall = tallNoise.fbm(x * 0.045, z * 0.045, 2) * 0.5 + 0.5;
-      let hs = (0.5 + tall * 0.55) * (0.75 + r3 * 0.5);
+      // обычно по колено (~0.35-0.6 м), пятнами выше; в цветочных полянах ниже, чтобы цветы торчали
+      let hs = (0.62 + tall * 0.6) * (0.8 + r3 * 0.4);
+      hs *= 1 - 0.35 * smoothstep(0.12, 0.4, flowerPatch(x, z)) * meadow;
       hs *= 0.55 + 0.45 * edge;
       hs *= 1 - canyon * 0.35 - rain * 0.05 - forest * 0.3;
       hs *= rr < 200 ? 0.7 + 0.3 * smoothstep(74, 200, rr) : 1;

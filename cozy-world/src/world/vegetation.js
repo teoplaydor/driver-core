@@ -59,7 +59,7 @@ function buildBoulder(seed, bands, moss = false) {
 // ---------- раскладка ----------
 
 const MEADOW_GREENS = ['#5aa83a', '#6db843', '#4f9c39', '#7cbf48'].map(col);
-const AUTUMN_COLORS = ['#e8862a', '#d0482b', '#efb73a', '#dc6a2c', '#f2c94a', '#c4402a'].map(col);
+const AUTUMN_COLORS = ['#f29a30', '#e8642c', '#f6c23e', '#ec7f2e', '#f8d64e', '#de4f2a'].map(col);
 const AUTUMN_GREENS = ['#a7a83a', '#c29a34'].map(col);
 const RAIN_GREENS = ['#3f7c4b', '#306b46', '#4b8651'].map(col);
 const CANYON_GREENS = ['#5f9446', '#76a24c'].map(col);
@@ -321,7 +321,7 @@ class TreeLOD {
   _recenter(x, z) {
     this.center.set(x, z);
     NATURE.uLod.value.set(x, z, this.nearR);
-    for (const t of Object.values(this.byType)) t.nc = 0;
+    for (const k in this.byType) this.byType[k].nc = 0;
     const R = this.nearR, R2 = R * R;
     const c0x = Math.floor((x - R) / GRID), c1x = Math.floor((x + R) / GRID);
     const c0z = Math.floor((z - R) / GRID), c1z = Math.floor((z + R) / GRID);
@@ -339,37 +339,42 @@ class TreeLOD {
     }
   }
 
+  _inside(x, y, z, r) {
+    const planes = this.frustum.planes;
+    for (let p = 0; p < 6; p++) {
+      const pl = planes[p];
+      if (pl.normal.x * x + pl.normal.y * y + pl.normal.z * z + pl.constant < -r) return false;
+    }
+    return true;
+  }
+
   update(camera, force = false) {
     const cp = camera.position;
     if (force || (cp.x - this.center.x) ** 2 + (cp.z - this.center.y) ** 2 > 9) this._recenter(cp.x, cp.z);
     camera.updateMatrixWorld();
     this._pm.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
-    const planes = this.frustum.setFromProjectionMatrix(this._pm).planes;
+    this.frustum.setFromProjectionMatrix(this._pm);
     const sd = this.sunDir;
-    const k = Math.hypot(sd.x, sd.z) / Math.max(0.2, sd.y);
-    const shx = -sd.x / Math.hypot(sd.x, sd.z), shz = -sd.z / Math.hypot(sd.x, sd.z);
-    const inside = (x, y, z, r) => {
-      for (let p = 0; p < 6; p++) {
-        const pl = planes[p];
-        if (pl.normal.x * x + pl.normal.y * y + pl.normal.z * z + pl.constant < -r) return false;
-      }
-      return true;
-    };
-    for (const t of Object.values(this.byType)) {
+    const sh = Math.hypot(sd.x, sd.z);
+    const k = sh / Math.max(0.2, sd.y);
+    const shx = -sd.x / sh, shz = -sd.z / sh;
+    if (!this.types) this.types = Object.values(this.byType);
+    for (const t of this.types) {
       const { near, mats, cols, sph, cand } = t;
       const dstM = near.instanceMatrix.array, dstC = near.instanceColor.array;
       let n = 0;
       for (let j = 0; j < t.nc; j++) {
         const i = cand[j];
         const x = sph[i * 4], y = sph[i * 4 + 1], z = sph[i * 4 + 2], r = sph[i * 4 + 3];
-        let vis = inside(x, y, z, r);
+        let vis = this._inside(x, y, z, r);
         if (!vis && this.shadows) {
           // тень дерева может упасть в кадр, даже если само оно за кадром
-          const L = (y - mats[i * 16 + 13]) * 2 * k * 0.5;
-          vis = inside(x + shx * L, y - (y - mats[i * 16 + 13]), z + shz * L, r + L);
+          const hh = y - mats[i * 16 + 13];
+          const L = hh * k;
+          vis = this._inside(x + shx * L, y - hh, z + shz * L, r + L);
         }
         if (!vis) continue;
-        dstM.set(mats.subarray(i * 16, i * 16 + 16), n * 16);
+        for (let e = 0; e < 16; e++) dstM[n * 16 + e] = mats[i * 16 + e];
         dstC[n * 3] = cols[i * 3]; dstC[n * 3 + 1] = cols[i * 3 + 1]; dstC[n * 3 + 2] = cols[i * 3 + 2];
         n++;
       }
