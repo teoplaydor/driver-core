@@ -22,10 +22,28 @@ export const QUALITY = {
 export const isTouchDevice = () =>
   typeof window !== 'undefined' && ('ontouchstart' in window || navigator.maxTouchPoints > 0) && window.matchMedia('(pointer: coarse)').matches;
 
+// Программный WebGL (SwiftShader, llvmpipe...): видеокарты нет или браузер её не использует.
+// Там даже medium идёт секунды на кадр, поэтому по умолчанию - low.
+export function isSoftwareGL() {
+  try {
+    const gl = document.createElement('canvas').getContext('webgl2');
+    if (!gl) return false;
+    const ext = gl.getExtension('WEBGL_debug_renderer_info');
+    const name = String(gl.getParameter(ext ? ext.UNMASKED_RENDERER_WEBGL : gl.RENDERER));
+    gl.getExtension('WEBGL_lose_context')?.loseContext();
+    return /swiftshader|llvmpipe|softpipe|software/i.test(name);
+  } catch {
+    return false;
+  }
+}
+
 export function detectQuality() {
   try {
     const saved = localStorage.getItem('cozy.quality');
     if (saved && QUALITY[saved]) return saved;
   } catch { /* приватный режим */ }
+  // Превью-страница (одиночный режим) открывается где угодно: без видеокарты сразу low.
+  // На dev-сервере по умолчанию прежнее поведение - замеры и скриншоты других потоков без ?q= не меняются.
+  if (typeof window !== 'undefined' && window.COZY_SOLO && isSoftwareGL()) return 'low';
   return isTouchDevice() ? 'medium' : 'high';
 }
