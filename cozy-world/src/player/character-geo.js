@@ -616,8 +616,8 @@ function buildHair(ctx) {
     const f = Math.abs(((az + Math.PI) % TAU) - Math.PI) / Math.PI;
     let lo, hi;
     if (style === 3) { // лысина с венчиком: от висков над ушами и низко по затылку (лоб и темя голые)
-      lo = 0.1 - 0.56 * sstep(0.52, 0.85, f);
-      hi = 0.27 - 0.07 * sstep(0.55, 0.85, f) + 0.02 * Math.sin(az * 11);
+      lo = 0.1 - 0.38 * sstep(0.52, 0.85, f);
+      hi = 0.24 - 0.08 * sstep(0.55, 0.85, f) + 0.015 * Math.sin(az * 11);
       hi = lo + (hi - lo) * sstep(0.27, 0.42, f);
     } else {
       lo = hairEdge(az > Math.PI ? az - TAU : az, style);
