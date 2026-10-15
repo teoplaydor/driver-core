@@ -438,7 +438,7 @@ function buildHead(ctx) {
   const { S, skin, hair, look } = ctx;
   const facial = look.facial || 0;
   const warm = mix(skin, '#e8705f', 0.14);
-  const stubble = mix(skin, tint(hair, 0.6), 0.32);
+  const stubble = mix(skin, mix(tint(hair, 0.5), '#454650', 0.4), 0.46); // «трёхдневная» тень: серо-коричневая
   const dir = new THREE.Vector3();
   S.grid((u, v, out) => {
     sphereDir(u, v, dir);
@@ -512,15 +512,21 @@ function buildMouth(ctx) {
     const z = -out.y * Math.sin(ang) + out.z * Math.cos(ang);
     return out.set(out.x, y, z);
   };
-  // вес челюсти = доля угловой глубины точки: при закрытии всё ложится ровно на линию улыбки
-  const jawW = (x, f) => {
-    const t = Math.min(1, Math.max(-1, (x - HEAD_C.x) / 0.029));
-    const w = f * Math.max(0, 1 - t * t) ** 0.75;
-    return [B.head, 1 - w, B.jaw, w];
+  // вес челюсти = доля угловой глубины точки: при закрытии всё ложится ровно на линию улыбки.
+  // Параметр t вершины запоминаем при построении (grid вызывает fn и веса в одном порядке),
+  // а не восстанавливаем по x — иначе у уголков рта оставались тёмные «клыки».
+  const jawGrid = (tScale, fScale, off, nu, nv, col) => {
+    const ts = [];
+    let k = 0;
+    S.grid((u, v, out) => { const t = (u * 2 - 1) * tScale; ts.push(t); return pt(t, v * fScale, off, out); }, nu, nv, { wrap: false, flip: true }, col, (x, y, z, f) => {
+      const t = ts[k++];
+      const w = f * fScale * Math.max(0, 1 - t * t) ** 0.75;
+      return [B.head, 1 - w, B.jaw, w];
+    });
   };
   const pt = (t, f, off, out) => { dirAt(t, f, out); return headPoint(out.x, out.y, out.z, off, out); };
-  S.grid((u, v, out) => pt(u * 2 - 1, v, 0.002, out), 12, 4, { wrap: false, flip: true }, C('#4a1a1a'), (x, y, z, t) => jawW(x, t));
-  S.grid((u, v, out) => pt((u * 2 - 1) * 0.6, v * 0.3, 0.0028, out), 6, 1, { wrap: false, flip: true }, C('#f3ece0'), (x, y, z, t) => jawW(x, t * 0.3));
+  jawGrid(1, 1, 0.002, 12, 4, C('#4a1a1a'));
+  jawGrid(0.6, 0.3, 0.0028, 6, 1, C('#f3ece0'));
   const smile = [];
   for (let i = 0; i <= 12; i++) smile.push(pt(((i / 12) * 2 - 1) * 1.05, 0, 0.003, V()));
   S.tube(smile, smile.map((_, i) => 0.0024 + 0.0012 * Math.sin(Math.PI * i / 12)), { radial: 5 }, mix(skin, '#5a2a22', 0.75), B.head);
@@ -546,8 +552,8 @@ function stubbleMask(d) {
   const line = -0.2 + 0.3 * sstep(0.45, 0.95, ax);
   let m = sstep(line + 0.04, line - 0.04, d.y);
   m *= sstep(0.25, -0.05, d.z);
-  const mx = d.x / 0.13, my2 = (d.y - FACE.mouthDir.y + 0.02) / 0.07;
-  m *= sstep(0.8, 1.2, Math.sqrt(mx * mx + my2 * my2));
+  const mx = d.x / 0.1, my2 = (d.y - FACE.mouthDir.y) / 0.035;
+  m *= 0.35 + 0.65 * sstep(0.8, 1.3, Math.sqrt(mx * mx + my2 * my2)); // у самих губ светлее
   return m;
 }
 
@@ -558,8 +564,9 @@ function buildMustache(ctx) {
     const pts = [], radii = [];
     for (let i = 0; i <= 5; i++) {
       const t = i / 5;
-      pts.push(headPoint(s * (0.01 + 0.11 * t), FACE.mouthDir.y + 0.05 - 0.025 * t * t, FACE.mouthDir.z, 0.006 - 0.003 * t));
-      radii.push(0.0085 * (1 - 0.55 * t) + 0.002);
+      // между носом и губой, с зазором над улыбкой; кончики чуть опущены
+      pts.push(headPoint(s * (0.012 + 0.115 * t), FACE.mouthDir.y + 0.088 - 0.03 * t * t, FACE.mouthDir.z, 0.005 - 0.0025 * t));
+      radii.push(0.0072 * (1 - 0.5 * t) + 0.0018);
     }
     S.tube(pts, radii, { radial: 6, squash: [0.7, 1] }, tint(hair, 0.95), B.head);
   }
@@ -572,12 +579,14 @@ function hairEdge(az, style) {
   const f = Math.abs(az) / Math.PI;
   const front = style === 2 ? 0.44 : 0.4;
   let e = front;
-  e += (0.24 - front) * sstep(0.12, 0.26, f);  // виски
-  e += -0.36 * sstep(0.26, 0.32, f);           // бакенбарды
-  e += 0.4 * sstep(0.35, 0.42, f);             // над ухом
+  const rec = style === 3 ? 0 : 0.07;          // залысины: углы над висками чуть выше центра
+  e += rec * sstep(0.03, 0.12, f);
+  e += (0.28 - front - rec) * sstep(0.15, 0.28, f);  // виски
+  e += -0.22 * sstep(0.32, 0.36, f);           // короткие бакенбарды прямо перед ухом
+  e += 0.24 * sstep(0.41, 0.45, f);            // над ухом
   e += -0.5 * sstep(0.6, 0.7, f);              // за ухом вниз
   e += -0.14 * sstep(0.7, 0.95, f);            // затылок
-  if (style === 0 || style === 1) e += 0.03 * Math.sin(az * 24) * sstep(0.2, 0.05, f); // чёлка зубчиками
+  if (style === 0 || style === 1) e += 0.02 * Math.sin(az * 24) * sstep(0.12, 0.03, f); // чёлка зубчиками
   return e;
 }
 
@@ -595,7 +604,9 @@ function buildHair(ctx) {
         + 0.07 * Math.exp(-((d.y - 0.55) ** 2) / 0.022) * Math.max(0, -d.z) ** 1.5 * (1 + 0.6 * d.x);
       case 2: return 0.006;
       case 3: return 0.022 + 0.006 * Math.sin(az * 9) * Math.sin(el * 7);
-      default: return 0.015 + 0.006 * sstep(0, 0.9, d.y) + 0.0025 * Math.sin(az * 46 + el * 8);
+      // короткая: виски и затылок коротко (почти «под машинку»), объём сверху и чуть приподнятая чёлка
+      default: return 0.005 + 0.019 * sstep(0.3, 0.72, d.y) + 0.0025 * Math.sin(az * 46 + el * 8) * sstep(0.2, 0.6, d.y)
+        + 0.01 * Math.exp(-((d.y - 0.6) ** 2) / 0.03) * Math.max(0, -d.z);
     }
   };
   const topDy = (az) => (capped ? Math.min(1, b0 + 0.11 * Math.cos(az) + 0.05) : 1);
@@ -619,7 +630,7 @@ function buildHair(ctx) {
     let rim = sstep(0, 1 / NV, v) * (0.6 + 0.4 * sstep(0.06, 0.3, v));
     if (style === 3 || capped) rim *= sstep(1, 1 - 1.5 / NV, v);
     if (capped) t *= 0.8;
-    return headPoint(dir.x, dir.y, dir.z, 0.0015 + t * rim, out);
+    return headPoint(dir.x, dir.y, dir.z, 0.0028 + t * rim, out);
   }, NU, NV, { wrap: true }, (x, y, z, out, tv) => {
     _d.set(x, y, z).sub(HEAD_C).normalize();
     out.copy(hair);
@@ -627,6 +638,7 @@ function buildHair(ctx) {
     out.lerp(strands, 0.24 * (0.5 + 0.5 * Math.sin(az * 46 + _d.y * 8)) * sstep(0.1, 0.8, _d.y));
     out.multiplyScalar((0.8 + 0.2 * sstep(-0.3, 0.6, _d.y)) * (0.82 + 0.18 * sstep(0, 0.25, tv)));
     if (style === 2) out.lerp(ctx.skin, 0.25); // ёжик просвечивает
+    else if (style === 0) out.lerp(ctx.skin, 0.22 * sstep(0.4, 0.1, _d.y)); // короткие виски просвечивают
   }, B.head);
 }
 
