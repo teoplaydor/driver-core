@@ -12,6 +12,7 @@ import { buildVegetation, HERO_MESHES } from './vegetation.js';
 import { GrassField } from './grass.js';
 import { Decor } from './decor.js';
 import { CollisionWorld } from './collision.js';
+import { Interactables } from './interactables.js';
 import { buildStructures } from './structures.js';
 import { Weather } from './weather.js';
 import { NATURE, MAX_BENDERS } from './nature/shared.js';
@@ -26,6 +27,7 @@ export class World {
     this.scene = new THREE.Scene();
     this.uTime = NATURE.uTime;
     this.collisions = new CollisionWorld();
+    this.interactables = new Interactables(); // C7: порталы, места за столами, стенды...
     // круги, где не растут трава и мелкий декор (см. excludeNature)
     this.natureExclusions = [];
 

@@ -6,27 +6,13 @@
 
 import { WebSocketServer } from 'ws';
 import { PROP_IDS, STATE_IDS, USE_ACTIONS } from '../shared/props.js';
+import { MODULES, modByPrefix, safeCall, util, num, round, cleanText, parseVec } from './modules/index.js';
 
 const MAX_PLAYERS = 16;
 const TICK_MS = 66; // ~15 снапшотов в секунду
 const ROOM_TTL_MS = 5 * 60 * 1000; // пустая комната живёт 5 минут, чтобы не терять переставленные предметы
 const ROOM_RE = /^[a-zа-я0-9_-]{1,12}$/;
 const HIT_MS = 400; // удар битой по игроку — не чаще раза в 0.4 с от одного игрока по одному и тому же
-
-const num = (v, min, max) => (typeof v === 'number' && Number.isFinite(v) ? Math.min(max, Math.max(min, v)) : null);
-const round = (v, k = 100) => Math.round(v * k) / k;
-const cleanText = (s, max) => String(s).replace(/[\u0000-\u001f\u007f<>]/g, '').replace(/\s+/g, ' ').trim().slice(0, max);
-
-function parseVec(a, n, lim) {
-  if (!Array.isArray(a) || a.length !== n) return null;
-  const out = [];
-  for (const v of a) {
-    const x = num(v, -lim, lim);
-    if (x === null) return null;
-    out.push(x);
-  }
-  return out;
-}
 
 // Внешность: [кожа, наряд, шляпа, очки, цвет волос, причёска, борода]. Старые клиенты шлют 5 чисел.
 function parseLook(a) {
@@ -53,11 +39,32 @@ class Room {
     this.clients = new Map();
     this.props = new Map(); // id -> { p, q, owner, held, dirty, s }
     this.emptyAt = 0;
+    this.mods = {}; // контексты модулей активностей (server/modules), создаются при первом обращении
   }
 
   broadcast(msg, except) {
     const data = JSON.stringify(msg);
     for (const c of this.clients.values()) if (c !== except && c.ws.readyState === 1) c.ws.send(data);
+  }
+
+  // Контекст модуля активности в этой комнате (формат — в server/modules/index.js).
+  mod(md) {
+    let ctx = this.mods[md.name];
+    if (!ctx) {
+      const room = this;
+      ctx = this.mods[md.name] = {
+        room,
+        state: {},
+        util,
+        send(to, msg) {
+          const c = typeof to === 'string' ? room.clients.get(to) : to;
+          if (c && c.ws.readyState === 1) c.ws.send(JSON.stringify(msg));
+        },
+        broadcast: (msg, except) => room.broadcast(msg, typeof except === 'string' ? room.clients.get(except) : except),
+        clients: () => [...room.clients.values()],
+      };
+    }
+    return ctx;
   }
 }
 
@@ -131,7 +138,12 @@ export function attachGameServer(httpServer, { path = '/ws', iceServers } = {}) 
           id: c.id, name: c.name, look: c.look, p: c.st.p, r: c.st.r, q: c.st.q, a: c.st.a, hk: c.st.hk,
         }));
         const props = [...room.props].map(([id, pr]) => ({ id, p: pr.p, q: pr.q, o: pr.owner, h: pr.held ? 1 : 0, s: pr.s }));
-        send({ t: 'welcome', id: client.id, room: code, players, props, ice });
+        const mods = {};
+        for (const md of MODULES) {
+          const data = safeCall(md, 'welcome', room.mod(md), client);
+          if (data !== undefined) mods[md.name] = data;
+        }
+        send({ t: 'welcome', id: client.id, room: code, players, props, ice, mods });
         room.broadcast({ t: 'join', id: client.id, name: client.name, look: client.look }, client);
         return;
       }
@@ -253,7 +265,10 @@ export function attachGameServer(httpServer, { path = '/ws', iceServers } = {}) 
         case 'ping':
           send({ t: 'pong', ts: m.ts });
           break;
-        default:
+        default: { // сообщения модулей активностей: по префиксу типа
+          const md = modByPrefix(m.t);
+          if (md) safeCall(md, 'message', room.mod(md), client, m);
+        }
       }
     });
 
@@ -262,6 +277,7 @@ export function attachGameServer(httpServer, { path = '/ws', iceServers } = {}) 
       if (!room) return;
       room.clients.delete(client.id);
       releaseProps(room, client);
+      for (const md of MODULES) safeCall(md, 'leave', room.mod(md), client);
       room.broadcast({ t: 'leave', id: client.id });
       if (!room.clients.size) room.emptyAt = Date.now();
       client.room = null;
@@ -272,8 +288,10 @@ export function attachGameServer(httpServer, { path = '/ws', iceServers } = {}) 
 
   // Снапшоты: каждому игроку шлём чужие обновившиеся состояния и предметы одним сообщением.
   const tick = setInterval(() => {
+    const tNow = Date.now();
     for (const room of rooms.values()) {
       if (!room.clients.size) continue;
+      for (const md of MODULES) if (md.tick) safeCall(md, 'tick', room.mod(md), tNow);
       const changed = [];
       for (const c of room.clients.values()) {
         if (c.dirty) { changed.push([c.id, ...c.st.p, c.st.r, c.st.q, c.st.sp, c.st.a, c.st.hk]); c.dirty = false; }
