@@ -307,7 +307,8 @@ export function broadDetailed({ seed = 1, kind = 'broad', lod = 1, hero = false 
       const sxz = Math.sqrt(Math.max(0, 1 - dy * dy));
       const d = V(Math.cos(a) * sxz, dy, Math.sin(a) * sxz).normalize();
       const p = V(x, y, z).addScaledVector(d, r * (0.62 + Math.sqrt(rand()) * 0.38));
-      const s = (birch ? 1.1 : hero ? 1.15 : 1.45) * (0.8 + rand() * 0.45);
+      // при меньшей детализации карточек меньше, но они крупнее - крона остаётся плотной
+      const s = (birch ? 1.1 : hero ? 1.15 : 1.45) * (0.8 + rand() * 0.45) / Math.sqrt(Math.max(0.4, lod));
       // карточка смотрит наружу с разбросом, чтобы крона не выглядела "чешуйчатой"
       const cn = d.clone().add(V(rand() - 0.5, rand() - 0.3, rand() - 0.5).multiplyScalar(0.9)).normalize();
       card(b, p, cn, s, s, rand() * TAU, rect, {
@@ -434,7 +435,7 @@ export function bushDetailed({ seed = 1, berries = false, snow = false, lod = 1 
       const sxz = Math.sqrt(Math.max(0, 1 - Math.min(1, dy * dy)));
       const d = V(Math.cos(a) * sxz, Math.min(1, dy), Math.sin(a) * sxz).normalize();
       const p = V(x, y, z).addScaledVector(d, r * (0.72 + rand() * 0.28));
-      const s = 0.72 * (0.8 + rand() * 0.4);
+      const s = 0.72 * (0.8 + rand() * 0.4) / Math.sqrt(Math.max(0.4, lod));
       card(b, p, d, s, s, rand() * TAU, ATLAS.leaf, {
         sphereN, tint: 1, wind: 1, bend: s * 0.12,
         color: (q, c) => { const v = Math.min(1.1, crownShade(q, d, 0.45, 0.9, seed) * 1.06); c.setRGB(v, v, v); },
