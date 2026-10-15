@@ -39,6 +39,17 @@ ${GLSL_WIND}`;
 
 // depth: в depth-шейдере нет objectNormal - берём атрибут normal
 function plantVertexBody(far, anchored, depth) {
+  // дальний LOD (склеенные чанки): только скрытие ближних и простое качание - вершин там много
+  if (far) {
+    return /* glsl */`
+{
+  vec3 ip = ${anchored ? 'aAnchor' : 'vec3(modelMatrix[3][0], modelMatrix[3][1], modelMatrix[3][2])'};
+  if (distance(ip.xz, uLod.xy) < uLod.z) transformed = vec3(ip.x, -3000.0, ip.z);
+  float hgt = max(0.0, transformed.y - ${anchored ? 'ip.y' : '0.0'} - uSway.y);
+  float ph = uTime * 1.25 + ip.x * 0.31 + ip.z * 0.23;
+  transformed.xz += (uWindDir * 0.6 + vec2(sin(ph), cos(ph * 0.83)) * 0.45) * hgt * uSway.x;
+}`;
+  }
   return /* glsl */`
 {
   #if defined(USE_INSTANCING)
@@ -49,7 +60,6 @@ function plantVertexBody(far, anchored, depth) {
     mat3 im = mat3(modelMatrix);
   #endif
   ${anchored ? 'ip = aAnchor; im = mat3(1.0);' : ''}
-  ${far ? 'if (distance(ip.xz, uLod.xy) < uLod.z) transformed = vec3(ip.x, -3000.0, ip.z);' : ''}
   float baseY = ${anchored ? 'ip.y' : '0.0'};
   // качание: в мировых координатах, чтобы все деревья клонились по ветру согласованно
   float gust = windGust(ip.xz);

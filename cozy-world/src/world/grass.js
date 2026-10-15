@@ -76,6 +76,7 @@ function grassMaterial(far, receive) {
   mat.onBeforeCompile = (shader) => {
     bindNature(shader, ['uTime', 'uWindDir', 'uCamPos', 'uBenders']);
     shader.uniforms.uGrassFade = mat.userData.fade;
+    shader.uniforms.uGrassFar = { value: far ? 1 : 0 };
     shader.vertexShader = shader.vertexShader
       .replace('#include <common>', `#include <common>
 attribute vec3 aBlade;
@@ -87,6 +88,7 @@ attribute vec4 iTip;
 uniform vec3 uCamPos;
 uniform vec4 uBenders[${MAX_BENDERS}];
 uniform vec4 uGrassFade; // начало спада, конец, граница LOD, запас
+uniform float uGrassFar; // 1 - дальний LOD (одна программа на оба LOD)
 varying vec3 vGrassCol;
 varying float vGrassT;
 ${GLSL_NOISE}
@@ -109,7 +111,7 @@ float dens = 1.0 - smoothstep(uGrassFade.x, uGrassFade.y, gd);
 float keep = clamp((dens - iPrm.z) * 14.0, 0.0, 1.0);
 // граница LOD с дизерингом по рангу, чтобы не было ровной линии
 float split = uGrassFade.z + (iPrm.z - 0.5) * 3.0;
-${far ? 'keep *= step(split, gd);' : 'keep *= step(gd, split);'}
+keep *= mix(step(gd, split), step(split, gd), uGrassFar);
 float shrink = mix(1.0, 0.78, smoothstep(uGrassFade.x, uGrassFade.y, gd));
 transformed *= keep * shrink;
 // ветер: большие волны порывов + мелкая дрожь
@@ -153,7 +155,7 @@ varying float vGrassT;`)
 float natTransK = vGrassT * vGrassT;
 ${glslTranslucency('0.5', '0.1', '0.35', '14.0')}`);
   };
-  mat.customProgramCacheKey = () => `grass-${far ? 1 : 0}-${receive ? 1 : 0}`;
+  mat.customProgramCacheKey = () => `grass-${receive ? 1 : 0}`;
   return mat;
 }
 

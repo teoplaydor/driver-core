@@ -425,6 +425,9 @@ export function buildVegetation({ collisions, density = 1, nearR = 70, detail = 
   };
 }
 
+// Меши героических деревьев: World прячет их вместе с остальной природой, пока не готовы шейдеры.
+export const HERO_MESHES = [];
+
 // Одиночное "героическое" дерево для структур (лиственное, увеличенное): подробная крона с карточками листвы.
 export function buildHeroTree(scale = 2.4, tint = '#6fbb42') {
   const g = new THREE.Group();
@@ -442,6 +445,7 @@ export function buildHeroTree(scale = 2.4, tint = '#6fbb42') {
   mesh.castShadow = true;
   mesh.receiveShadow = true;
   mesh.name = 'hero-tree';
+  HERO_MESHES.push(mesh);
   g.add(mesh);
   g.scale.setScalar(scale);
   return g;

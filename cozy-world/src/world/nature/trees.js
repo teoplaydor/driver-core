@@ -178,12 +178,49 @@ export function firDetailed({ seed = 1, snow = false, lod = 1 } = {}) {
   return b.toGeometry();
 }
 
+// Ярус ели для дальнего LOD: индексированный (общие вершины, гладкие нормали) - втрое меньше вершин,
+// чем у firTier с отдельными треугольниками.
+function firTierLite({ radius, height, y, spikes, droop, rot, seed, cDark, cLight, bright }) {
+  const rand = mulberry32(seed);
+  const pos = [], col = [], idx = [];
+  const innerR = radius * 0.52, innerY = y + height * 0.38;
+  const tmp = new THREE.Color();
+  const push = (x, yy, z, t) => {
+    pos.push(x, yy, z);
+    tmp.copy(cDark).lerp(cLight, t).multiplyScalar(bright);
+    col.push(tmp.r, tmp.g, tmp.b);
+    return pos.length / 3 - 1;
+  };
+  const apex = push(0, y + height, 0, 0);
+  const ring = [];
+  for (let i = 0; i < spikes; i++) {
+    const a = rot + (i / spikes) * TAU;
+    ring.push(push(Math.cos(a) * innerR, innerY, Math.sin(a) * innerR, 0.45));
+  }
+  for (let i = 0; i < spikes; i++) {
+    const a0 = rot + (i / spikes) * TAU, a1 = rot + ((i + 1) / spikes) * TAU;
+    const am = (a0 + a1) / 2 + (rand() - 0.5) * 0.45 * (a1 - a0);
+    const len = radius * (0.78 + rand() * 0.38);
+    const tip = push(Math.cos(am) * len, y - height * droop * (0.5 + rand() * 0.9), Math.sin(am) * len, 1);
+    const r0 = ring[i], r1 = ring[(i + 1) % spikes];
+    idx.push(apex, r1, r0, r0, r1, tip);
+  }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  g.setAttribute('color', new THREE.Float32BufferAttribute(col, 3));
+  g.setIndex(idx);
+  g.computeVertexNormals();
+  return g;
+}
+
+const BARK_FAR = C('#4a3424');
+
 export function firFar({ seed = 1, snow = false } = {}) {
   const b = new PlantBuilder();
-  trunk(b, 9.2, 0.32, 0.06, seed, { color: barkColor(C('#33241a'), C('#5f4330'), seed), segs: 5, rings: 2, flare: 0.2 });
+  trunk(b, 9.2, 0.32, 0.06, seed, { color: (t, a, i, k, out) => out.copy(BARK_FAR), segs: 5, rings: 2, flare: 0.2 });
   for (let i = 0; i < 4; i++) {
     const t = i / 3;
-    const g = firTier({
+    const g = firTierLite({
       radius: 3.2 * (1 - t * 0.72), height: 2.9 - t * 0.6, y: 2.0 + i * 2.05, spikes: 9, droop: 0.42, rot: i * 0.6, seed: 90 + i,
       cDark: FIR.deep, cLight: FIR.outer, bright: 0.86 + t * 0.2,
     });
@@ -288,7 +325,7 @@ export function broadFar({ seed = 1, kind = 'broad' } = {}) {
   const birch = kind === 'birch';
   const blobs = CROWNS[kind];
   trunk(b, birch ? 4.6 : 3.1, birch ? 0.22 : 0.38, birch ? 0.12 : 0.2, seed, {
-    color: birch ? (t, a, i, k, out) => out.set('#ddd8ce') : barkColor(C('#3f2c1e'), C('#755338'), seed), segs: 5, rings: 2, flare: 0.2,
+    color: birch ? (t, a, i, k, out) => out.set('#ddd8ce') : (t, a, i, k, out) => out.copy(BARK_FAR), segs: 5, rings: 2, flare: 0.2,
   });
   const cy = blobs[0][1];
   [0, 1, 2, 3].forEach((i) => {

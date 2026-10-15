@@ -6,7 +6,7 @@ import { initTerrain } from './terrain-data.js';
 import { buildTerrain, buildWater } from './terrain.js';
 import { Sky } from './sky.js';
 import { Atmosphere } from './atmosphere.js';
-import { buildVegetation } from './vegetation.js';
+import { buildVegetation, HERO_MESHES } from './vegetation.js';
 import { GrassField } from './grass.js';
 import { Decor } from './decor.js';
 import { CollisionWorld } from './collision.js';
@@ -70,10 +70,19 @@ export class World {
     this.grass.prefill(focus.x, focus.z);
     this.decor.prefill(focus.x, focus.z);
     if (!this._compiled) {
-      // шейдеры собираем сразу на загрузке, а не в первом кадре: иначе первый кадр "висит" секунды
-      // (на телефонах и в программном рендере), пока уже идёт подключение к комнате
+      // Шейдеры собираем на загрузке, а не в первом кадре. Если браузер умеет компилировать параллельно
+      // (KHR_parallel_shader_compile), природа скрыта, пока её программы не готовы: первый кадр не ждёт
+      // компиляции (на телефонах это секунды, а в это время уже идёт подключение к комнате).
       this._compiled = true;
-      this.renderer.compile(this.scene, new THREE.PerspectiveCamera());
+      const r = this.renderer, cam = new THREE.PerspectiveCamera();
+      if (r.extensions.has('KHR_parallel_shader_compile')) {
+        const nature = [this.vegetation.group, this.grass.group, this.decor.group, ...HERO_MESHES];
+        for (const o of nature) o.visible = false;
+        const show = () => { for (const o of nature) o.visible = true; };
+        r.compileAsync(this.scene, cam).then(show, show);
+      } else {
+        r.compile(this.scene, cam);
+      }
     }
   }
 
