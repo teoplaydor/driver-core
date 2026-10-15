@@ -24,11 +24,11 @@ export const PRESETS = {
   meadow: {
     skyTop: C('#2f7fdc'), skyMid: C('#7fbcf0'), fog: C('#c4dff2'), fogDensity: 0.0046, fogHeight: 0.0024, fogBase: -3, fogFalloff: 0.1,
     inscatter: 0.6, lakeMist: 0.03, clouds: 0.42, cloudDark: 0,
-    sun: C('#ffdcaa'), sunIntensity: 3.35, hemiSky: C('#b4d4ff'), hemiGround: C('#c08a52'), hemiIntensity: 1.2,
-    fill: C('#8fb0e8'), fillIntensity: 0.45, sheen: 0.22,
+    sun: C('#ffdcaa'), sunIntensity: 3.35, hemiSky: C('#b4d4ff'), hemiGround: C('#c08a52'), hemiIntensity: 1.3,
+    fill: C('#8fb0e8'), fillIntensity: 0.35, sheen: 0.22,
     exposure: 1.06, saturation: 1.12, contrast: 0.16, vignette: 0.3,
     lift: V(0.012, 0.016, 0.03), gamma: V(1.0, 1.0, 0.98), gain: V(1.03, 1.0, 0.95), shadowTint: V(-0.01, 0.0, 0.025), highTint: V(0.02, 0.01, -0.012),
-    bloom: 0.9, bloomThreshold: 1.25, ao: 0.85, rays: 0.35,
+    bloom: 0.9, bloomThreshold: 1.25, ao: 0.75, rays: 0.35,
   },
   // Оранжевый каньон: тёплая пыльная дымка, красноватые тени от отражённого света.
   canyon: {
