@@ -22,7 +22,7 @@ const V = (x, y, z) => new THREE.Vector3(x, y, z);
 export const PRESETS = {
   // Солнечная хвойная поляна, как на первом скрине референса: насыщенное синее небо, тёплое солнце.
   meadow: {
-    skyTop: C('#2f7fdc'), skyMid: C('#7fbcf0'), fog: C('#c4dff2'), fogDensity: 0.0046, fogHeight: 0.0024, fogBase: -3, fogFalloff: 0.1,
+    skyTop: C('#2f7fdc'), skyMid: C('#7fbcf0'), fog: C('#c4dff2'), fogDensity: 0.004, fogHeight: 0.0024, fogBase: -3, fogFalloff: 0.1,
     inscatter: 0.6, lakeMist: 0.03, clouds: 0.42, cloudDark: 0,
     sun: C('#ffdcaa'), sunIntensity: 3.35, hemiSky: C('#b4d4ff'), hemiGround: C('#c08a52'), hemiIntensity: 1.3,
     fill: C('#8fb0e8'), fillIntensity: 0.35, sheen: 0.22,
@@ -149,6 +149,8 @@ export class Atmosphere {
     this._c = new THREE.Vector3();
     this._fwd = new THREE.Vector3();
     this._last = new THREE.Vector3(1e9, 0, 0);
+    this._lastFocus = new THREE.Vector3(1e9, 0, 0);
+    this._nearAtFar = new THREE.Vector3(1e9, 0, 0); // центр ближнего каскада, по которому отобрана дальняя карта
     this.frame = 0;
     // объекты, на время отрисовки карты теней выключенные из неё (см. _visitCaster)
     this._skipped = [];
@@ -182,7 +184,9 @@ export class Atmosphere {
   }
 
   _visitCaster(o) {
-    if (!o.castShadow || !o.isMesh || o.isInstancedMesh || o.isSkinnedMesh || o === this._hook) return;
+    // границы геометрии надёжны только у обычных мешей: экземпляры, скелеты, BatchedMesh и всё, что само
+    // отказалось от отсечения по рамке (frustumCulled = false: вершины сдвигает шейдер и т.п.), не трогаем
+    if (!o.castShadow || !o.isMesh || o.isInstancedMesh || o.isSkinnedMesh || o.isBatchedMesh || !o.frustumCulled) return;
     const g = o.geometry;
     if (!g || g.isInstancedBufferGeometry) return;
     if (!g.boundingSphere) g.computeBoundingSphere();
@@ -266,9 +270,12 @@ export class Atmosphere {
   // focus - позиция игрока (зона и центр теней); camera - для заливки и ближнего каскада (может не быть).
   update(dt, focus, camera) {
     this.time += dt;
+    // скачок позиции (портал в квартиру, телепорт): свет и погоду переключаем сразу, без секунды дождя в комнате
+    const md = this._lastFocus.distanceToSquared(focus) > 900 ? 10 : dt;
+    this._lastFocus.copy(focus);
     const tw = zoneWeights(focus.x, focus.z, this._tw);
-    for (const k of KEYS) this.w[k] = damp(this.w[k], tw[k], 2.2, dt);
-    this.indoor = damp(this.indoor, isInterior(focus.x) ? 1 : 0, 5, dt);
+    for (const k of KEYS) this.w[k] = damp(this.w[k], tw[k], 2.2, md);
+    this.indoor = damp(this.indoor, isInterior(focus.x) ? 1 : 0, 5, md);
 
     // смешивание всех полей пресетов
     const v = this.v, w = this.w, ind = this.indoor;
@@ -371,12 +378,15 @@ export class Atmosphere {
       }
       this._placeLight(this.sun, c, this.nearRange, this.nearSize);
       this._nearC.copy(this._snap);
-      // дальний - через кадр (сразу - при скачке позиции: телепорт, отладочная камера)
-      const jump = this._last.distanceToSquared(focus) > 25;
+      // дальний - через кадр (сразу - при скачке позиции: телепорт, отладочная камера). Из дальней карты выкинуты
+      // объекты внутри ближнего каскада - если он с тех пор заметно сдвинулся (быстрый поворот камеры), их тени
+      // у его края пропали бы на кадр: тогда тоже обновляем сразу.
+      const jump = this._last.distanceToSquared(focus) > 25 || this._nearAtFar.distanceToSquared(this._nearC) > (this.nearRange * 0.05) ** 2;
       if (jump || (this.frame & 1) === 1) {
         this._placeLight(this.sunFar, focus, this.shadowRange, this.shadowSize);
         this.sunFar.shadow.needsUpdate = true;
         this._last.copy(focus);
+        this._nearAtFar.copy(this._nearC);
         this._cullFar = true;
         this._cullNear = true;
       }
