@@ -6,7 +6,7 @@ import { QUALITY, detectQuality, isTouchDevice } from './config.js';
 import { World } from './world/world.js';
 import { heightAt } from './world/terrain-data.js';
 import { Player } from './player/player.js';
-import { Avatar, SKINS, lookToArray } from './player/avatar.js';
+import { Avatar, SKINS, lookToArray, sleeveColor, holdToCode } from './player/avatar.js';
 import { Hands } from './player/hands.js';
 import { Input, TouchControls } from './player/input.js';
 import { UI } from './ui/ui.js';
@@ -53,8 +53,12 @@ export class Game {
     this.nick = '';
     this.avatar = new Avatar(this.look, { name: '', local: true });
     this.world.scene.add(this.avatar.root);
+    // WS1: стопы аватаров ставятся на рельеф и верх ящиков/столов
+    const ground = (x, z, y) => this.world.collisions.supportY(x, z, y, 0.5);
+    this.avatar.setGround(ground);
     this.hands = new Hands(SKINS[this.look.skin]);
-    this.remotes = new RemotePlayers(this.world.scene);
+    this.hands.setSleeve(sleeveColor(this.look));
+    this.remotes = new RemotePlayers(this.world.scene, ground);
     this.holding = null;
     this.audio = new AudioEngine();
     // браузер разрешает звук только после действия пользователя
@@ -114,6 +118,7 @@ export class Game {
     this.look = { ...look };
     this.avatar.setLook(this.look);
     this.hands.setSkin(SKINS[this.look.skin]);
+    this.hands.setSleeve(sleeveColor(this.look)); // WS1
   }
 
   placeMenuAvatar() {
@@ -195,7 +200,7 @@ export class Game {
         this.ui.chat(r.name, m.m);
         this.audio.chat();
       })
-      .on('emote', (m) => this.remotes.get(m.id)?.avatar.wave())
+      .on('emote', (m) => this.remotes.get(m.id)?.avatar.act('wave'))
       .on('look', (m) => this.remotes.setLook(m.id, m.look))
       .on('owner', (m) => this.onOwner?.(m))
       .on('deny', (m) => this.onDeny?.(m))
@@ -255,6 +260,7 @@ export class Game {
     this.nick = nick;
     this.setLook(look);
     this.avatar.setName(nick);
+    this.avatar.lookAt(null); // WS1: в меню персонаж смотрел на камеру
     this.state = 'play';
     this.player.spawn(SPAWN.x, SPAWN.z, SPAWN.yaw);
     this.player.pitch = 0;
@@ -297,30 +303,34 @@ export class Game {
     this._sendT = t;
     const p = this.player;
     const flags = (p.onGround ? 1 : 0) | (this.speakingLocal ? 2 : 0) | (this.holding ? 4 : 0);
+    const hk = holdToCode(this.holdKind); // WS1: вид удержания (контракт C2)
     const yaw = ((p.yaw % TAU) + TAU) % TAU;
     const cur = [p.pos.x, p.pos.y, p.pos.z, yaw, p.pitch, Math.round(p.speed * 10) / 10, flags];
     const last = this._lastState;
     const now = performance.now();
     if (last) {
       const changed = Math.abs(cur[0] - last[0]) + Math.abs(cur[1] - last[1]) + Math.abs(cur[2] - last[2]) > 0.01
-        || Math.abs(cur[3] - last[3]) > 0.004 || Math.abs(cur[4] - last[4]) > 0.004 || cur[6] !== last[6];
+        || Math.abs(cur[3] - last[3]) > 0.004 || Math.abs(cur[4] - last[4]) > 0.004 || cur[6] !== last[6] || hk !== this._lastHk;
       if (!changed && now - this._lastSentAt < 1000) return;
     }
     this._lastState = cur;
+    this._lastHk = hk;
     this._lastSentAt = now;
-    this.net.send({ t: 's', p: [cur[0], cur[1], cur[2]], r: cur[3], q: cur[4], sp: cur[5], a: cur[6] });
+    this.net.send({ t: 's', p: [cur[0], cur[1], cur[2]], r: cur[3], q: cur[4], sp: cur[5], a: cur[6], hk });
   }
 
   // ---------- кадр ----------
 
   menuUpdate(dt) {
     this.menuT += dt;
-    this.avatar.update(dt, { speed: 0, grounded: true, vy: 0, pitch: 0, holding: false }, this.camera);
     const cam = this.camera;
-    cam.position.set(2.0, 1.45, 8.6);
-    cam.lookAt(0.55, 1.0, 5.2);
-    cam.fov = 52;
+    // WS1: кадр 3/4 под нового персонажа; он стоит, моргает и поглядывает в камеру
+    cam.position.set(2.15, 1.32, 8.25);
+    cam.lookAt(0.62, 0.86, 5.25);
+    cam.fov = 46;
     cam.updateProjectionMatrix();
+    this.avatar.lookAt(cam.position);
+    this.avatar.update(dt, { speed: 0, grounded: true, vy: 0, pitch: 0, holdKind: null, talk: 0 }, this.camera);
   }
 
   playUpdate(dt) {
@@ -334,7 +344,8 @@ export class Game {
     }
     if (input.consume('view')) player.wantThird = !player.wantThird;
     if (input.consume('emote')) {
-      this.avatar.wave();
+      this.avatar.act('wave');
+      this.hands.act('wave'); // WS1: в 1-м лице машем рукой в кадре
       if (this.online) this.net?.send({ t: 'emote', e: 'wave' });
     }
     if (input.consume('mic')) this.onToggleMic?.();
@@ -357,15 +368,18 @@ export class Game {
     av.root.position.copy(player.pos);
     av.root.rotation.y = player.yaw;
     av.setBodyVisible(third);
+    // WS1: вид удержания (C2) и речь передаём персонажу и рукам
+    const holdKind = this.holdKind !== undefined ? this.holdKind : this.holding ? 'two' : null;
+    const talk = this.speakingLocal ? 0.7 : 0;
     av.update(dt, {
-      speed: player.speed, grounded: player.onGround, vy: player.vel.y, pitch: player.pitch, holding: !!this.holding,
+      speed: player.speed, grounded: player.onGround, vy: player.vel.y, pitch: player.pitch, holding: !!this.holding, holdKind, talk,
     }, this.camera);
 
     this.reachT = Math.max(0, this.reachT - dt);
     if (!third) {
       this.hands.update(dt, {
-        speed: player.speed, phase: player.bob, holding: !!this.holding, grounded: player.onGround,
-        lookDX: player.lookDX, lookDY: player.lookDY, reach: this.reachT > 0,
+        speed: player.speed, phase: player.bob, holding: !!this.holding, holdKind, grounded: player.onGround, vy: player.vel.y,
+        sprint: player.sprinting, lookDX: player.lookDX, lookDY: player.lookDY, reach: this.reachT > 0, talk,
       }, this.camera, this.world.atmosphere, this.aspect);
     }
 
