@@ -22,8 +22,8 @@ const REACH = 3.0;
 // не отбрасывают тень; hide — дальше мелочь (чашки, книги, фигуры) не рисуется совсем.
 const RANGES = {
   high: { lod: 12, shadow: 30, shadowSmall: 14, hide: 1e9 },
-  medium: { lod: 5, shadow: 11, shadowSmall: 6, hide: 45 },
-  low: { lod: 4, shadow: 0, shadowSmall: 0, hide: 26 },
+  medium: { lod: 3, shadow: 9, shadowSmall: 6, hide: 45 },
+  low: { lod: 2.5, shadow: 0, shadowSmall: 0, hide: 26 },
 };
 const SMALL = new Set(['cup', 'mug', 'teapot', 'book', 'chess', 'frisbee']);
 const SWING_HIT_AT = 0.27; // с начала замаха до удара, с
@@ -211,7 +211,7 @@ export class Props {
 
     for (const st of STANDS) this._addStand(st); // сначала подставки: предметы ставятся на их коллизии
     for (const def of PROPS) this._addProp(def);
-    for (const p of this.list) this._sync(p, true);
+    for (const p of this.list) { this._sync(p, true); p.lod = -1; } // LOD выберется по камере игрока
 
     game.onUse = () => this.use();
     game.onDrop = (power) => this.release(power);
@@ -253,17 +253,31 @@ export class Props {
     b.frustumCulled = false; // предметы разлетаются по миру; каждый экземпляр отсекается сам
     // тень отбрасывают только предметы рядом с камерой: дальние тени в карте теней — пара текселей
     const base = THREE.BatchedMesh.prototype.onBeforeShadow;
-    const hidden = [];
+    // Тень: далеко от камеры и позади неё (предметы ниже ~1 м, тень от них в кадр не дотянется) — не рисуем;
+    // остальные — упрощёнными моделями (силуэт тот же, треугольников в разы меньше).
+    const hidden = [], swapped = [];
     b.onBeforeShadow = (renderer, object, camera, ...rest) => {
-      const c = camera.position, R = this.ranges;
-      hidden.length = 0;
+      const c = camera.position, R = this.ranges, e = camera.matrixWorld.elements;
+      const fx = -e[8], fy = -e[9], fz = -e[10];
+      const behind = (x, y, z) => (x - c.x) * fx + (y - c.y) * fy + (z - c.z) * fz < -1.6;
+      hidden.length = 0; swapped.length = 0;
       for (const p of this.list) {
         if (!p.vis) continue;
         const lim = SMALL.has(p.kind) ? R.shadowSmall : R.shadow;
-        if (p.pos.distanceToSquared(c) > lim * lim) { b.setVisibleAt(p.inst, false); hidden.push(p.inst); }
+        if (p.pos.distanceToSquared(c) > lim * lim || behind(p.pos.x, p.pos.y, p.pos.z)) {
+          b.setVisibleAt(p.inst, false); hidden.push(p.inst); continue;
+        }
+        const lo = this.geos.get(p.key).lo.id;
+        if (lo !== p.gid) { b.setGeometryIdAt(p.inst, lo); swapped.push(p.inst, p.gid); }
+      }
+      for (const st of this.stands || []) {
+        if (behind(st.x, st.y, st.z) || (st.x - c.x) ** 2 + (st.z - c.z) ** 2 > (R.shadow * 1.5) ** 2) { // подставки крупнее
+          b.setVisibleAt(st.id, false); hidden.push(st.id);
+        } else if (st.lod !== 1 && st.e.lo.id !== st.e.hi.id) { b.setGeometryIdAt(st.id, st.e.lo.id); swapped.push(st.id, st.e.hi.id); }
       }
       base.call(b, renderer, object, camera, ...rest);
       for (const id of hidden) b.setVisibleAt(id, true);
+      for (let i = 0; i < swapped.length; i += 2) b.setGeometryIdAt(swapped[i], swapped[i + 1]);
     };
     for (const e of this.geos.values()) {
       e.hi.id = b.addGeometry(e.hi.geo);
@@ -280,7 +294,7 @@ export class Props {
       pos: new THREE.Vector3(), quat: new THREE.Quaternion(), vel: new THREE.Vector3(), ang: new THREE.Vector3(),
       owner: null, held: false, grounded: false, restT: 0,
       goal: { pos: new THREE.Vector3(), quat: new THREE.Quaternion() },
-      key: geoKey(def, state), keySt: state, gid: -1, lod: 0, vis: true, solo: null, scale: 1, dirty: true,
+      key: geoKey(def, state), keySt: state, gid: -1, lod: -1, vis: true, solo: null, scale: 1, dirty: true,
     };
     p.hull = this.geos.get(p.key).hull;
     if (def.rot) p.quat.setFromEuler(_e.set(def.rot[0], def.rot[1], def.rot[2], 'YXZ'));
@@ -311,7 +325,7 @@ export class Props {
     const e = this.geos.get(`stand.${st.type}`);
     const id = this.batch.addInstance(e.hi.id);
     this.batch.setMatrixAt(id, _m.compose(_v.set(st.x, y0, st.z), _q.setFromAxisAngle(_up, ry), _one));
-    (this.stands || (this.stands = [])).push({ st, id, e, lod: 0, x: st.x, y: y0, z: st.z });
+    (this.stands || (this.stands = [])).push({ st, id, e, lod: -1, x: st.x, y: y0, z: st.z });
     switch (st.type) {
       case 'batRack':
         col.addBox(st.x, st.z, 0.5, 0.17, ry, y0 - 0.3, y0 + 0.14);
@@ -859,7 +873,8 @@ export class Props {
     }
     const entry = this.geos.get(p.key);
     const d2 = cam.position.distanceToSquared(p.pos);
-    const lod = d2 > (this.lodDist + (p.lod ? -1 : 1)) ** 2 ? 1 : 0;
+    // с запасом, чтобы не мигало на границе (первый раз — без запаса: p.lod = -1)
+    const lod = d2 > (this.lodDist * (p.lod < 0 ? 1 : p.lod ? 0.88 : 1.12)) ** 2 ? 1 : 0;
     p.lod = lod;
     const gid = lod ? entry.lo.id : entry.hi.id;
     if (gid !== p.gid) { this.batch.setGeometryIdAt(p.inst, gid); p.gid = gid; }
@@ -879,7 +894,7 @@ export class Props {
     const cam = this.game.camera;
     for (const s of this.stands || []) {
       const d2 = (cam.position.x - s.x) ** 2 + (cam.position.z - s.z) ** 2;
-      const lod = d2 > (this.lodDist + 2) ** 2 ? 1 : 0;
+      const lod = d2 > ((this.lodDist + 1) * (s.lod < 0 ? 1 : s.lod ? 0.9 : 1.1)) ** 2 ? 1 : 0;
       if (lod !== s.lod) { s.lod = lod; this.batch.setGeometryIdAt(s.id, lod ? s.e.lo.id : s.e.hi.id); }
     }
   }

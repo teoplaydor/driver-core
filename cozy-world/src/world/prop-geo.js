@@ -396,7 +396,7 @@ export function umbrellaGeo(style, o, d, ribs = o > 0) {
 
 export function lanternGeo(lit, d) {
   const B = new Builder();
-  const s = d ? 16 : 10;
+  const s = d ? 16 : 8;
   const paint = C('#b9372d'), brass = C('#caa052'), wire = C('#2f2d2c');
   // бак, горелка, верхний колпак
   B.add(lathe([[0, -0.13], [0.07, -0.13], [0.078, -0.126], [0.081, -0.115], [0.081, -0.09], [0.074, -0.08], [0.05, -0.074], [0, -0.074]], s, d ? 0.01 : 0),
@@ -429,9 +429,9 @@ export function lanternGeo(lit, d) {
     }
     B.add(sweep(pts, 0.0032, d ? 5 : 3, [false, false]), wire, MT.metal);
   }
-  for (const [y, r] of [[-0.064, 0.072], [0.07, 0.07]]) B.add(new THREE.TorusGeometry(r, 0.0035, d ? 5 : 3, s), wire, MT.metal, T(0, y, 0, Math.PI / 2));
+  for (const [y, r] of d ? [[-0.064, 0.072], [0.07, 0.07]] : []) B.add(new THREE.TorusGeometry(r, 0.0035, 5, s), wire, MT.metal, T(0, y, 0, Math.PI / 2));
   // боковые ушки и дужка-ручка с деревянной рукояткой
-  for (const sx of [-1, 1]) B.add(cyl(0.012, 0.012, 0.008, 10), brass, MT.metal, T(sx * 0.084, 0.06, 0, 0, 0, Math.PI / 2));
+  for (const sx of [-1, 1]) B.add(cyl(0.012, 0.012, 0.008, d ? 10 : 6), brass, MT.metal, T(sx * 0.084, 0.06, 0, 0, 0, Math.PI / 2));
   const bail = [];
   for (let k = 0; k <= (d ? 16 : 8); k++) {
     const a = (k / (d ? 16 : 8)) * Math.PI;
@@ -562,8 +562,9 @@ export function boomboxGeo(on, d) {
   // динамики: хромовое кольцо, подвес, диффузор с решёткой, пылезащитный колпак
   const spk = [[0.0, 0.0], [0.084, 0.0], [0.088, 0.004], [0.084, 0.008], [0.077, 0.006], [0.07, 0.002], [0.05, -0.012], [0.03, -0.022], [0.027, -0.021],
     [0.022, -0.016], [0.01, -0.012], [0, -0.011]];
+  const spkLo = [[0.0, 0.0], [0.084, 0.0], [0.088, 0.004], [0.07, 0.002], [0.03, -0.022], [0, -0.011]];
   for (const sx of [-1, 1]) {
-    const g = lathe(spk.map(([r, y]) => [r, y]), d ? 22 : 10);
+    const g = lathe(d ? spk : spkLo, d ? 22 : 10);
     B.add(g, (x, y, z, out) => {
       const r = Math.hypot(x, z);
       if (r > 0.076) { out.copy(chrome); return; }
@@ -610,8 +611,8 @@ export function boomboxGeo(on, d) {
   // антенна
   const a0 = new THREE.Vector3(0.21, H / 2 + 0.005, -0.03), a1 = a0.clone().add(new THREE.Vector3(-0.12, 0.3, 0));
   B.add(sweep([a0, a0.clone().lerp(a1, 0.5), a1], (t) => 0.005 - 0.0025 * t, d ? 6 : 3), chrome, MT.chrome);
-  B.add(sph(0.007, 8, 6), chrome, MT.chrome, T(a1.x, a1.y, a1.z));
-  B.add(cyl(0.012, 0.012, 0.012, 10), '#2a2a2e', MT.plastic, T(a0.x, a0.y, a0.z));
+  B.add(sph(0.007, d ? 8 : 4, d ? 6 : 3), chrome, MT.chrome, T(a1.x, a1.y, a1.z));
+  B.add(cyl(0.012, 0.012, 0.012, d ? 10 : 6), '#2a2a2e', MT.plastic, T(a0.x, a0.y, a0.z));
   // ножки
   for (const sx of [-1, 1]) for (const sz of [-1, 1]) B.add(cyl(0.014, 0.016, 0.01, d ? 8 : 4), '#1c1c1e', MT.rubber, T(sx * 0.2, -H / 2 - 0.004, sz * 0.04));
   return B.build();
