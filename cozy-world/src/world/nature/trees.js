@@ -290,20 +290,22 @@ export function broadDetailed({ seed = 1, kind = 'broad', lod = 1, hero = false 
   const coreK = kind === 'broad' ? 0.5 : kind === 'maple' ? 0.62 : 0.46, cardK = kind === 'broad' ? 1.08 : 1.2;
   blobs.forEach(([x, y, z, r], i) => {
     const detail = (i === 0 || hero) && lod > 0.7 ? 2 : 1;
-    // тёмная сердцевина меньше у берёзы: крона у неё ажурнее
-    const g = blobGeometry(r * (birch ? 0.45 : 0.6), detail, seed * 31 + i, 0.15, 1.4);
-    g.translate(x, y, z);
-    b.addGeometry(g, {
-      uv: WHITE_UV, tint: 1, wind: 0,
-      normal: (p, n) => n.copy(sphereN(p, n)),
-      // сердцевина пятнистая (тёмные провалы между пучками), иначе сквозь карточки виден гладкий шар
-      color: (p, n, c) => {
-        const v = crownShade(p, n, crownC.y, r + 1.5, seed) * coreK * (0.62 + 0.5 * noise3(p.x * 2.3, p.y * 2.3, p.z * 2.3, seed + 3));
-        c.setRGB(v, v, v);
-      },
-    });
+    // у берёзы крона ажурная - без сердцевины (сквозь редкие карточки она читалась как шар-игрушка)
+    if (!birch) {
+      const g = blobGeometry(r * 0.6, detail, seed * 31 + i, 0.15, 1.4);
+      g.translate(x, y, z);
+      b.addGeometry(g, {
+        uv: WHITE_UV, tint: 1, wind: 0,
+        normal: (p, n) => n.copy(sphereN(p, n)),
+        // сердцевина пятнистая (тёмные провалы между пучками), иначе сквозь карточки виден гладкий шар
+        color: (p, n, c) => {
+          const v = crownShade(p, n, crownC.y, r + 1.5, seed) * coreK * (0.62 + 0.5 * noise3(p.x * 2.3, p.y * 2.3, p.z * 2.3, seed + 3));
+          c.setRGB(v, v, v);
+        },
+      });
+    }
     // карточки листвы поверх кроны: рваный силуэт
-    const nCards = Math.round(r * r * (hero ? 20 : birch ? 26 : 18) * lod);
+    const nCards = Math.round(r * r * (hero ? 20 : birch ? 32 : 18) * lod);
     for (let j = 0; j < nCards; j++) {
       const u = rand() * 2 - 1, a = rand() * TAU;
       let dy = u;
