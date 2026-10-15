@@ -67,7 +67,8 @@ void main() {
   vec4 wp = modelMatrix * vec4(position, 1.0);
   float shore = smoothstep(0.02, 0.5, wDepth(wp.xz));
   #ifdef WAVE_VERTS
-  wp.y += wSwell(wp.xz).x * shore;
+  // у самой камеры вода ровная: на предельной глубине глаза в паре сантиметров над водой - камера не «ныряет» под волну
+  wp.y += wSwell(wp.xz).x * shore * smoothstep(0.8, 3.0, distance(wp.xz, cameraPosition.xz));
   #endif
   vWPos = wp.xyz;
   vec4 mvPosition = viewMatrix * wp;
@@ -83,6 +84,7 @@ ${WAVES}
 uniform vec3 uShallow, uDeep, uFoam;
 uniform vec3 uTop, uMid, uHor, uSunColor, uSunDir, uHemi;
 uniform float uSunK;
+uniform float uGlint; // видимость солнечного диска (в дождь за пеленой - 0)
 uniform vec4 uBenders[${MAX_BENDERS}];
 #ifdef DEFERRED
 uniform sampler2D tCopy;
@@ -145,9 +147,12 @@ void main() {
   vec3 R = reflect(-V, N);
   R.y = abs(R.y);
   vec3 refl = skyColor(R);
-  // блик солнца: острый центр (ярче порога bloom) + мягкий ореол
+  // блик солнца: острое ядро (ярче порога bloom) вблизи рассыпается рябью на искры, мягкий ореол - ниже
+  // порога, иначе bloom раздувает его в сплошное пятно под ногами
   float rs = max(dot(R, uSunDir), 0.0);
-  vec3 spec = uSunColor * (pow(rs, 900.0) * 60.0 + pow(rs, 120.0) * 2.5) * uSunK;
+  float sparkle = smoothstep(0.42, 0.9, wn(p * 6.0 + vec2(t * 0.9, -t * 0.7)) * 0.6 + wn(p * 13.0 - t * 1.1) * 0.4);
+  float glit = mix(0.25 + 1.5 * sparkle, 1.0, smoothstep(12.0, 40.0, dist));
+  vec3 spec = uSunColor * (pow(rs, 1400.0) * 70.0 * uGlint * glit + pow(rs, 140.0) * 0.9) * uSunK;
   // цвет толщи по глубине; освещение - солнце и небо
   float light = 0.45 + 0.4 * uSunK + 0.15;
   vec3 body = mix(uShallow, uDeep, smoothstep(0.05, 2.6, dep)) * light * uHemi;
@@ -253,6 +258,7 @@ export class Water {
         uSunDir: { value: new THREE.Vector3(0, 1, 0) },
         uHemi: { value: new THREE.Color(1, 1, 1) },
         uSunK: { value: 1 },
+        uGlint: { value: 1 },
         tCopy: { value: null },
         uRes: { value: new THREE.Vector2(1, 1) },
         uProjM: { value: new THREE.Matrix4() },
@@ -299,6 +305,7 @@ export class Water {
     u.uSunColor.value.copy(atm.sunColor);
     u.uSunDir.value.copy(atm.sunDir);
     u.uSunK.value = atm.sunIntensity / 3.2;
+    u.uGlint.value = 1 - (atm.v ? atm.v.cloudDark : 0);
     u.uHemi.value.copy(atm.hemiSky).lerp(atm.sunColor, 0.4).multiplyScalar(Math.min(1.25, 0.35 + atm.hemiIntensity * 0.5));
   }
 }

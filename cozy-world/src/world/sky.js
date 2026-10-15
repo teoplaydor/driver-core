@@ -179,8 +179,10 @@ export class Sky {
           col = mix(col, uFog, smoothstep(0.02, -0.12, y));
           float cover = uCloud.x;
           // солнце: диск (ярче порога bloom) и ореол; за пеленой - слабее
-          float veil = 1.0 - cover * 0.85;
-          col += uSunColor * (smoothstep(0.99925, 0.99965, s) * 24.0 * veil + pow(s, 260.0) * 2.2 * veil + pow(s, 32.0) * 0.3 + pow(s, 5.0) * 0.08);
+          // в дождь диска не видно совсем (иначе сквозь пелену светит «луна»), остаётся размытое светлое пятно
+          float veil = (1.0 - cover * 0.85) * (1.0 - uCloud.y);
+          col += uSunColor * (smoothstep(0.99925, 0.99965, s) * 24.0 * veil + pow(s, 260.0) * 2.2 * veil
+            + (pow(s, 32.0) * 0.3 + pow(s, 5.0) * 0.08) * (1.0 - 0.4 * uCloud.y) + pow(s, 12.0) * 0.18 * uCloud.y);
           // процедурный слой: перистые полосы в ясную погоду, сплошная пелена - в дождь
           #ifdef SKY_CIRRUS
           if (y > -0.02 && cover > 0.01) {
@@ -276,8 +278,10 @@ export class Sky {
           vec3 toCam = normalize(vec3(uCam.x - center.x, 0.0, uCam.z - center.z));
           vec3 right = vec3(toCam.z, 0.0, -toCam.x);
           float w = aCloud.w * (1.0 + 0.06 * sin(uTime * 0.05 + aCloud2.w * 20.0));
-          vec3 wp = center + right * position.x * w + vec3(0.0, position.y * w * aCloud2.y, 0.0);
-          wp.y -= w * aCloud2.y * 0.18;
+          // в дождь облака шире и площе: низкая сплошная облачность, а не отдельные «шары»
+          float rx = mix(1.0, 1.45, uState.x), ry = aCloud2.y * mix(1.0, 0.6, uState.x);
+          vec3 wp = center + right * position.x * w * rx + vec3(0.0, position.y * w * ry, 0.0);
+          wp.y -= w * ry * 0.18;
           vec2 cell = vec2(mod(aCloud2.x, ${COLS}.0), floor(aCloud2.x / ${COLS}.0));
           vUv = (cell + vec2(uv.x, uv.y)) / vec2(${COLS}.0, ${ROWS}.0);
           vDir = wp - uCam;
@@ -304,7 +308,8 @@ export class Sky {
           return mix(mix(h2(i), h2(i + vec2(1.0, 0.0)), f.x), mix(h2(i + vec2(0.0, 1.0)), h2(i + vec2(1.0, 1.0)), f.x), f.y);
         }
         void main() {
-          vec4 t = texture2D(uAtlas, vUv);
+          // в дождь форма размыта (выборка из мелкого мипа): пухлые шары сливаются в рыхлую массу
+          vec4 t = texture2D(uAtlas, vUv, uState.x * 2.2);
           // рваный край: шум «съедает» тонкие места
           #ifdef CLOUD_EDGE_NOISE
           vec2 q = vUv * vec2(48.0, 24.0) + vSeed * 17.0 + uTime * 0.01;

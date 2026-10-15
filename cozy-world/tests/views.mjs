@@ -37,6 +37,7 @@ await page.evaluate(async () => {
   window.__render = () => {
     const r = G.renderer;
     G.world.update(0.0001, G.time, G.camera, G.player.pos);
+    if (G.renderView) { r.info.reset(); G.renderView(0); return; } // WS4: тот же конвейер, что в игре (постобработка, руки)
     r.autoClear = true;
     r.render(G.world.scene, G.camera);
     if (!G.player.thirdPerson && !G.player.wantThird) { r.autoClear = false; r.clearDepth(); r.render(G.hands.scene, G.hands.camera); r.autoClear = true; }

@@ -5,7 +5,8 @@
 //  - мокрые поверхности в зоне дождя (темнее и глаже);
 //  - каскадные тени (ближний чёткий каскад + дальний) и плавное затухание теней на краю карты теней;
 //  - направленные источники перебираются с конца, чтобы после цикла directLight был нулевым светом (солнцем):
-//    на это опираются патчи растений (просвечиваемость), и это не ломается от дополнительных источников.
+//    на это опираются патчи растений (просвечиваемость), и это не ломается от дополнительных источников;
+//  - точки PointsMaterial без текстуры - мягкие круглые, а не квадраты.
 // Модуль должен быть импортирован до первой компиляции шейдеров (его импортирует atmosphere.js).
 
 import * as THREE from 'three';
@@ -234,6 +235,17 @@ const SKY_SHEEN = /* glsl */`
 #endif
 `;
 
+// Точки PointsMaterial без текстуры (искры костра) - мягкие круглые, а не квадраты: в HDR с bloom квадрат читается сразу.
+const ROUND_POINTS = /* glsl */`
+#if !defined( USE_MAP ) && !defined( USE_ALPHAMAP )
+	{
+		float cozyR = length( gl_PointCoord - 0.5 );
+		if ( cozyR > 0.5 ) discard;
+		diffuseColor.a *= 1.0 - smoothstep( 0.18, 0.5, cozyR );
+	}
+#endif
+`;
+
 function patchLights(src) {
   const a = src.indexOf('#if ( NUM_DIR_LIGHTS > 0 ) && defined( RE_Direct )');
   const b = src.indexOf('#if ( NUM_RECT_AREA_LIGHTS > 0 ) && defined( RE_Direct_RectArea )');
@@ -258,6 +270,7 @@ export function applyRenderChunks() {
   SC.fog_vertex = FOG_VERTEX;
   SC.fog_pars_fragment = FOG_PARS_FRAGMENT;
   SC.fog_fragment = FOG_FRAGMENT;
+  SC.map_particle_fragment = ROUND_POINTS + SC.map_particle_fragment;
   const lights = patchLights(SC.lights_fragment_begin);
   if (lights) {
     SC.lights_fragment_begin = lights;
