@@ -172,16 +172,18 @@ export class Sky {
           float cover = uCloud.x;
           // солнце: диск (ярче порога bloom) и ореол; за пеленой - слабее
           float veil = 1.0 - cover * 0.85;
-          col += uSunColor * (smoothstep(0.99955, 0.9998, s) * 22.0 * veil + pow(s, 300.0) * 1.2 * veil + pow(s, 32.0) * 0.32 + pow(s, 5.0) * 0.1);
+          col += uSunColor * (smoothstep(0.99925, 0.99965, s) * 24.0 * veil + pow(s, 260.0) * 2.2 * veil + pow(s, 32.0) * 0.3 + pow(s, 5.0) * 0.08);
           // процедурный слой: перистые полосы в ясную погоду, сплошная пелена - в дождь
           if (y > -0.02 && cover > 0.01) {
             vec2 p = d.xz / (h + 0.09) * 0.55 + vec2(uCloud.z * 0.006, uCloud.z * 0.0025);
-            vec2 ps = p * vec2(1.0, 2.6);
+            // перистые: вытянуты по диагонали ветра и изогнуты (без прямых «столбов» к горизонту)
+            vec2 pw = p + vec2(skNoise(p * 0.7 + 5.0), skNoise(p * 0.7 - 3.0)) * 1.4;
+            vec2 ps = mat2(0.8, 0.6, -0.6, 0.8) * pw * vec2(0.8, 2.4);
             float n = skFbm(mix(ps, p * 1.3, smoothstep(0.55, 0.85, cover)));
             float n2 = skFbm(p * 1.3 + uSunDir.xz * 0.12 + 3.1);
             float th = mix(0.72, 0.18, cover);
             float c = smoothstep(th, th + mix(0.22, 0.4, cover), n);
-            c *= smoothstep(-0.02, 0.18, y) * mix(0.65, 1.0, smoothstep(0.5, 0.9, cover));
+            c *= smoothstep(0.0, 0.3, y) * mix(0.5, 1.0, smoothstep(0.5, 0.9, cover));
             float shade = clamp(0.62 + (n - n2) * 2.2 + (1.0 - cover) * 0.25, 0.0, 1.0);
             vec3 lit = mix(vec3(1.0), uSunColor, 0.35) * mix(1.12, 0.78, uCloud.y);
             vec3 dark = mix(mix(uMid, vec3(0.58, 0.63, 0.7), 0.6), vec3(0.36, 0.41, 0.48), uCloud.y);
@@ -205,7 +207,7 @@ export class Sky {
 
   _buildClouds(detail) {
     const rand = mulberry32(99);
-    const count = Math.round(34 * Math.max(0.6, detail));
+    const count = Math.round(26 * Math.max(0.6, detail));
     const quad = new THREE.PlaneGeometry(1, 1, 1, 1);
     quad.translate(0, 0.5, 0);
     const geo = new THREE.InstancedBufferGeometry();
@@ -216,9 +218,9 @@ export class Sky {
     for (let i = 0; i < count; i++) {
       const horizon = i % 5 === 4; // гряды у горизонта
       const ang = (i / count) * Math.PI * 2 + rand() * 0.5;
-      const dist = horizon ? 330 + rand() * 60 : 200 + rand() * 170;
-      const w = horizon ? 230 + rand() * 140 : 95 + rand() * 120;
-      a1.set([ang, dist, horizon ? 22 + rand() * 25 : 55 + rand() * 80, w], i * 4);
+      const dist = horizon ? 330 + rand() * 60 : 230 + rand() * 150;
+      const w = horizon ? 220 + rand() * 120 : 80 + rand() * 95;
+      a1.set([ang, dist, horizon ? 22 + rand() * 25 : 70 + rand() * 80, w], i * 4);
       const cell = horizon ? 6 + (i % 2) : Math.floor(rand() * 6);
       a2.set([cell, horizon ? 0.42 : 0.625, 0.8 + rand() * 0.2, rand()], i * 4);
     }
@@ -294,9 +296,12 @@ export class Sky {
           float a = smoothstep(0.08, 0.55, t.a - (n - 0.5) * 0.45 * (1.0 - t.g)) * vAlpha;
           if (a < 0.004) discard;
           vec3 dir = normalize(vDir);
-          float toward = pow(max(dot(dir, uSunDir), 0.0), 4.0);
-          vec3 col = mix(uShade, uLit, t.r);
-          col += uSunColor * toward * (1.0 - t.g) * 1.6; // серебристая кайма против солнца
+          float back = pow(max(dot(dir, uSunDir), 0.0), 3.0);
+          vec3 col = mix(uShade, uLit, t.r * (1.0 - back * 0.45));
+          col *= 0.93 + 0.14 * n;
+          // против солнца: тонкие края светятся (серебристая кайма), толща темнее
+          float thin = (1.0 - t.g) * (1.0 - t.g);
+          col += uSunColor * (back * back * back) * thin * 0.9;
           col *= 1.0 - 0.45 * uState.x * (1.0 - t.r);
           col = mix(col, uFog, vHaze);
           gl_FragColor = vec4(col, a);

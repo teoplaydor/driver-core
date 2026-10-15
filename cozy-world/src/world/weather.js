@@ -53,7 +53,7 @@ void main() {
   vec3 side = normalize(cross(axis, toCam));
   float width = max(0.006 + 0.008 * aRand.w, dist * uPx * 0.9);
   vec3 w = head - axis * len * position.y + side * position.x * width;
-  vAlpha = step(aRand.z, uAmount * 0.999 + 0.001) * edgeFade(head) * (0.28 + 0.5 * aRand.w)
+  vAlpha = step(aRand.z, uAmount * 0.999 + 0.001) * edgeFade(head) * (0.35 + 0.55 * aRand.w)
     * min(1.0, 0.012 / width * 1.4) * smoothstep(0.6, 2.0, dist);
   vQ = position.xy;
   gl_Position = projectionMatrix * viewMatrix * vec4(w, 1.0);
@@ -322,8 +322,8 @@ export class Weather {
     }
     // снег
     {
-      const u = { ...baseUniforms(36), uSize: { value: 0.05 }, uMotion: { value: new THREE.Vector3(1.3, 0.8, 1) }, uForward: { value: 0 }, uSoft: { value: 1 } };
-      this.snow = add('snow', new THREE.Points(points(n(3200)), material(POINT_VERT, POINT_FRAG, u)), u);
+      const u = { ...baseUniforms(30), uSize: { value: 0.085 }, uMotion: { value: new THREE.Vector3(1.2, 0.8, 1) }, uForward: { value: 0 }, uSoft: { value: 0.75 } };
+      this.snow = add('snow', new THREE.Points(points(n(5200)), material(POINT_VERT, POINT_FRAG, u)), u);
     }
     // листья
     {
@@ -366,7 +366,7 @@ export class Weather {
     // дождь: светлее дымки, на свету - с оттенком неба
     if (near(this.rain, atm.rain)) {
       this.rain.u.uPx.value = 1 / scale;
-      this.rain.u.uColor.value.copy(atm.fogColor).lerp(atm.hemiSky, 0.4).multiplyScalar(1.25);
+      this.rain.u.uColor.value.copy(atm.fogColor).lerp(atm.hemiSky, 0.4).multiplyScalar(1.6);
     }
     if (this.splash && near(this.splash, atm.rain)) this.splash.u.uColor.value.copy(atm.fogColor).lerp(atm.hemiSky, 0.5).multiplyScalar(1.3);
     if (near(this.snow, atm.snow)) this.snow.u.uColor.value.copy(atm.hemiSky).lerp(atm.sunColor, 0.4).multiplyScalar(0.55 + atm.sunIntensity * 0.15 + atm.hemiIntensity * 0.2);

@@ -171,6 +171,54 @@ void main() {
   gl_FragColor = vec4(c * (uWeight / 16.0), 1.0);
 }`;
 
+// ---------- лучи солнца (сквозь листву и края облаков) ----------
+// Маска: видимое небо рядом с солнцем (глубина = дальняя плоскость), четверть разрешения.
+const RAYS_MASK_FRAG = /* glsl */`
+uniform sampler2D tDepth;
+uniform sampler2D tScene;
+uniform vec2 uSun;      // солнце на экране (uv)
+uniform vec2 uAspect;
+uniform vec2 uTexel;    // 1/размер буфера глубины
+varying vec2 vUv;
+void main() {
+  float sky = 0.0;
+  vec3 col = vec3(0.0);
+  for (int i = 0; i < 4; i++) {
+    vec2 o = vec2(float(i - (i / 2) * 2) - 0.5, float(i / 2) - 0.5) * uTexel * 2.0;
+    float d = texture2D(tDepth, vUv + o).r;
+    float k = step(0.99999, d);
+    sky += k;
+    col += texture2D(tScene, vUv + o).rgb * k;
+  }
+  sky *= 0.25; col *= 0.25;
+  float r = length((vUv - uSun) * uAspect);
+  float near = exp(-r * r * 14.0);
+  // ярче там, где небо светлее (облака у солнца перекрывают лучи частично)
+  float br = clamp(dot(col, vec3(0.3, 0.5, 0.2)) * 0.9, 0.0, 2.0);
+  gl_FragColor = vec4(vec3(sky * near * (0.35 + br)), 1.0);
+}`;
+
+const RAYS_BLUR_FRAG = /* glsl */`
+uniform sampler2D tSrc;
+uniform vec2 uSun;
+uniform float uLen;
+varying vec2 vUv;
+void main() {
+  vec2 d = (uSun - vUv) * uLen / 24.0;
+  vec2 uv = vUv;
+  float jitter = fract(sin(dot(gl_FragCoord.xy, vec2(12.9898, 78.233))) * 43758.5453);
+  uv += d * jitter;
+  vec3 sum = vec3(0.0);
+  float w = 1.0, ws = 0.0;
+  for (int i = 0; i < 24; i++) {
+    sum += texture2D(tSrc, uv).rgb * w;
+    ws += w;
+    w *= 0.955;
+    uv += d;
+  }
+  gl_FragColor = vec4(sum / ws, 1.0);
+}`;
+
 // ---------- сведение ----------
 const COMPOSITE_FRAG = /* glsl */`
 uniform sampler2D tScene;
@@ -178,7 +226,9 @@ uniform sampler2D tBloom;
 uniform sampler2D tAO;
 uniform sampler2D tDepth;
 uniform sampler2D tHands;
-uniform vec4 uFlags; // AO, руки, bloom, -
+uniform sampler2D tRays;
+uniform vec3 uRays; // цвет и сила лучей (0 - выкл.)
+uniform vec4 uFlags; // AO, руки, bloom, отладка
 uniform vec2 uAOSize;
 uniform vec2 uRes;
 uniform float uTime;
@@ -228,6 +278,7 @@ void main() {
   if (uFlags.x > 0.5) c *= mix(1.0, aoAt(vUv), uMix.y);
   if (uFlags.y > 0.5) { vec4 h = texture2D(tHands, vUv); c = mix(c, h.rgb, h.a); }
   if (uFlags.z > 0.5) c += texture2D(tBloom, vUv).rgb * uMix.x;
+  if (uRays.r + uRays.g + uRays.b > 0.0) c += texture2D(tRays, vUv).r * uRays;
   c *= uTone.x;
   float l = dot(c, vec3(0.2126, 0.7152, 0.0722));
   c = max(mix(vec3(l), c, uTone.y), 0.0);
@@ -329,11 +380,25 @@ export class PostFX {
       tScene: { value: this.rtScene.texture }, tBloom: { value: this.mips[0].texture }, tAO: { value: this.rtAO?.texture ?? null },
       tDepth: { value: depthTex }, tHands: { value: this.rtHands?.texture ?? null },
       uFlags: { value: new THREE.Vector4() }, uAOSize: { value: new THREE.Vector2(1, 1) }, uRes: { value: new THREE.Vector2(1, 1) },
-      uTime: { value: 0 }, uProj: projU,
+      uTime: { value: 0 }, uProj: projU, tRays: { value: null }, uRays: { value: new THREE.Vector3() },
       uTone: { value: new THREE.Vector4(1, 1.1, 0.1, 0.25) }, uMix: { value: new THREE.Vector4(0.6, 0.8, 0, 0) },
       uLift: { value: new THREE.Vector3() }, uGamma: { value: new THREE.Vector3(1, 1, 1) }, uGain: { value: new THREE.Vector3(1, 1, 1) },
       uShadowTint: { value: new THREE.Vector3() }, uHighTint: { value: new THREE.Vector3() },
     });
+
+    if (opts.ao) {
+      // лучи солнца - там же, где есть текстура глубины (high)
+      this.rtRays = hdr(1, 1);
+      this.rtRays2 = hdr(1, 1);
+      this.raysMaskMat = pass(RAYS_MASK_FRAG, {
+        tDepth: { value: depthTex }, tScene: { value: this.rtScene.texture }, uSun: { value: new THREE.Vector2() },
+        uAspect: { value: new THREE.Vector2(1, 1) }, uTexel: { value: new THREE.Vector2() },
+      });
+      this.raysBlurMat = pass(RAYS_BLUR_FRAG, { tSrc: { value: null }, uSun: { value: new THREE.Vector2() }, uLen: { value: 0.6 } });
+      this.compMat.uniforms.tRays.value = this.rtRays.texture;
+      this._sun = new THREE.Vector3();
+      this._fwd = new THREE.Vector3();
+    }
 
     if (opts.water) {
       this.rtCopy = hdr(1, 1, { minFilter: THREE.NearestFilter, magFilter: THREE.NearestFilter });
@@ -368,6 +433,13 @@ export class PostFX {
       this.aoMat.uniforms.uDepthTexel.value.set(1 / w, 1 / h);
       this.aoMat.uniforms.uAOSize.value.set(aw, ah);
       this.compMat.uniforms.uAOSize.value.set(aw, ah);
+    }
+    if (this.rtRays) {
+      const rw = Math.max(1, Math.ceil(w / 4)), rh = Math.max(1, Math.ceil(h / 4));
+      this.rtRays.setSize(rw, rh);
+      this.rtRays2.setSize(rw, rh);
+      this.raysMaskMat.uniforms.uTexel.value.set(1 / w, 1 / h);
+      this.raysMaskMat.uniforms.uAspect.value.set(w / h, 1);
     }
     let mw = Math.max(1, Math.round(w / this.bloomStart)), mh = Math.max(1, Math.round(h / this.bloomStart));
     for (const m of this.mips) {
@@ -464,8 +536,32 @@ export class PostFX {
       passes += this.mips.length * 2 - 1;
     }
 
-    // 6. сведение и цвет
+    // 5b. лучи солнца: только когда солнце перед камерой
     const cu = this.compMat.uniforms;
+    cu.uRays.value.set(0, 0, 0);
+    if (this.rtRays && grade.rays > 0.01 && grade.sunDir) {
+      camera.getWorldDirection(this._fwd);
+      const facing = this._fwd.dot(grade.sunDir);
+      const sp = facing > 0.3 ? this._sun.copy(camera.position).addScaledVector(grade.sunDir, 1000).project(camera) : null;
+      const su = sp ? sp.x * 0.5 + 0.5 : 0, sv = sp ? sp.y * 0.5 + 0.5 : 0;
+      // солнце в кадре или рядом с его краем
+      const off = sp ? Math.max(0, Math.abs(su - 0.5) - 0.5, Math.abs(sv - 0.5) - 0.5) : 1;
+      if (off < 0.25) {
+        this.raysMaskMat.uniforms.uSun.value.set(su, sv);
+        q.draw(r, this.raysMaskMat, this.rtRays);
+        const bu = this.raysBlurMat.uniforms;
+        bu.uSun.value.set(su, sv);
+        bu.tSrc.value = this.rtRays.texture; bu.uLen.value = 0.55;
+        q.draw(r, this.raysBlurMat, this.rtRays2);
+        bu.tSrc.value = this.rtRays2.texture; bu.uLen.value = 0.25;
+        q.draw(r, this.raysBlurMat, this.rtRays);
+        const k = grade.rays * (1 - off / 0.25);
+        cu.uRays.value.set(grade.sunColor.r * k, grade.sunColor.g * k, grade.sunColor.b * k);
+        passes += 3;
+      }
+    }
+
+    // 6. сведение и цвет
     cu.uFlags.value.set(ao ? 1 : 0, handsInBuffer ? 1 : 0, bloom ? 1 : 0, this.debug === 'ao' ? 1 : this.debug === 'bloom' ? 2 : 0);
     cu.uTime.value = this.time;
     cu.uTone.value.set(grade.exposure, grade.saturation, grade.contrast, grade.vignette);
@@ -497,13 +593,14 @@ export class PostFX {
     add('copy', this.rtCopy, 'rgba16f');
     add('ao', this.rtAO, 'rgba16f'); add('ao2', this.rtAO2, 'rgba16f');
     this.mips.forEach((m, i) => add(`bloom${i}`, m, 'rgba16f'));
+    add('rays', this.rtRays, 'rgba16f'); add('rays2', this.rtRays2, 'rgba16f');
     add('ldr', this.rtLDR, 'rgba8');
     if (this.smaa) { add('smaaEdges', this.smaa.edgesRT, 'rgba16f'); add('smaaWeights', this.smaa.weightsRT, 'rgba16f'); }
     return { passes: this.stats.passes, targets: list };
   }
 
   dispose() {
-    for (const rt of [this.rtScene, this.rtHands, this.rtLDR, this.rtAO, this.rtAO2, this.rtCopy, ...this.mips]) rt?.dispose();
+    for (const rt of [this.rtScene, this.rtHands, this.rtLDR, this.rtAO, this.rtAO2, this.rtCopy, this.rtRays, this.rtRays2, ...this.mips]) rt?.dispose();
     this.smaa?.dispose();
   }
 }
