@@ -1,38 +1,37 @@
-// Геометрия персонажа «как в референсе»: пухлый торс-боб с животиком, большая голова с щеками и
-// носом-картошкой, рубашка с воротником и пуговицами, закатанные рукава, жилет/куртка/худи с карманами
-// и окантовкой, ремень с пряжкой, штаны с отворотами и швом, ботинки со шнурками, причёски, шляпы, очки.
-// Всё собирается в две skinned-геометрии: матовое тело и маленькая глянцевая (глаза, стёкла, пряжка).
+// Геометрия персонажа как в референсе: «толстый папа-турист». Голова-груша (шире внизу, без шеи) лежит прямо
+// на воротнике, лицо минималистичное (маленькие тёмные глаза, мягкий бугорок носа, короткая улыбка);
+// тело-груша с животом вперёд и вниз, белая рубашка с закатанным рукавом и расстёгнутым воротом, жилет
+// нараспашку, брюки с заплатками на коленях, небольшие округлые ботинки, причёски, шляпы, очки.
+// Всё собирается в две skinned-геометрии: матовое тело и маленькая глянцевая (стёкла очков, пряжка).
 
 import * as THREE from 'three';
 import { Sculpt, C, V, tint, mix, sstep, sphereDir } from './sculpt.js';
 import {
-  B, HEAD_C, headRadius, headPoint, FACE, eyeCenter, armDir, palmDir, SHOULDER, UPPER, FORE, HIP_X, HIP_Y, KNUCKLE,
+  B, HEAD_C, headRadius, headPoint, FACE, eyeCenter, armDir, palmDir, SHOULDER, UPPER, FORE, HIP_X, HIP_Y, THIGH, KNUCKLE,
 } from './rig.js';
 
 // ---------- палитры и варианты внешности ----------
-export const SKINS = ['#f2a77f', '#e89b72', '#d08359', '#a8643f', '#f7c7a3', '#7f4a30'];
-export const HAIRS = ['#3b2a1d', '#6b4a2f', '#c9a24a', '#b9482a', '#1f1f24', '#d9d9d9'];
-const EYES = ['#5b3a1f', '#3d6fa8', '#4c7a3c', '#7a5530', '#2c2c33', '#5f7f8f'];
-// style: vest — жилет поверх рубашки, jacket — куртка (рукава её цвета), hoodie — худи
+export const SKINS = ['#f0ad8a', '#f6c0a0', '#e19a74', '#c98058', '#a0623f', '#76482f'];
+export const HAIRS = ['#5a3a24', '#3b2a1d', '#7a5536', '#a87a48', '#2a2226', '#b8b0a6'];
+// Один крой (рубашка + жилет нараспашку + брюки), разные цвета — как в референсе.
 export const OUTFITS = [
-  { name: 'Исследователь', style: 'vest', shirt: '#f3eee4', vest: '#7b3524', trim: '#4f1f14', pants: '#d6c08a', shoes: '#5e3c25', pockets: 2 },
-  { name: 'Лесник', style: 'jacket', shirt: '#e9dcc0', vest: '#4f7140', trim: '#33502a', pants: '#6b5a3e', shoes: '#3b2a1d', pockets: 2 },
-  { name: 'Рыбак', style: 'vest', shirt: '#f2d75e', vest: '#3f6a86', trim: '#27455a', pants: '#4b6a8a', shoes: '#2c2c33', pockets: 4 },
-  { name: 'Ковбой', style: 'vest', shirt: '#c94b3b', vest: '#5c3b25', trim: '#2f1d10', pants: '#3f4f73', shoes: '#4a2c1a', pockets: 0 },
-  { name: 'Мятный', style: 'hoodie', shirt: '#f4f1ea', vest: '#5fc4a8', trim: '#3e9a82', pants: '#e6dbc0', shoes: '#5a4532', pockets: 0 },
-  { name: 'Клубничный', style: 'hoodie', shirt: '#fbe4ea', vest: '#e0628a', trim: '#b7456a', pants: '#76699f', shoes: '#3a2c40', pockets: 0 },
-  { name: 'Угольный', style: 'jacket', shirt: '#ececf0', vest: '#3a3c46', trim: '#22232a', pants: '#5a5b64', shoes: '#1f1f24', pockets: 2 },
-  { name: 'Закат', style: 'vest', shirt: '#ffe6bd', vest: '#d97a2b', trim: '#9c4f17', pants: '#8a4b2a', shoes: '#3d2a1c', pockets: 2 },
+  { name: 'Исследователь', shirt: '#f4f1ea', vest: '#6b2c1f', pants: '#d6b77c', shoes: '#4a2f1e', patch: '#5e3a22' },
+  { name: 'Лесник', shirt: '#efe7d2', vest: '#56653a', pants: '#7d7a4e', shoes: '#3e2a1b', patch: '#4b4a2c' },
+  { name: 'Рыбак', shirt: '#d7e6f0', vest: '#2f3d58', pants: '#8b8a84', shoes: '#33261d', patch: '#5d5c58' },
+  { name: 'Ковбой', shirt: '#f3e8b8', vest: '#5a3822', pants: '#7c5838', shoes: '#3b2416', patch: '#4e331e' },
+  { name: 'Мятный', shirt: '#e3f0e6', vest: '#2f5648', pants: '#b9b08a', shoes: '#3e2c1e', patch: '#7d7558' },
+  { name: 'Клубничный', shirt: '#f6f0ee', vest: '#7b2230', pants: '#8f8576', shoes: '#3a2620', patch: '#5f564b' },
+  { name: 'Угольный', shirt: '#f2f2f0', vest: '#26262b', pants: '#6c6c6a', shoes: '#262222', patch: '#454543' },
+  { name: 'Закат', shirt: '#f5ecd6', vest: '#b5842c', pants: '#6e4b2e', shoes: '#3b2a1c', patch: '#4a3220' },
 ];
-export const HATS = ['Без шляпы', 'Сафари', 'Ковбойская', 'Каска', 'Кепка', 'Шапка', 'Колпак'];
+export const HATS = ['Без шляпы', 'Сафари', 'Ковбойская', 'Каска', 'Кепка', 'Шапка'];
 export const GLASSES = ['Без очков', 'Чёрные круглые', 'Квадратные', 'Авиаторы'];
-export const HAIR_STYLES = ['Короткая', 'Зачёс', 'Кудри', 'Лысина', 'Хвостик', 'Ёжик'];
-export const FACIAL = ['Без бороды', 'Усы', 'Борода', 'Щетина'];
+export const HAIR_STYLES = ['Короткая', 'Зачёс', 'Ёжик', 'Лысина'];
+export const FACIAL = ['Без усов', 'Усики', 'Щетина'];
 
 // цвет рукава для рук от первого лица
 export function sleeveColor(look) {
-  const o = OUTFITS[look.outfit] || OUTFITS[0];
-  return o.style === 'vest' ? o.shirt : o.vest;
+  return (OUTFITS[look.outfit] || OUTFITS[0]).shirt;
 }
 
 // ---------- вспомогательное ----------
@@ -47,16 +46,16 @@ function hash3(x, y, z) {
 
 // Тело: профиль торса по высоте (y, полуширина, глубина спереди, глубина сзади).
 const TORSO = [
-  [0.252, 0.0, 0.0, 0.0],
-  [0.262, 0.13, 0.12, 0.115],
-  [0.29, 0.225, 0.21, 0.2],
-  [0.34, 0.285, 0.27, 0.24],
-  [0.41, 0.312, 0.302, 0.255],
-  [0.48, 0.32, 0.314, 0.26],
-  [0.56, 0.313, 0.3, 0.256],
-  [0.64, 0.296, 0.265, 0.245],
-  [0.71, 0.268, 0.228, 0.226],
-  [0.765, 0.215, 0.185, 0.19],
+  [0.22, 0.0, 0.0, 0.0],
+  [0.232, 0.14, 0.13, 0.12],
+  [0.262, 0.24, 0.24, 0.21],
+  [0.315, 0.3, 0.318, 0.245],
+  [0.39, 0.326, 0.34, 0.26],
+  [0.48, 0.326, 0.33, 0.262],
+  [0.56, 0.31, 0.298, 0.255],
+  [0.64, 0.283, 0.255, 0.24],
+  [0.71, 0.245, 0.212, 0.218],
+  [0.765, 0.198, 0.174, 0.184],
   [0.805, 0.15, 0.135, 0.14],
   [0.835, 0.085, 0.08, 0.08],
   [0.848, 0.0, 0.0, 0.0],
@@ -122,10 +121,9 @@ export function buildCharacter(look, { lod = false } = {}) {
   const o = OUTFITS[look.outfit] || OUTFITS[0];
   const skin = C(SKINS[look.skin] || SKINS[0]);
   const hair = C(HAIRS[look.hair] || HAIRS[0]);
-  const shirt = C(o.shirt), outer = C(o.vest), trim = C(o.trim), pants = C(o.pants), shoes = C(o.shoes);
-  const style = o.style;
+  const shirt = C(o.shirt), outer = C(o.vest), trim = tint(o.vest, 0.78), pants = C(o.pants), shoes = C(o.shoes);
   const S = new Sculpt(2, lod);
-  const ctx = { look, o, skin, hair, shirt, outer, trim, pants, shoes, style, S, top: 1.32 };
+  const ctx = { look, o, skin, hair, shirt, outer, trim, pants, shoes, S, top: 1.3 };
 
   S.slot = 0;
   buildTorso(ctx);
@@ -141,89 +139,69 @@ export function buildCharacter(look, { lod = false } = {}) {
 
 // ---------- торс и одежда ----------
 
+const WAIST = 0.345; // брюки начинаются под животом
+
 function buildTorso(ctx) {
-  const { S, shirt, outer, pants, trim, style } = ctx;
-  const hoodie = style === 'hoodie';
-  const waist = hoodie ? 0.37 : 0.405;
-  const top = hoodie ? outer : shirt;
-  const ao = (y, out) => out.multiplyScalar(0.82 + 0.18 * sstep(0.26, 0.34, y));
-
-  // тело
+  const { S, shirt, pants } = ctx;
   S.grid((u, v, out) => torsoPt(u * TAU, v, 0, out), 40, 26, { poles: true }, (x, y, z, out) => {
-    out.copy(pants).lerp(top, sstep(waist - 0.01, waist + 0.01, y));
-    ao(y, out);
-    // складки у подмышек и под грудью — лёгкая тень
-    out.multiplyScalar(1 - 0.06 * Math.exp(-(((y - 0.7) / 0.05) ** 2)) * sstep(0.18, 0.27, Math.abs(x)));
+    out.copy(pants).lerp(shirt, sstep(WAIST - 0.01, WAIST + 0.01, y));
+    out.multiplyScalar(0.8 + 0.2 * sstep(0.26, 0.34, y));
+    // мягкие складки: под грудью, у подмышек, над поясом (живот нависает)
+    const a = Math.atan2(x, -z);
+    out.multiplyScalar(1 - 0.07 * Math.exp(-(((y - 0.69) / 0.05) ** 2)) * sstep(0.17, 0.26, Math.abs(x)));
+    out.multiplyScalar(1 - 0.1 * Math.exp(-(((y - WAIST - 0.03) / 0.03) ** 2)) * Math.max(0, Math.cos(a)));
+    out.multiplyScalar(1 - 0.04 * Math.max(0, Math.sin(a * 7 + y * 40)) * sstep(0.45, 0.6, y) * Math.max(0, Math.cos(a)));
   }, torsoWeights);
-
   // шея (видна, только если голова сильно наклонена)
   S.tube([V(0, 0.76, 0.01), V(0, 0.84, 0.01), V(0, 0.92, 0.0)], [0.1, 0.098, 0.095], { radial: 10 }, tint(ctx.skin, 0.9),
     (x, y) => [B.chest, 1 - sstep(0.78, 0.86, y), B.neck, sstep(0.78, 0.86, y) * (1 - sstep(0.86, 0.9, y)), B.head, sstep(0.86, 0.9, y)]);
-
-  if (!hoodie) {
-    // планка рубашки и пуговицы
-    const placket = [];
-    for (let y = 0.43; y <= 0.79; y += 0.03) placket.push(torsoAt(0, y, 0.003));
-    S.tube(placket, 0.0065, { radial: 6, ref: V(0, 0, 1) }, tint(shirt, 0.93), torsoWeights);
-    for (const y of [0.48, 0.56, 0.64, 0.72]) {
-      S.disc(torsoAt(0, y, 0.008), torsoNormal(0, y), 0.0115, 0.006, tint(shirt, 0.8), torsoWeights, 10);
-    }
-    buildBelt(ctx);
-    buildOuter(ctx);
-    buildCollar(ctx);
-  } else {
-    buildHoodie(ctx);
-  }
-
-  // шов ширинки
-  const fly = [];
-  for (let y = 0.395; y >= 0.29; y -= 0.02) fly.push(torsoAt(0, y, 0.002));
-  if (!hoodie) S.tube(fly, 0.0035, { radial: 5 }, tint(pants, 0.72), torsoWeights);
-  void trim;
+  // планка рубашки и пара пуговиц (верх расстёгнут)
+  const placket = [];
+  for (let y = WAIST + 0.04; y <= 0.72; y += 0.03) placket.push(torsoAt(0, y, 0.003));
+  S.tube(placket, 0.0062, { radial: 5, ref: V(0, 0, 1) }, tint(shirt, 0.92), torsoWeights);
+  for (const y of [0.46, 0.55, 0.64]) S.disc(torsoAt(0, y, 0.008), torsoNormal(0, y), 0.0105, 0.005, tint(shirt, 0.84), torsoWeights, 10);
+  buildBelt(ctx);
+  buildVest(ctx);
+  buildCollar(ctx);
 }
 
 function buildBelt(ctx) {
   const { S, pants } = ctx;
-  const leather = C('#4a2e1c');
-  const y0 = 0.386, y1 = 0.424;
-  S.grid((u, v, out) => torsoAt(u * TAU, y0 + (y1 - y0) * v, 0.009, out), 48, 2, { wrap: true }, leather, torsoWeights);
+  const leather = C('#3e2818');
+  const y0 = WAIST - 0.018, y1 = WAIST + 0.016;
+  S.grid((u, v, out) => torsoAt(u * TAU, y0 + (y1 - y0) * v, 0.008, out), 44, 2, { wrap: true }, leather, torsoWeights);
   for (const y of [y0, y1]) {
     const ring = [];
-    for (let i = 0; i < 48; i++) ring.push(torsoAt((i / 48) * TAU, y, 0.009));
-    S.tube(ring, 0.004, { radial: 3, closed: true, ref: V(0, 1, 0) }, tint(leather, 0.75), torsoWeights);
+    for (let i = 0; i < 44; i++) ring.push(torsoAt((i / 44) * TAU, y, 0.008));
+    S.tube(ring, 0.0035, { radial: 3, closed: true, ref: V(0, 1, 0) }, tint(leather, 0.75), torsoWeights);
   }
-  // шлёвки
-  for (const a of [-0.75, 0.75, 2.3, -2.3]) {
-    S.tube([torsoAt(a, 0.43, 0.012), torsoAt(a, 0.38, 0.012)], 0.008, { radial: 6, squash: [0.45, 1] }, tint(pants, 0.92), torsoWeights);
+  for (const a of [-0.8, 0.8, 2.3, -2.3]) {
+    S.tube([torsoAt(a, y1 + 0.006, 0.011), torsoAt(a, y0 - 0.006, 0.011)], 0.007, { radial: 5, squash: [0.45, 1] }, tint(pants, 0.9), torsoWeights);
   }
-  // пряжка (глянцевая)
+  // небольшая потёртая пряжка
   S.slot = 1;
-  const c = torsoAt(0, 0.405, 0.017);
-  const n = torsoNormal(0, 0.405);
+  const c = torsoAt(0, WAIST, 0.015);
+  const n = torsoNormal(0, WAIST);
   const right = V(1, 0, 0), up = V().crossVectors(n, right).normalize().negate();
   const rect = [];
-  const hw = 0.03, hh = 0.022, rr = 0.008;
+  const hw = 0.022, hh = 0.017, rr = 0.006;
   for (let i = 0; i < 24; i++) {
     const q = Math.floor(i / 6), f = (i % 6) / 6;
     const ang = q * Math.PI / 2 + f * Math.PI / 2;
     const cx = (q === 0 || q === 3 ? 1 : -1) * (hw - rr), cy = (q < 2 ? 1 : -1) * (hh - rr);
     rect.push(c.clone().addScaledVector(right, cx + Math.cos(ang) * rr).addScaledVector(up, cy + Math.sin(ang) * rr));
   }
-  S.tube(rect, 0.0055, { radial: 6, closed: true }, C('#d6ad52'), torsoWeights);
-  S.tube([c.clone().addScaledVector(right, -0.022), c.clone().addScaledVector(right, 0.006)], 0.0035, { radial: 5 }, C('#c49a40'), torsoWeights);
+  S.tube(rect, 0.0045, { radial: 5, closed: true }, C('#a8894e'), torsoWeights);
   S.slot = 0;
-  // кончик ремня
-  S.tube([torsoAt(-0.12, 0.405, 0.013), torsoAt(-0.3, 0.405, 0.012)], 0.016, { radial: 6, squash: [0.35, 1] }, tint(leather, 0.85), torsoWeights);
 }
 
-// Жилет или куртка: оболочка с V-вырезом, окантовка, карманы, пуговицы.
-function buildOuter(ctx) {
-  const { S, outer, trim, o, style } = ctx;
-  const jacket = style === 'jacket';
-  const off = jacket ? 0.017 : 0.014;
+// Жилет нараспашку: по центру видна рубашка на животе; мягкая окантовка, неброские карманы, шов на спине.
+function buildVest(ctx) {
+  const { S, outer, trim } = ctx;
+  const off = 0.014;
   const yTop = 0.8;
-  const hem = (a) => (jacket ? 0.355 : 0.432) - 0.035 * Math.max(0, Math.cos(a)) ** 2;
-  const a0 = (v) => (jacket ? 0.3 : 0.36) + 0.06 * v + (jacket ? 0.62 : 0.45) * sstep(0.55, 1, v);
+  const hem = (a) => 0.425 - 0.03 * Math.max(0, Math.cos(a)) ** 2;
+  const a0 = (v) => 0.5 + 0.04 * v + 0.42 * sstep(0.5, 1, v);
   const vestPt = (u, v, offs, out) => {
     const aa = a0(v);
     const a = aa + (TAU - 2 * aa) * u;
@@ -231,101 +209,50 @@ function buildOuter(ctx) {
     return torsoAt(a, y, offs, out);
   };
   const col = (x, y, z, out) => {
-    out.copy(outer).multiplyScalar(0.86 + 0.14 * sstep(0.4, 0.62, y));
-    out.multiplyScalar(0.97 + 0.06 * hash3(Math.round(x * 90), Math.round(y * 90), Math.round(z * 90)));
+    out.copy(outer).multiplyScalar(0.84 + 0.16 * sstep(0.42, 0.62, y));
+    // складки ткани у проймы и на боках
+    const a = Math.atan2(x, -z);
+    out.multiplyScalar(1 - 0.08 * Math.max(0, Math.sin(a * 5 + y * 18)) * sstep(0.62, 0.45, y));
+    out.multiplyScalar(0.98 + 0.04 * hash3(Math.round(x * 90), Math.round(y * 90), Math.round(z * 90)));
   };
   S.grid((u, v, out) => vestPt(u, v, off, out), 40, 14, { wrap: false }, col, torsoWeights);
-
-  // окантовка по всему краю
+  // окантовка по краю — того же цвета, чуть темнее: мягкий бортик ткани
   const edge = [];
   const nU = 32, nV = 12;
   for (let j = nV; j >= 0; j--) edge.push(vestPt(0, j / nV, off * 0.6, V()));
   for (let i = 1; i <= nU; i++) edge.push(vestPt(i / nU, 0, off * 0.6, V()));
   for (let j = 1; j <= nV; j++) edge.push(vestPt(1, j / nV, off * 0.6, V()));
   for (let i = nU - 1; i >= 1; i--) edge.push(vestPt(i / nU, 1, off * 0.6, V()));
-  S.tube(edge, jacket ? 0.011 : 0.0095, { radial: 4, closed: true }, trim, torsoWeights);
-
-  // лацканы куртки
-  if (jacket) {
-    for (const s of [-1, 1]) {
-      const A = [s * 0.38, 0.79], Bp = [s * 0.36, 0.6], Cp = [s * 0.82, 0.745];
-      S.grid((u, v, out) => {
-        const a = A[0] + (Bp[0] - A[0]) * v + (Cp[0] - A[0]) * u * (1 - v);
-        const y = A[1] + (Bp[1] - A[1]) * v + (Cp[1] - A[1]) * u * (1 - v);
-        return torsoAt(a, y, off + 0.006 + 0.004 * Math.sin(Math.PI * u) * Math.sin(Math.PI * v), out);
-      }, 6, 8, { wrap: false, flip: s > 0 }, tint(outer, 1.08), torsoWeights);
-      const rim = [];
-      for (let k = 0; k <= 8; k++) rim.push(torsoAt(A[0] + (Bp[0] - A[0]) * (k / 8), A[1] + (Bp[1] - A[1]) * (k / 8), off + 0.006));
-      for (let k = 1; k <= 8; k++) rim.push(torsoAt(Bp[0] + (Cp[0] - Bp[0]) * (k / 8), Bp[1] + (Cp[1] - Bp[1]) * (k / 8), off + 0.006));
-      S.tube(rim, 0.006, { radial: 5 }, tint(outer, 0.85), torsoWeights);
-    }
+  S.tube(edge, 0.0095, { radial: 4, closed: true }, tint(outer, 0.9), torsoWeights);
+  // карманы: просто прорезь с клапаном, без ярких деталей
+  for (const s of [-1, 1]) {
+    const a = s * 0.98, y = 0.5;
+    torsoPatch(S, a, y + 0.025, 0.085, 0.022, off - 0.002, off + 0.008, 6, 2, trim, 0.3);
   }
-
-  // карманы с клапанами и пуговками
-  const pockets = [];
-  if (o.pockets >= 2) pockets.push([-0.7, 0.505, 0.09, 0.072], [0.7, 0.505, 0.09, 0.072]);
-  if (o.pockets >= 4) pockets.push([-0.66, 0.635, 0.072, 0.058], [0.66, 0.635, 0.072, 0.058]);
-  if (o.pockets === 2 && !jacket) pockets.push([-0.64, 0.645, 0.064, 0.05]);
-  for (const [a, y, w, h] of pockets) {
-    torsoPatch(S, a, y, w, h, off - 0.002, off + 0.009, 7, 6, tint(outer, 0.95), 0.25);
-    torsoPatch(S, a, y + h * 0.42, w * 1.08, h * 0.32, off + 0.002, off + 0.014, 7, 3, tint(outer, 0.8), 0.3);
-    S.disc(torsoAt(a, y + h * 0.36, off + 0.016), torsoNormal(a, y + h * 0.36), 0.008, 0.006, tint(trim, 1.2), torsoWeights, 8);
-  }
-  // ручка в нагрудном кармане
-  if (o.pockets === 2 && !jacket) {
-    S.slot = 1;
-    const p = torsoAt(-0.6, 0.66, off + 0.012);
-    S.tube([p, p.clone().add(V(0, 0.045, 0.004))], 0.0055, { radial: 6 }, C('#2f5fb3'), torsoWeights);
-    S.slot = 0;
-  }
-  // спинка: шов по центру и хлястик с пряжкой
+  // спинка: шов по центру
   const seam = [];
   for (let y = hem(Math.PI) + 0.01; y <= yTop - 0.03; y += 0.03) seam.push(torsoAt(Math.PI, y, off + 0.002));
   S.tube(seam, 0.003, { radial: 4 }, tint(outer, 0.72), torsoWeights);
-  if (!jacket) {
-    const strap = [];
-    for (let k = 0; k <= 8; k++) strap.push(torsoAt(Math.PI - 0.42 + 0.84 * (k / 8), 0.49, off + 0.006));
-    S.tube(strap, 0.012, { radial: 6, squash: [0.35, 1] }, tint(outer, 0.88), torsoWeights);
-    S.slot = 1;
-    const bc = torsoAt(Math.PI + 0.1, 0.49, off + 0.012), bn = torsoNormal(Math.PI + 0.1, 0.49);
-    const br = [];
-    for (let i = 0; i < 12; i++) {
-      const f = (i / 12) * TAU;
-      br.push(bc.clone().add(V(Math.cos(f) * 0.014, Math.sin(f) * 0.011, 0)));
-    }
-    S.tube(br, 0.0032, { radial: 4, closed: true }, C('#c9a24c'), torsoWeights);
-    S.slot = 0;
-    void bn;
-  }
-  // декоративные пуговицы на левой полочке
-  if (!jacket) {
-    for (const v of [0.18, 0.42, 0.66]) {
-      const p = vestPt(0, v, off + 0.006, V());
-      const a = Math.atan2(p.x, -p.z) - 0.06;
-      S.disc(torsoAt(a, p.y, off + 0.006), torsoNormal(a, p.y), 0.0105, 0.007, tint(trim, 1.25), torsoWeights, 10);
-    }
-  }
 }
 
-// Воротник рубашки: стойка и два уголка на груди.
+// Воротник рубашки расстёгнут: уголки разведены в стороны, спереди виден треугольник рубашки.
 function buildCollar(ctx) {
-  const { S, shirt, style } = ctx;
-  const jacket = style === 'jacket';
+  const { S, shirt } = ctx;
   const band = [];
-  for (let i = 0; i <= 26; i++) {
-    const a = 0.28 + (TAU - 0.56) * (i / 26);
+  for (let i = 0; i <= 22; i++) {
+    const a = 0.55 + (TAU - 1.1) * (i / 22);
     band.push(torsoAt(a, 0.8, 0.02));
   }
-  S.tube(band, 0.024, { radial: 7, squash: [0.55, 1.15] }, tint(shirt, 0.97), torsoWeights);
+  S.tube(band, 0.022, { radial: 6, squash: [0.55, 1.15] }, tint(shirt, 0.97), torsoWeights);
   for (const s of [-1, 1]) {
-    // треугольник: у шеи сзади, у шеи спереди, кончик на груди
-    const A = [s * 0.3, 0.808], Bp = [s * 0.95, 0.79], T = [s * 0.2, 0.71];
+    // треугольник: у шеи сзади, у шеи спереди, кончик лежит на груди в стороне
+    const A = [s * 0.5, 0.806], Bp = [s * 1.15, 0.785], T = [s * 0.55, 0.71];
     const pt = (u, v, off, out) => {
       const a = (A[0] + (Bp[0] - A[0]) * u) * (1 - v) + T[0] * v;
       const y = (A[1] + (Bp[1] - A[1]) * u) * (1 - v) + T[1] * v;
       return torsoAt(a, y, off, out);
     };
-    const base = jacket ? 0.036 : 0.026;
+    const base = 0.026;
     S.grid((u, v, out) => pt(u, v, base + 0.006 * Math.sin(Math.PI * u) * (1 - v), out), 6, 7, { wrap: false, flip: s > 0 }, shirt, torsoWeights);
     const rim = [];
     for (let k = 0; k <= 6; k++) rim.push(pt(k / 6, 0, base, V()));
@@ -335,48 +262,12 @@ function buildCollar(ctx) {
   }
 }
 
-function buildHoodie(ctx) {
-  const { S, outer, trim, shirt } = ctx;
-  // резинка по низу
-  const hem = [];
-  for (let i = 0; i < 48; i++) hem.push(torsoAt((i / 48) * TAU, 0.375, 0.006));
-  S.tube(hem, 0.019, { radial: 7, closed: true, ref: V(0, 1, 0), squash: [0.6, 1.2] }, tint(outer, 0.86), torsoWeights);
-  // карман-кенгуру
-  torsoPatch(S, 0, 0.475, 0.25, 0.12, -0.002, 0.013, 12, 6, tint(outer, 0.95), 0.18);
-  const rim = [];
-  for (let k = 0; k <= 10; k++) rim.push(torsoAt(-0.45 + 0.9 * (k / 10), 0.535, 0.011));
-  S.tube(rim, 0.0045, { radial: 5 }, trim, torsoWeights);
-  for (const s of [-1, 1]) {
-    const side = [];
-    for (let k = 0; k <= 6; k++) side.push(torsoAt(s * (0.45 + 0.08 * (k / 6)), 0.535 - 0.11 * (k / 6), 0.012));
-    S.tube(side, 0.0045, { radial: 5 }, trim, torsoWeights);
-  }
-  // капюшон, лежащий на спине
-  const hood = [];
-  for (let i = 0; i <= 18; i++) {
-    const a = 0.55 + (TAU - 1.1) * (i / 18);
-    const back = Math.max(0, -Math.cos(a));
-    hood.push(torsoAt(a, 0.79 - 0.05 * back, 0.035 + 0.035 * back));
-  }
-  S.tube(hood, hood.map((_, i) => 0.03 + 0.035 * Math.sin(Math.PI * (i / 18))), { radial: 10 }, tint(outer, 0.97), torsoWeights);
-  // горловина и шнурки
-  const neck = [];
-  for (let i = 0; i < 30; i++) neck.push(torsoAt((i / 30) * TAU, 0.805, 0.012));
-  S.tube(neck, 0.016, { radial: 6, closed: true, ref: V(0, 1, 0) }, tint(outer, 0.88), torsoWeights);
-  for (const s of [-1, 1]) {
-    const pts = [torsoAt(s * 0.16, 0.79, 0.016), torsoAt(s * 0.17, 0.72, 0.014), torsoAt(s * 0.15, 0.64, 0.016)];
-    S.tube(pts, 0.0055, { radial: 5 }, C(ctx.o.shirt), torsoWeights);
-    S.tube([pts[2], torsoAt(s * 0.15, 0.62, 0.017)], 0.0075, { radial: 6 }, tint(trim, 0.9), torsoWeights);
-  }
-  void shirt;
-}
-
 // ---------- руки ----------
 
 function buildArms(ctx) {
-  const { S, shirt, outer, skin, style } = ctx;
-  const sleeve = style === 'vest' ? shirt : outer;
-  const cuffC = style === 'hoodie' ? tint(outer, 0.85) : tint(sleeve, style === 'vest' ? 0.94 : 1.08);
+  const { S, shirt, skin } = ctx;
+  const sleeve = shirt;
+  const cuffC = tint(shirt, 0.95);
   for (const [s, n] of [[-1, 'L'], [1, 'R']]) {
     const Sh = V(s * SHOULDER.x, SHOULDER.y, SHOULDER.z), a = armDir(s), n0 = palmDir(s), zz = V(0, 0, 1);
     const E = Sh.clone().addScaledVector(a, UPPER), W = E.clone().addScaledVector(a, FORE);
@@ -392,10 +283,10 @@ function buildArms(ctx) {
       out.copy(sleeve).multiplyScalar(0.9 + 0.1 * sstep(0.02, 0.1, alongA(x, y, z)));
     };
     // плечо
-    S.ellipsoid(Sh.clone().add(V(-s * 0.012, 0.004, 0)), [0.081, 0.08, 0.079], 14, 10, sleeveCol, armW);
+    S.ellipsoid(Sh.clone().add(V(-s * 0.014, 0.006, 0)), [0.088, 0.086, 0.085], 14, 10, sleeveCol, armW);
     // рукав
     const sl = [-0.02, 0.04, 0.09, UPPER, UPPER + 0.024].map((d) => Sh.clone().addScaledVector(a, d));
-    S.tube(sl, [0.079, 0.077, 0.072, 0.066, 0.065], { radial: 14, caps: [true, false] }, sleeveCol, armW);
+    S.tube(sl, [0.086, 0.085, 0.08, 0.074, 0.072], { radial: 14, caps: [true, false] }, sleeveCol, armW);
     // закатанная манжета (два валика)
     const ringAt = (d, R, tr, col, sq) => {
       const c = Sh.clone().addScaledVector(a, d);
@@ -407,11 +298,11 @@ function buildArms(ctx) {
       }
       S.tube(pts, tr, { radial: 5, closed: true, ref: a, squash: sq }, col, armW);
     };
-    ringAt(UPPER + 0.012, 0.067, 0.013, tint(cuffC, 0.96), [1, 0.9]);
-    ringAt(UPPER + 0.034, 0.064, 0.017, cuffC, [1, 0.85]);
+    ringAt(UPPER + 0.012, 0.074, 0.014, tint(cuffC, 0.96), [1, 0.9]);
+    ringAt(UPPER + 0.034, 0.071, 0.018, cuffC, [1, 0.85]);
     // предплечье
     const fa = [E.clone().addScaledVector(a, 0.01), E.clone().addScaledVector(a, 0.07), W.clone().addScaledVector(a, 0.005)];
-    S.tube(fa, [0.05, 0.048, 0.044], { radial: 12, caps: [false, false] }, skin, (x, y, z) => {
+    S.tube(fa, [0.058, 0.055, 0.05], { radial: 12, caps: [false, false] }, skin, (x, y, z) => {
       const d = alongA(x, y, z) - UPPER - FORE;
       const t = sstep(-0.02, 0.012, d);
       return [bFore, 1 - t, bHand, t];
@@ -477,77 +368,66 @@ function buildHand(ctx, s, n, W, a, n0, zz) {
 // ---------- ноги и ботинки ----------
 
 function buildLegs(ctx) {
-  const { S, pants, shoes } = ctx;
-  const sole = C('#2c2119');
-  const lace = C('#efe3c6');
+  const { S, pants, shoes, o } = ctx;
+  const sole = tint(shoes, 0.6);
+  const patch = C(o.patch);
   for (const [s, n] of [[-1, 'L'], [1, 'R']]) {
     const x = s * HIP_X;
     const bT = B[`thigh${n}`], bS = B[`shin${n}`], bF = B[`foot${n}`];
+    const KN = HIP_Y - THIGH;
     const legW = (px, y) => {
-      const k = sstep(0.27, 0.205, y), p = sstep(0.36, 0.43, y) * 0.5;
+      const k = sstep(KN + 0.03, KN - 0.03, y), p = sstep(HIP_Y - 0.04, HIP_Y + 0.03, y) * 0.5;
       return [B.pelvis, p, bT, (1 - k) * (1 - p), bS, k];
     };
     const legCol = (px, y, z, out) => {
-      out.copy(pants).multiplyScalar(0.8 + 0.2 * sstep(0.3, 0.2, y));
-      // складки под коленом
-      out.multiplyScalar(1 - 0.07 * Math.exp(-(((y - 0.225) / 0.012) ** 2)) * sstep(-0.02, 0.06, z));
+      out.copy(pants).multiplyScalar(0.82 + 0.18 * sstep(0.28, 0.2, y));
+      out.multiplyScalar(1 - 0.08 * Math.exp(-(((y - KN + 0.01) / 0.012) ** 2)) * sstep(-0.02, 0.06, z)); // складка под коленом
+      out.multiplyScalar(1 - 0.06 * Math.exp(-(((y - 0.28) / 0.02) ** 2)) * sstep(0.03, -0.06, z));      // складка на бедре
     };
-    const pts = [V(x, 0.43, 0.01), V(x * 1.01, 0.33, 0.004), V(x * 1.02, 0.24, -0.004), V(x * 1.04, 0.17, 0), V(x * 1.05, 0.13, 0.002)];
-    const radii = [0.092, 0.088, 0.079, 0.075, 0.074];
-    S.tube(pts, radii, { radial: 14, caps: [true, false] }, legCol, legW);
-    // отворот
-    for (const [y, R, tr, k] of [[0.155, 0.074, 0.013, 0.97], [0.132, 0.077, 0.016, 1.08]]) {
-      const ring = [];
-      for (let i = 0; i < 14; i++) {
-        const f = (i / 14) * TAU;
-        ring.push(V(x * 1.05 + Math.sin(f) * R, y, Math.cos(f) * R));
-      }
-      S.tube(ring, tr, { radial: 5, closed: true, ref: V(0, 1, 0), squash: [0.75, 1.1] }, tint(pants, k), (px, py) => legW(px, py));
+    const pts = [V(x, 0.4, 0.01), V(x * 1.01, 0.31, 0.004), V(x * 1.02, KN, -0.004), V(x * 1.04, 0.165, 0), V(x * 1.05, 0.12, 0.002)];
+    S.tube(pts, [0.1, 0.097, 0.087, 0.082, 0.08], { radial: 14, caps: [true, false] }, legCol, legW);
+    // небольшой отворот
+    const ring = [];
+    for (let i = 0; i < 14; i++) {
+      const f = (i / 14) * TAU;
+      ring.push(V(x * 1.05 + Math.sin(f) * 0.08, 0.125, Math.cos(f) * 0.08));
     }
+    S.tube(ring, 0.012, { radial: 5, closed: true, ref: V(0, 1, 0), squash: [0.7, 1.1] }, tint(pants, 0.94), legW);
+    // заплатка на колене (как в референсе)
+    const kc = V(x * 1.02, KN + 0.004, -0.074);
+    S.ellipsoid(kc, [0.05, 0.058, 0.03], 12, 8, (px, py, pz, out) => out.copy(patch).multiplyScalar(0.92 + 0.08 * sstep(kc.y - 0.05, kc.y + 0.05, py)), legW, { rot: [-0.12, 0, 0] });
     // боковой шов
     const seam = [];
-    for (let y = 0.36; y >= 0.16; y -= 0.025) {
-      const r = y > 0.24 ? 0.079 + (0.088 - 0.079) * ((y - 0.24) / 0.09) : 0.075 + 0.004 * ((y - 0.17) / 0.07);
-      seam.push(V(x * 1.02 + s * (Math.min(0.093, r) + 0.0005), y, 0));
+    for (let y = 0.33; y >= 0.15; y -= 0.025) {
+      const r = y > KN ? 0.087 + (0.097 - 0.087) * ((y - KN) / 0.09) : 0.082 + 0.005 * ((y - 0.165) / 0.06);
+      seam.push(V(x * 1.02 + s * (Math.min(0.1, r) + 0.0005), y, 0));
     }
-    S.tube(seam, 0.0026, { radial: 4 }, tint(pants, 0.7), legW);
+    S.tube(seam, 0.0026, { radial: 4 }, tint(pants, 0.72), legW);
 
-    // ботинок: голенище, носок с подъёмом, подошва
-    const fx = s * 0.116;
+    // ботинок: небольшой, округлый, тёмно-коричневый
+    const fx = s * 0.114;
     const shoeCol = (px, py, pz, out) => {
-      out.copy(shoes).multiplyScalar(0.88 + 0.12 * sstep(0.02, 0.09, py));
-      if (pz < -0.1) out.multiplyScalar(1.1); // носок посветлее (затёртый)
+      out.copy(shoes).multiplyScalar(0.85 + 0.2 * sstep(0.02, 0.09, py));
+      if (pz < -0.09) out.multiplyScalar(1.08);
     };
-    S.ellipsoid(V(fx, 0.052, -0.046), [0.069, 0.056, 0.118], 18, 12, shoeCol, bF, {
+    S.ellipsoid(V(fx, 0.05, -0.04), [0.064, 0.052, 0.104], 18, 12, shoeCol, bF, {
       deform: (d, out) => {
         const toe = sstep(-0.2, -0.9, d.z);
-        out.x *= 1 + 0.08 * toe - 0.12 * sstep(0.3, 0.9, d.z);
-        out.y *= 1 + 0.12 * toe;
+        out.x *= 1 + 0.06 * toe - 0.1 * sstep(0.3, 0.9, d.z);
+        out.y *= 1 + 0.1 * toe;
         if (out.y < -0.03) out.y = -0.03 + (out.y + 0.03) * 0.25;
       },
     });
-    S.tube([V(fx, 0.04, 0.008), V(fx, 0.1, 0.006), V(fx, 0.142, 0.004)], [0.062, 0.061, 0.06], { radial: 14, caps: [false, true] }, shoeCol,
-      (px, py) => [bF, 1 - sstep(0.115, 0.15, py), bS, sstep(0.115, 0.15, py)]);
-    // язычок
-    S.ellipsoid(V(fx, 0.122, -0.052), [0.03, 0.03, 0.012], 8, 6, tint(shoes, 1.12), bF, { rot: [-0.35, 0, 0] });
-    // подошва и рант
-    S.ellipsoid(V(fx, 0.014, -0.047), [0.077, 0.019, 0.13], 18, 6, (px, py, pz, out) => out.copy(sole).multiplyScalar(py > 0.02 ? 1.5 : 1), bF, {
-      deform: (d, out) => { out.y = Math.max(out.y, -0.014); out.x *= 1 + 0.06 * sstep(-0.2, -0.9, d.z); },
+    S.tube([V(fx, 0.04, 0.006), V(fx, 0.09, 0.005), V(fx, 0.13, 0.004)], [0.06, 0.06, 0.059], { radial: 14, caps: [false, true] }, shoeCol,
+      (px, py) => [bF, 1 - sstep(0.105, 0.14, py), bS, sstep(0.105, 0.14, py)]);
+    S.ellipsoid(V(fx, 0.013, -0.04), [0.07, 0.017, 0.114], 18, 6, sole, bF, {
+      deform: (d, out) => { out.y = Math.max(out.y, -0.013); out.x *= 1 + 0.05 * sstep(-0.2, -0.9, d.z); },
     });
-    // шнуровка: три крестика и бантик
-    for (let k = 0; k < 3; k++) {
-      const y = 0.083 + k * 0.016, z = -0.072 + k * 0.012;
-      S.tube([V(fx - 0.022, y, z + 0.004), V(fx + 0.022, y + 0.012, z + 0.006)], 0.0042, { radial: 4, capSegs: 1 }, lace, bF);
-      S.tube([V(fx + 0.022, y, z + 0.004), V(fx - 0.022, y + 0.012, z + 0.006)], 0.0042, { radial: 4, capSegs: 1 }, lace, bF);
-    }
-    for (const t of [-1, 1]) {
-      const c = V(fx + t * 0.016, 0.138, -0.045);
-      const loop = [];
-      for (let i = 0; i < 8; i++) {
-        const f = (i / 8) * TAU;
-        loop.push(c.clone().add(V(Math.cos(f) * 0.014, Math.sin(f) * 0.008, -0.004 * Math.sin(f))));
-      }
-      S.tube(loop, 0.0038, { radial: 4, closed: true }, lace, bF);
+    // шнуровка: тонкая, в тон ботинку
+    for (let k = 0; k < 2; k++) {
+      const y = 0.088 + k * 0.016, z = -0.066 + k * 0.012;
+      S.tube([V(fx - 0.018, y, z + 0.004), V(fx + 0.018, y + 0.01, z + 0.006)], 0.0035, { radial: 4, capSegs: 1 }, tint(shoes, 1.45), bF);
+      S.tube([V(fx + 0.018, y, z + 0.004), V(fx - 0.018, y + 0.01, z + 0.006)], 0.0035, { radial: 4, capSegs: 1 }, tint(shoes, 1.45), bF);
     }
   }
 }
@@ -557,8 +437,8 @@ function buildLegs(ctx) {
 function buildHead(ctx) {
   const { S, skin, hair, look } = ctx;
   const facial = look.facial || 0;
-  const blush = mix(skin, '#ff7b7b', 0.22);
-  const stubble = mix(skin, tint(hair, 0.55), 0.38);
+  const warm = mix(skin, '#e8705f', 0.14);
+  const stubble = mix(skin, tint(hair, 0.6), 0.32);
   const dir = new THREE.Vector3();
   S.grid((u, v, out) => {
     sphereDir(u, v, dir);
@@ -566,205 +446,123 @@ function buildHead(ctx) {
   }, 42, 30, { poles: true }, (x, y, z, out) => {
     _d.set(x, y, z).sub(HEAD_C).normalize();
     out.copy(skin);
-    // румянец на щеках
-    const ch = Math.exp(-((_d.y + 0.2) ** 2) / 0.012) * Math.exp(-((Math.abs(_d.x) - 0.5) ** 2) / 0.018) * Math.max(0, -_d.z);
-    out.lerp(blush, Math.min(1, ch * 1.4));
-    if (facial === 3) {
-      const m = beardMask(_d);
-      out.lerp(stubble, m * (0.75 + 0.25 * hash3(Math.round(x * 300), Math.round(y * 300), Math.round(z * 300))));
+    // тёплый румянец на брылях и щеках, лёгкая краснота у носа
+    const ch = Math.exp(-((_d.y + 0.15) ** 2) / 0.05) * Math.exp(-((Math.abs(_d.x) - 0.55) ** 2) / 0.05) * Math.max(0, -_d.z);
+    out.lerp(warm, Math.min(1, ch * 1.1 + 0.25 * Math.exp(-(_d.x * _d.x + (_d.y + 0.06) ** 2) / 0.02) * Math.max(0, -_d.z)));
+    if (facial === 2) {
+      const m = stubbleMask(_d);
+      out.lerp(stubble, m * (0.7 + 0.3 * hash3(Math.round(x * 300), Math.round(y * 300), Math.round(z * 300))));
     }
-    // мягкая тень снизу и у шеи
-    out.multiplyScalar(0.84 + 0.16 * sstep(-0.9, -0.35, _d.y));
+    // мягкая тень снизу (брыли лежат на воротнике)
+    out.multiplyScalar(0.82 + 0.18 * sstep(-0.85, -0.3, _d.y));
   }, B.head);
 
-  // уши
+  // уши: маленькие, низко
   for (const s of [-1, 1]) {
-    const c = headPoint(s * FACE.earDir.x, FACE.earDir.y, FACE.earDir.z, 0.0);
-    const R = [0.028, 0.062, 0.045];
-    S.ellipsoid(c, R, 14, 12, (x, y, z, out) => {
+    const c = headPoint(s * FACE.earDir.x, FACE.earDir.y, FACE.earDir.z, -0.004);
+    const R = [0.018, 0.04, 0.03];
+    S.ellipsoid(c, R, 12, 10, (x, y, z, out) => {
       const lx = (x - c.x) * s, ly = (y - c.y) / R[1], lz = (z - c.z) / R[2];
       const cup = lx > 0 ? Math.exp(-(ly * ly + lz * lz) / 0.35) : 0;
-      out.copy(skin).multiplyScalar(1 - 0.28 * cup).lerp(blush, 0.25);
+      out.copy(skin).multiplyScalar(1 - 0.22 * cup).lerp(warm, 0.35);
     }, B.head, {
-      rot: [0.12, s * 0.28, 0],
-      deform: (d, out) => {
-        const cup = Math.max(0, d.x * s) * Math.exp(-(d.y * d.y + d.z * d.z) / 0.35);
-        out.x -= s * 0.026 * cup;
-      },
+      rot: [0.1, s * 0.3, 0],
+      deform: (d, out) => { out.x -= s * 0.014 * Math.max(0, d.x * s) * Math.exp(-(d.y * d.y + d.z * d.z) / 0.35); },
     });
   }
-
-  // нос-картошка с крыльями и ноздрями
-  const nc = headPoint(0, FACE.noseDir.y, FACE.noseDir.z, 0.028);
-  const noseC = mix(skin, '#ff8a7a', 0.16);
-  S.ellipsoid(nc, [0.06, 0.053, 0.052], 16, 12, (x, y, z, out) => {
-    out.copy(noseC).multiplyScalar(0.95 + 0.07 * sstep(nc.y - 0.04, nc.y + 0.03, y));
-  }, B.head, {
-    deform: (d, out) => { if (d.y < 0) out.x *= 1 + 0.14 * -d.y; },
+  // нос: небольшой мягкий бугорок цвета кожи
+  const nc = headPoint(0, FACE.noseDir.y, FACE.noseDir.z, -0.002);
+  S.ellipsoid(nc, [0.032, 0.027, 0.028], 12, 10, (x, y, z, out) => out.copy(skin).lerp(warm, 0.3 * sstep(nc.y + 0.02, nc.y - 0.02, y)), B.head, {
+    deform: (d, out) => { if (d.y < 0) out.x *= 1 + 0.1 * -d.y; },
   });
-  for (const s of [-1, 1]) {
-    S.ellipsoid(nc.clone().add(V(s * 0.044, -0.025, 0.015)), [0.028, 0.025, 0.026], 10, 8, noseC, B.head);
-    S.ellipsoid(nc.clone().add(V(s * 0.021, -0.044, -0.008)), [0.011, 0.0065, 0.011], 8, 5, C('#5a2a22'), B.head);
-  }
 
   buildEyes(ctx);
   buildMouth(ctx);
   buildBrows(ctx);
-  if (facial === 1 || facial === 2) buildMustache(ctx);
-  if (facial === 2) buildBeard(ctx);
+  if (facial === 1) buildMustache(ctx);
 }
 
+// Глаза: маленькие тёмные овалы с крошечным бликом. Кость века сплющивает их при моргании.
 function buildEyes(ctx) {
-  const { S, skin, look } = ctx;
-  const iris = C(EYES[(look.skin + look.hair * 2 + look.outfit) % EYES.length]);
-  const lidC = tint(skin, 0.97);
+  const { S } = ctx;
   for (const [s, n] of [[-1, 'L'], [1, 'R']]) {
     const c = eyeCenter(s);
-    const rot = [0.06, -s * 0.2, 0];
-    const q = new THREE.Quaternion().setFromEuler(new THREE.Euler(...rot));
-    const fwd = V(0, 0, -1).applyQuaternion(q);
-    const R = [0.041, 0.045, 0.03];
-    S.slot = 1;
-    S.ellipsoid(c, R, 14, 10, C('#fbf8f2'), B.head, { rot });
-    // радужка, зрачок — на кости глаза (двигаются), блик — на голове (стоит на месте)
-    const front = c.clone().addScaledVector(fwd, R[2]);
-    S.ellipsoid(front.clone().addScaledVector(fwd, -0.0035), [0.0235, 0.026, 0.006], 12, 6, (x, y, z, out) => {
-      const r = Math.hypot(x - front.x, y - front.y, (z - front.z) * 0.3) / 0.025;
-      out.copy(iris).multiplyScalar(0.6 + 0.6 * sstep(1.0, 0.45, r));
-    }, B[`eye${n}`], { rot });
-    S.ellipsoid(front.clone().addScaledVector(fwd, 0.0003), [0.0115, 0.0125, 0.004], 8, 5, C('#0d0b0c'), B[`eye${n}`], { rot });
-    const up = V(0, 1, 0).applyQuaternion(q), rt = V(1, 0, 0).applyQuaternion(q);
-    S.ellipsoid(front.clone().addScaledVector(up, 0.011).addScaledVector(rt, -0.008).addScaledVector(fwd, 0.002), [0.0062, 0.0062, 0.003], 8, 6, C('#ffffff'), B.head, { rot });
-    S.ellipsoid(front.clone().addScaledVector(up, -0.008).addScaledVector(rt, 0.008).addScaledVector(fwd, 0.0015), [0.003, 0.003, 0.002], 6, 4, C('#ffffff'), B.head, { rot });
-    S.slot = 0;
-    // верхнее веко (кость века поворачивается вниз — моргание) и ресничный край
-    const LR = [0.0445, 0.049, 0.0345];
-    const edge = 1.08; // полярный угол края века от макушки глаза
-    const lidPt = (u, v, out, extra = 0) => {
-      const th = edge * (1 - v), ph = u * TAU;
-      out.set(Math.sin(th) * Math.sin(ph) * (LR[0] + extra), Math.cos(th) * (LR[1] + extra), -Math.sin(th) * Math.cos(ph) * (LR[2] + extra));
-      return out.applyQuaternion(q).add(c);
-    };
-    S.grid((u, v, out) => lidPt(u, v, out), 16, 5, { wrap: true }, (x, y, z, out) => out.copy(lidC).multiplyScalar(y > c.y + 0.03 ? 1 : 0.94), B[`lid${n}`]);
-    // ресничный край — передняя дуга
-    const arc = [];
-    for (let i = -8; i <= 8; i++) arc.push(lidPt(((i / 30) + 1) % 1, 0, V(), 0.0012));
-    S.tube(arc, 0.0034, { radial: 5 }, C('#3a2420'), B[`lid${n}`]);
-    // нижнее веко — неподвижное
-    S.grid((u, v, out) => {
-      const th = Math.PI - 0.62 * (1 - v), ph = u * TAU;
-      out.set(Math.sin(th) * Math.sin(ph) * LR[0], Math.cos(th) * LR[1], -Math.sin(th) * Math.cos(ph) * LR[2]);
-      return out.applyQuaternion(q).add(c);
-    }, 16, 3, { wrap: true, flip: true }, tint(skin, 0.98), B.head);
+    const nrm = c.clone().sub(HEAD_C).normalize();
+    const q = new THREE.Quaternion().setFromUnitVectors(V(0, 0, -1), V(nrm.x * 0.5, nrm.y * 0.4, nrm.z).normalize());
+    const e = new THREE.Euler().setFromQuaternion(q);
+    S.ellipsoid(c, [0.0155, 0.022, 0.009], 10, 8, C('#1a1412'), B[`lid${n}`], { rot: [e.x, e.y, e.z] });
+    const up = V(0, 1, 0).applyQuaternion(q), rt = V(1, 0, 0).applyQuaternion(q), fw = V(0, 0, -1).applyQuaternion(q);
+    S.ellipsoid(c.clone().addScaledVector(up, 0.008).addScaledVector(rt, -0.005 * s).addScaledVector(fw, 0.0075), [0.0042, 0.0042, 0.002], 6, 4, C('#fff8f0'), B[`lid${n}`], { rot: [e.x, e.y, e.z] });
   }
 }
 
-// Рот: улыбка-линия + «D»-образный проём с зубами и языком. Нижняя часть проёма висит на кости jaw
-// (в центре головы): поворот вверх складывает проём в линию по поверхности лица.
-export const MOUTH_DEPTH = 0.2; // угловая глубина проёма, рад
+// Рот: короткая улыбка-линия + маленький проём. Нижняя часть проёма висит на кости jaw (в центре головы):
+// поворот вверх складывает проём в линию по поверхности лица.
+export const MOUTH_DEPTH = 0.11; // угловая глубина проёма, рад
 function buildMouth(ctx) {
   const { S, skin } = ctx;
   const my = FACE.mouthDir.y, mz = FACE.mouthDir.z;
-  const W = 0.2;
-  const topDir = (t, out) => out.set(t * W, my + 0.035 * t * t, mz);
+  const W = 0.105;
+  const topDir = (t, out) => out.set(t * W, my + 0.022 * t * t, mz);
   const depth = (t) => MOUTH_DEPTH * Math.max(0, 1 - t * t) ** 0.75;
-  // направление на нижнем крае: опускаем по сфере на угол depth
   const dirAt = (t, f, out) => {
     topDir(t, out).normalize();
     const ang = depth(t) * f;
-    // поворот вокруг оси X, проходящей через центр головы
     const y = out.y * Math.cos(ang) + out.z * Math.sin(ang);
     const z = -out.y * Math.sin(ang) + out.z * Math.cos(ang);
     return out.set(out.x, y, z);
   };
   // вес челюсти = доля угловой глубины точки: при закрытии всё ложится ровно на линию улыбки
   const jawW = (x, f) => {
-    const t = Math.min(1, Math.max(-1, (x - HEAD_C.x) / 0.056));
+    const t = Math.min(1, Math.max(-1, (x - HEAD_C.x) / 0.029));
     const w = f * Math.max(0, 1 - t * t) ** 0.75;
     return [B.head, 1 - w, B.jaw, w];
   };
   const pt = (t, f, off, out) => { dirAt(t, f, out); return headPoint(out.x, out.y, out.z, off, out); };
-  // проём
-  S.grid((u, v, out) => pt(u * 2 - 1, v, 0.0025, out), 16, 6, { wrap: false, flip: true }, C('#4a1418'), (x, y, z, t) => jawW(x, t));
-  // зубы и язык складываются вместе с проёмом
-  S.grid((u, v, out) => pt((u * 2 - 1) * 0.62, v * 0.3, 0.0034, out), 10, 2, { wrap: false, flip: true }, C('#f7f2e8'), (x, y, z, t) => jawW(x, t * 0.3));
-  S.grid((u, v, out) => pt((u * 2 - 1) * 0.5, 0.62 + 0.38 * v, 0.0034, out), 10, 3, { wrap: false, flip: true }, C('#d95f68'), (x, y, z, t) => jawW(x, 0.62 + 0.38 * t));
-  // нижняя губа и линия улыбки
-  const lip = [], smile = [];
-  for (let i = 0; i <= 16; i++) {
-    const t = (i / 16) * 2 - 1;
-    lip.push(pt(t * 0.92, 1, 0.0035, V()));
-    smile.push(pt(t * 1.04, 0, 0.0036, V()));
-  }
-  S.tube(lip, lip.map((_, i) => 0.0035 + 0.003 * Math.sin(Math.PI * i / 16)), { radial: 5 }, mix(skin, '#e06a62', 0.3), (x) => jawW(x, 1));
-  S.tube(smile, smile.map((_, i) => 0.0034 + 0.0018 * Math.sin(Math.PI * i / 16)), { radial: 5 }, C('#5a2620'), B.head);
-  // ямочки в уголках
-  for (const s of [-1, 1]) S.tube([pt(s * 1.04, 0, 0.003, V()), pt(s * 1.12, -0.05, 0.003, V())], 0.003, { radial: 4 }, tint(skin, 0.8), B.head);
+  S.grid((u, v, out) => pt(u * 2 - 1, v, 0.002, out), 12, 4, { wrap: false, flip: true }, C('#4a1a1a'), (x, y, z, t) => jawW(x, t));
+  S.grid((u, v, out) => pt((u * 2 - 1) * 0.6, v * 0.3, 0.0028, out), 6, 1, { wrap: false, flip: true }, C('#f3ece0'), (x, y, z, t) => jawW(x, t * 0.3));
+  const smile = [];
+  for (let i = 0; i <= 12; i++) smile.push(pt(((i / 12) * 2 - 1) * 1.05, 0, 0.003, V()));
+  S.tube(smile, smile.map((_, i) => 0.0024 + 0.0012 * Math.sin(Math.PI * i / 12)), { radial: 5 }, mix(skin, '#5a2a22', 0.75), B.head);
+  void skin;
 }
 
+// Брови: тонкие и неяркие.
 function buildBrows(ctx) {
-  const { S, hair } = ctx;
-  const col = tint(hair, 0.85);
+  const { S, hair, skin } = ctx;
+  const col = mix(hair, skin, 0.35);
   for (const [s, n] of [[-1, 'L'], [1, 'R']]) {
-    const pts = [], radii = [];
-    for (let i = 0; i <= 6; i++) {
-      const t = i / 6;
-      const dx = s * (0.17 + 0.3 * t), dy = 0.32 + 0.05 * Math.sin(Math.PI * t) - 0.04 * t;
-      pts.push(headPoint(dx, dy, -0.9, 0.009));
-      radii.push(0.011 + 0.006 * Math.sin(Math.PI * (0.35 + 0.6 * t)) - 0.003 * t);
+    const pts = [];
+    for (let i = 0; i <= 4; i++) {
+      const t = i / 4;
+      pts.push(headPoint(s * (0.21 + 0.22 * t), FACE.browDir.y + 0.025 * Math.sin(Math.PI * t) - 0.02 * t, -0.92, 0.003));
     }
-    S.tube(pts, radii, { radial: 6, squash: [0.6, 1] }, col, B[`brow${n}`]);
+    S.tube(pts, 0.0048, { radial: 5, squash: [0.6, 1] }, col, B[`brow${n}`]);
   }
 }
 
-function beardMask(d) {
+function stubbleMask(d) {
   const ax = Math.abs(d.x);
-  // ниже линии челюсти спереди, выше по бокам (бакенбарды)
-  const line = -0.24 + 0.32 * sstep(0.45, 0.95, ax);
-  let m = sstep(line + 0.03, line - 0.03, d.y);
-  m *= sstep(0.25, -0.05, d.z) ; // только спереди и по бокам
-  // вокруг рта — пусто
-  const mx = d.x / 0.2, my2 = (d.y - FACE.mouthDir.y + 0.035) / 0.115;
-  m *= sstep(0.8, 1.15, Math.sqrt(mx * mx + my2 * my2));
+  const line = -0.2 + 0.3 * sstep(0.45, 0.95, ax);
+  let m = sstep(line + 0.04, line - 0.04, d.y);
+  m *= sstep(0.25, -0.05, d.z);
+  const mx = d.x / 0.13, my2 = (d.y - FACE.mouthDir.y + 0.02) / 0.07;
+  m *= sstep(0.8, 1.2, Math.sqrt(mx * mx + my2 * my2));
   return m;
 }
 
+// Аккуратные усики над губой.
 function buildMustache(ctx) {
   const { S, hair } = ctx;
   for (const s of [-1, 1]) {
     const pts = [], radii = [];
-    for (let i = 0; i <= 7; i++) {
-      const t = i / 7;
-      const dx = s * (0.015 + 0.2 * t), dy = FACE.mouthDir.y + 0.085 - 0.06 * t * t;
-      pts.push(headPoint(dx, dy, FACE.mouthDir.z, 0.012 - 0.006 * t));
-      radii.push(0.015 + 0.012 * Math.sin(Math.PI * (0.2 + 0.7 * t)) * (1 - 0.6 * t));
+    for (let i = 0; i <= 5; i++) {
+      const t = i / 5;
+      pts.push(headPoint(s * (0.01 + 0.11 * t), FACE.mouthDir.y + 0.05 - 0.025 * t * t, FACE.mouthDir.z, 0.006 - 0.003 * t));
+      radii.push(0.0085 * (1 - 0.55 * t) + 0.002);
     }
-    S.tube(pts, radii, { radial: 8, squash: [0.75, 1] }, (x, y, z, out, t) => out.copy(hair).multiplyScalar(0.9 + 0.2 * t), B.head);
+    S.tube(pts, radii, { radial: 6, squash: [0.7, 1] }, tint(hair, 0.95), B.head);
   }
-}
-
-// Борода: поверхность от линии щёк до подбородка. Верхний край — гладкая кривая: под нижней губой
-// спереди и до уровня скул у ушей; к краям толщина сходит на нет, у края — аккуратный бортик.
-function buildBeard(ctx) {
-  const { S, hair } = ctx;
-  const dir = new THREE.Vector3();
-  const lip = FACE.mouthDir.y - 0.1;
-  const AZ = 1.62;
-  S.grid((u, v, out) => {
-    const az = (u - 0.5) * 2 * AZ;
-    const a = Math.abs(az);
-    const topDy = lip + (0.04 - lip) * sstep(0.2, 1.25, a);
-    const e0 = Math.asin(topDy), e1 = -1.3;
-    const el = e0 + (e1 - e0) * v;
-    dir.set(Math.cos(el) * Math.sin(az), Math.sin(el), -Math.cos(el) * Math.cos(az));
-    const chin = sstep(-0.35, -0.9, dir.y) * sstep(1.2, 0.3, a);
-    const taper = sstep(AZ, AZ - 0.35, a);
-    const lumps = 0.005 * Math.sin(az * 13 + el * 5) * Math.sin(el * 11);
-    const rim = sstep(0, 0.09, v) * (0.6 + 0.4 * sstep(0.08, 0.3, v));
-    return headPoint(dir.x, dir.y, dir.z, 0.0015 + (0.02 + 0.022 * chin + lumps) * rim * taper, out);
-  }, 32, 10, { wrap: false, flip: true }, (x, y, z, out, t) => {
-    out.copy(hair).multiplyScalar((0.82 + 0.28 * hash3(Math.round(x * 160), Math.round(y * 160), Math.round(z * 160))) * (0.85 + 0.15 * sstep(0, 0.3, t)));
-  }, B.head);
 }
 
 // ---------- причёски ----------
@@ -772,47 +570,42 @@ function buildBeard(ctx) {
 // Линия роста волос (dy) по азимуту; f = |az|/PI: 0 — лоб, 1 — затылок. Обходит уши сверху.
 function hairEdge(az, style) {
   const f = Math.abs(az) / Math.PI;
-  const front = style === 4 ? 0.5 : style === 2 ? 0.34 : style === 5 ? 0.46 : 0.42;
+  const front = style === 2 ? 0.44 : 0.4;
   let e = front;
-  e += (0.27 - front) * sstep(0.12, 0.26, f);  // виски
-  e += -0.4 * sstep(0.26, 0.32, f);            // бакенбарды
-  e += 0.44 * sstep(0.34, 0.41, f);            // над ухом
-  e += -0.55 * sstep(0.6, 0.7, f);             // за ухом вниз
-  e += -0.18 * sstep(0.7, 0.95, f);            // затылок
-  if (style === 0 || style === 1) e += 0.035 * Math.sin(az * 24) * sstep(0.2, 0.05, f); // чёлка зубчиками
-  if (style === 2) e += 0.03 * Math.sin(az * 20);                                       // кудрявый край
+  e += (0.24 - front) * sstep(0.12, 0.26, f);  // виски
+  e += -0.36 * sstep(0.26, 0.32, f);           // бакенбарды
+  e += 0.4 * sstep(0.35, 0.42, f);             // над ухом
+  e += -0.5 * sstep(0.6, 0.7, f);              // за ухом вниз
+  e += -0.14 * sstep(0.7, 0.95, f);            // затылок
+  if (style === 0 || style === 1) e += 0.03 * Math.sin(az * 24) * sstep(0.2, 0.05, f); // чёлка зубчиками
   return e;
 }
 
 function buildHair(ctx) {
   const { S, hair, look } = ctx;
-  const style = look.hairStyle || 0;
+  const style = look.hairStyle || 0; // 0 короткая, 1 зачёс, 2 ёжик, 3 лысина
   const capped = look.hat > 0;
   const b0 = hatBand(look.hat);
   const dir = new THREE.Vector3();
-  const strands = tint(hair, 1.28);
+  const strands = tint(hair, 1.25);
   const NU = 60, NV = 14;
-  // толщина пряди по направлению
   const thick = (d, az, el) => {
     switch (style) {
-      case 1: return 0.017 + 0.006 * sstep(0, 0.9, d.y) + 0.004 * Math.sin(az * 30 + d.y * 4)
-        + 0.055 * Math.exp(-((d.y - 0.62) ** 2) / 0.03) * Math.max(0, -d.z) * (1 + 0.5 * d.x);
-      case 2: return 0.03 + 0.014 * Math.sin(az * 11 + 1.3) * Math.sin(el * 10) + 0.01 * sstep(0.2, -0.2, d.y);
-      case 3: return 0.026 + 0.008 * Math.sin(az * 9) * Math.sin(el * 7);
-      case 4: return 0.013 + 0.0025 * Math.sin(az * 40);
-      case 5: return 0.0065;
-      default: return 0.017 + 0.007 * sstep(0, 0.9, d.y) + 0.0028 * Math.sin(az * 46 + el * 8);
+      case 1: return 0.015 + 0.006 * sstep(0, 0.9, d.y) + 0.004 * Math.sin(az * 30 + d.y * 4)
+        + 0.07 * Math.exp(-((d.y - 0.55) ** 2) / 0.022) * Math.max(0, -d.z) ** 1.5 * (1 + 0.6 * d.x);
+      case 2: return 0.006;
+      case 3: return 0.022 + 0.006 * Math.sin(az * 9) * Math.sin(el * 7);
+      default: return 0.015 + 0.006 * sstep(0, 0.9, d.y) + 0.0025 * Math.sin(az * 46 + el * 8);
     }
   };
-  // верхняя граница: под шляпой волосы заканчиваются чуть выше ленты
   const topDy = (az) => (capped ? Math.min(1, b0 + 0.11 * Math.cos(az) + 0.05) : 1);
   S.grid((u, v, out) => {
     const az = u * TAU;
     const f = Math.abs(((az + Math.PI) % TAU) - Math.PI) / Math.PI;
     let lo, hi;
     if (style === 3) { // лысина с венчиком: полоса над ушами и по затылку
-      lo = 0.27 - 0.63 * sstep(0.58, 0.7, f);
-      hi = 0.36 - 0.18 * sstep(0.55, 0.75, f);
+      lo = 0.24 - 0.58 * sstep(0.58, 0.7, f);
+      hi = 0.33 - 0.17 * sstep(0.55, 0.75, f);
       hi = lo + (hi - lo) * sstep(0.3, 0.42, f);
     } else {
       lo = hairEdge(az > Math.PI ? az - TAU : az, style);
@@ -824,53 +617,24 @@ function buildHair(ctx) {
     dir.set(Math.cos(el) * Math.sin(az), Math.sin(el), -Math.cos(el) * Math.cos(az));
     let t = thick(dir, az, el);
     let rim = sstep(0, 1 / NV, v) * (0.6 + 0.4 * sstep(0.06, 0.3, v));
-    if (style === 3 || capped) rim *= sstep(1, 1 - 1.5 / NV, v); // верхний край тоже сходит к коже
+    if (style === 3 || capped) rim *= sstep(1, 1 - 1.5 / NV, v);
     if (capped) t *= 0.8;
     return headPoint(dir.x, dir.y, dir.z, 0.0015 + t * rim, out);
   }, NU, NV, { wrap: true }, (x, y, z, out, tv) => {
     _d.set(x, y, z).sub(HEAD_C).normalize();
     out.copy(hair);
     const az = Math.atan2(_d.x, -_d.z);
-    out.lerp(strands, 0.28 * (0.5 + 0.5 * Math.sin(az * 46 + _d.y * 8)) * sstep(0.1, 0.8, _d.y));
+    out.lerp(strands, 0.24 * (0.5 + 0.5 * Math.sin(az * 46 + _d.y * 8)) * sstep(0.1, 0.8, _d.y));
     out.multiplyScalar((0.8 + 0.2 * sstep(-0.3, 0.6, _d.y)) * (0.82 + 0.18 * sstep(0, 0.25, tv)));
+    if (style === 2) out.lerp(ctx.skin, 0.25); // ёжик просвечивает
   }, B.head);
-
-  if (style === 4) { // хвостик
-    const p0 = headPoint(0, 0.18, 1, -0.01);
-    const pts = [p0, p0.clone().add(V(0, -0.02, 0.06)), p0.clone().add(V(0, -0.1, 0.1)), p0.clone().add(V(0, -0.2, 0.085))];
-    S.tube(pts, [0.04, 0.046, 0.038, 0.012], { radial: 10 }, (x, y, z, out, t) => out.copy(hair).multiplyScalar(1 - 0.15 * t), B.tail);
-    const tc = p0.clone().add(V(0, -0.006, 0.032));
-    const ring = [];
-    for (let i = 0; i < 12; i++) {
-      const f = (i / 12) * TAU;
-      ring.push(tc.clone().add(V(Math.cos(f) * 0.036, Math.sin(f) * 0.036 * 0.9, 0)));
-    }
-    S.tube(ring, 0.011, { radial: 6, closed: true }, C(ctx.o.vest), B.tail);
-  }
-  if (style === 5 && !capped) { // ёжик: короткие иголки на макушке
-    const g = new THREE.ConeGeometry(0.013, 0.034, 5);
-    g.translate(0, 0.012, 0);
-    for (let i = 0; i < 70; i++) {
-      const y = 1 - (i + 0.5) / 70 * 1.25;
-      if (y < -0.2) break;
-      const r = Math.sqrt(Math.max(0, 1 - y * y)), ph = i * 2.39996;
-      dir.set(r * Math.sin(ph), y, -r * Math.cos(ph));
-      const az = Math.atan2(dir.x, -dir.z);
-      if (dir.y < hairEdge(az, 5) + 0.08) continue;
-      const p = headPoint(dir.x, dir.y, dir.z, 0.004);
-      const n = dir.clone().add(V(0, 0.15, 0.35)).normalize();
-      const m = new THREE.Matrix4().compose(p, new THREE.Quaternion().setFromUnitVectors(V(0, 1, 0), n), V(1, 1, 1));
-      S.geo(g.clone(), m, (x, yy, z, out) => out.copy(hair).multiplyScalar(0.9 + 0.35 * sstep(p.y, p.y + 0.04, yy)), B.head);
-    }
-    g.dispose();
-  }
 }
 
 // ---------- шляпы ----------
 
 // Высота ленты шляпы (dy на лбу); у каждой шляпы своя посадка.
 function hatBand(kind) {
-  return [1, 0.27, 0.29, 0.22, 0.3, 0.28, 0.3][kind] ?? 1;
+  return [1, 0.26, 0.28, 0.2, 0.3, 0.27][kind] ?? 1;
 }
 
 // Кольцо ленты на голове: точки по азимуту на высоте, наклонённой назад (затылок ниже лба).
@@ -900,13 +664,6 @@ function clearHead(p, gap) {
   return p;
 }
 
-// Яркий вариант цвета наряда для шапок: слишком тёмные оттенки осветляем.
-function lively(hex, warm = '#c8553d') {
-  const c = C(hex);
-  const l = 0.2126 * c.r + 0.7152 * c.g + 0.0722 * c.b;
-  return l < 0.05 ? mix(c, warm, 0.75) : c;
-}
-
 // Лофт тульи: от кольца ленты вверх по оси шляпы; prof — [[высота, масштаб], ...], deform(p, k, i).
 function crown(S, ring, axis, center, prof, color, deform) {
   const n = ring.length;
@@ -924,9 +681,9 @@ function crown(S, ring, axis, center, prof, color, deform) {
 }
 
 function buildHat(ctx) {
-  const { S, look, o } = ctx;
+  const { S, look } = ctx;
   const kind = look.hat;
-  if (!kind) { ctx.top = 1.32; return; }
+  if (!kind) { ctx.top = 1.29; return; }
   const b0 = hatBand(kind);
   const axis = V(0, 1, 0.12).normalize();
   const ring = bandRing(b0, 40, 0.009);
@@ -1000,68 +757,47 @@ function buildHat(ctx) {
       ctx.top = center.y + 0.2;
       break;
     }
-    case 3: { // каска с ремешком и сеткой
-      const olive = C('#69773c');
+    case 3: { // армейская каска: оливковый купол и рыже-коричневый кожаный обод (как в референсе)
+      const olive = C('#5f6b2e'), leather = C('#a8542c');
       const prof = [[-0.012, 1.1], [0.035, 1.13], [0.085, 1.11], [0.135, 0.99], [0.175, 0.77], [0.198, 0.46], [0.205, 0]];
       crown(S, ring, axis, center, prof, (x, y, z, out) => {
-        out.copy(olive).multiplyScalar(0.82 + 0.16 * sstep(center.y, center.y + 0.15, y) + 0.08 * (hash3(Math.round(x * 40), Math.round(y * 40), Math.round(z * 40)) - 0.5));
+        out.copy(olive).multiplyScalar(0.8 + 0.2 * sstep(center.y, center.y + 0.16, y) + 0.06 * (hash3(Math.round(x * 30), Math.round(y * 30), Math.round(z * 30)) - 0.5));
       });
-      const rim = ring.map((p) => outward(p, 1.14).addScaledVector(axis, -0.014));
-      S.tube(rim, 0.016, { radial: 6, closed: true, squash: [1, 0.7] }, tint(olive, 0.85), B.head);
-      // сетка
-      const netC = tint(olive, 0.62);
-      for (let m = 0; m < 10; m++) {
-        const i = Math.round((m / 10) * 40) % 40;
-        const pts = prof.slice(0, -1).map(([h, s]) => outward(ring[i], s + 0.012).addScaledVector(axis, h + 0.004));
-        pts.push(center.clone().addScaledVector(axis, 0.21));
-        S.tube(pts, 0.0032, { radial: 3, caps: [false, false] }, netC, B.head);
-      }
-      for (const j of [1, 3, 4]) {
-        const [h, s] = prof[j];
-        S.tube(ring.filter((_, i) => i % 2 === 0).map((p) => outward(p, s + 0.014).addScaledVector(axis, h + 0.004)), 0.0032, { radial: 3, closed: true }, netC, B.head);
-      }
-      // ремешок под подбородком
-      const strap = [outward(ring[10], 1.08), headPoint(0.92, -0.25, -0.2, 0.012), headPoint(0.55, -0.72, -0.4, 0.012), headPoint(0, -0.82, -0.57, 0.012),
-        headPoint(-0.55, -0.72, -0.4, 0.012), headPoint(-0.92, -0.25, -0.2, 0.012), outward(ring[30], 1.08)];
-      S.tube(strap, 0.0055, { radial: 5, squash: [0.5, 1.4] }, C('#4f4a32'), B.head);
-      ctx.top = center.y + 0.2;
+      // широкий кожаный обод по краю
+      S.grid((u, v, out) => {
+        const p = outward(ring[Math.round(u * 40) % 40], 1.115 + 0.02 * v);
+        return out.copy(p).addScaledVector(axis, -0.022 + 0.034 * v);
+      }, 40, 2, { wrap: true }, (x, y, z, out) => out.copy(leather).multiplyScalar(0.9 + 0.1 * hash3(Math.round(x * 60), Math.round(y * 60), Math.round(z * 60))), B.head);
+      S.tube(ring.map((p) => outward(p, 1.12).addScaledVector(axis, -0.022)), 0.011, { radial: 6, closed: true, squash: [1, 0.8] }, tint(leather, 0.85), B.head);
+      ctx.top = center.y + 0.21;
       break;
     }
-    case 4: { // кепка: шесть клиньев со швами, пуговка, изогнутый козырёк
-      const cap = lively(o.vest);
-      const prof = [[-0.006, 1.01], [0.04, 1.0], [0.08, 0.93], [0.115, 0.72], [0.135, 0.4], [0.14, 0]];
+    case 4: { // кепка: мягкая округлая тулья, пуговка, короткий козырёк
+      const cap = C(['#6b4a32', '#5d5a3c', '#3f4656', '#7a3e2c'][look.outfit % 4]);
+      const prof = [[-0.006, 1.02], [0.04, 1.05], [0.08, 1.0], [0.11, 0.8], [0.13, 0.48], [0.138, 0]];
       crown(S, ring, axis, center, prof, (x, y, z, out) => {
         const az = Math.atan2(x - center.x, -(z - center.z));
-        out.copy(cap).multiplyScalar(0.86 + 0.14 * sstep(center.y, center.y + 0.1, y) + 0.04 * Math.cos(az * 6));
-      });
-      for (let m = 0; m < 6; m++) {
-        const i = Math.round((m / 6) * 40 + 3.33) % 40;
-        const pts = prof.slice(0, -1).map(([h, s]) => outward(ring[i], s + 0.004).addScaledVector(axis, h + 0.003));
-        pts.push(center.clone().addScaledVector(axis, 0.142));
-        S.tube(pts, 0.0028, { radial: 4, caps: [false, false] }, tint(cap, 0.72), B.head);
-      }
-      S.ellipsoid(center.clone().addScaledVector(axis, 0.142), [0.017, 0.009, 0.017], 10, 6, tint(cap, 0.8), B.head);
-      ribbon(-0.004, 0.012, 1.012, tint(cap, 0.85));
-      // козырёк: дуга ленты спереди, вытянутая вперёд и загнутая вниз по бокам
-      const vis = C(o.trim);
+        out.copy(cap).multiplyScalar(0.84 + 0.16 * sstep(center.y, center.y + 0.1, y) + 0.03 * Math.cos(az * 6));
+      }, (p, j) => { if (j >= 1 && j <= 3 && p.z < center.z) p.addScaledVector(V(0, 0, -1), 0.012 * Math.sin((j / 3) * Math.PI)); });
+      S.ellipsoid(center.clone().addScaledVector(axis, 0.14), [0.015, 0.012, 0.015], 8, 6, tint(cap, 0.85), B.head);
+      ribbon(-0.004, 0.01, 1.012, tint(cap, 0.82));
       const vpt = (u, f, dy, out) => {
-        const i = 40 - 9 + Math.round(u * 18);
+        const i = 40 - 8 + Math.round(u * 16);
         const p = outward(ring[((i % 40) + 40) % 40], 1.0);
-        const fw = V(0, 0, -1);
         const k = Math.sin(Math.PI * u);
-        p.addScaledVector(fw, f * 0.135 * k ** 0.5).addScaledVector(axis, -0.01 - 0.03 * f * (1 - k) - 0.018 * f + dy);
+        p.addScaledVector(V(0, 0, -1), f * 0.075 * k ** 0.5).addScaledVector(axis, -0.008 - 0.02 * f * (1 - k) - 0.02 * f + dy);
         return out.copy(p);
       };
-      S.grid((u, v, out) => vpt(u, v, 0.006, out), 18, 5, { wrap: false, flip: true }, vis, B.head);
-      S.grid((u, v, out) => vpt(u, v, -0.004, out), 18, 5, { wrap: false }, tint(vis, 0.6), B.head);
+      S.grid((u, v, out) => vpt(u, v, 0.005, out), 16, 4, { wrap: false, flip: true }, tint(cap, 0.9), B.head);
+      S.grid((u, v, out) => vpt(u, v, -0.003, out), 16, 4, { wrap: false }, tint(cap, 0.6), B.head);
       const rimv = [];
-      for (let i = 0; i <= 18; i++) rimv.push(vpt(i / 18, 1, 0.001, V()));
-      S.tube(rimv, 0.0065, { radial: 5 }, tint(vis, 0.9), B.head);
-      ctx.top = center.y + 0.15;
+      for (let i = 0; i <= 16; i++) rimv.push(vpt(i / 16, 1, 0.001, V()));
+      S.tube(rimv, 0.005, { radial: 5 }, tint(cap, 0.8), B.head);
+      ctx.top = center.y + 0.16;
       break;
     }
     case 5: { // шапка: вязаные рубчики, отворот кольцами и помпон
-      const knit = lively(o.vest), cuff = tint(lively(o.vest), 0.8), pom = C(o.shirt);
+      const knit = C(['#8a3b2e', '#4e5a3a', '#3d4a66', '#b88a3c'][look.outfit % 4]), cuff = tint(knit, 0.82), pom = C('#efe6d6');
       const prof = [[0.0, 1.035], [0.045, 1.05], [0.1, 1.03], [0.15, 0.92], [0.19, 0.68], [0.212, 0.36], [0.218, 0]];
       crown(S, ring.map((p, i) => outward(p, 1 + 0.012 * Math.cos(i * Math.PI))), axis, center, prof, (x, y, z, out) => {
         const az = Math.atan2(x - center.x, -(z - center.z));
@@ -1080,34 +816,6 @@ function buildHat(ctx) {
       ctx.top = center.y + 0.31;
       break;
     }
-    case 6: { // колпак: полоски, загнутый кончик, меховая опушка и помпон
-      const cA = lively(o.vest), cB = C('#fbf3e6');
-      const n = 40, rows = 18;
-      const spine = (t, out) => {
-        const h = 0.5 * t;
-        out.copy(center).addScaledVector(axis, h).add(V(0.13 * t * t, -0.2 * sstep(0.55, 1, t) * t, 0.12 * t * t));
-        return out;
-      };
-      const rel = ring.map((p) => p.clone().sub(center));
-      const sp = new THREE.Vector3();
-      S.grid((u, v, out) => {
-        const i = Math.round(u * n) % n;
-        const t = v;
-        spine(t, sp);
-        const s = (1 - t) ** 1.25 * (1 + 0.1 * Math.sin(Math.min(1, t * 2.2) * Math.PI));
-        out.copy(rel[i]).multiplyScalar(s).add(sp);
-        return v > 0 ? clearHead(out, 0.02) : out;
-      }, n, rows, { wrap: true }, (x, y, z, out, t) => {
-        out.copy(Math.floor(t * 7 + 0.15) % 2 ? cB : cA).multiplyScalar(0.88 + 0.12 * t);
-      }, B.head);
-      S.tube(ring.filter((_, i) => i % 4 !== 3).map((p) => outward(p, 1.06)), 0.028, { radial: 6, closed: true, squash: [0.85, 1] }, (x, y, z, out) => {
-        out.copy(cB).multiplyScalar(0.86 + 0.18 * hash3(Math.round(x * 250), Math.round(y * 250), Math.round(z * 250)));
-      }, B.head);
-      const tip = spine(1, V());
-      S.ellipsoid(tip, [0.045, 0.045, 0.045], 12, 10, (x, y, z, out) => out.copy(cB).multiplyScalar(0.85 + 0.2 * hash3(Math.round(x * 300), Math.round(y * 300), Math.round(z * 300))), B.head);
-      ctx.top = Math.max(center.y + 0.3, tip.y + 0.06);
-      break;
-    }
     default:
   }
 }
@@ -1119,15 +827,16 @@ function buildGlasses(ctx) {
   const kind = ctx.look.glasses;
   if (!kind) return;
   S.slot = 1;
-  const frameC = [null, C('#151518'), C('#eadbb0'), C('#d0ad55')][kind];
-  const lensC = [null, C('#0f0f14'), C('#3e76b4'), C('#4a2f20')][kind];
-  const lensLow = [null, C('#18181f'), C('#6aa0d6'), C('#a8703f')][kind];
+  const frameC = [null, C('#151518'), C('#e6d6ab'), C('#c9a556')][kind];
+  const lensC = [null, C('#0d0d10'), C('#2c3d4f'), C('#3e2a1d')][kind];
+  const lensLow = [null, C('#141418'), C('#3f5468'), C('#8a5b36')][kind];
+  const streak = [null, C('#3a3a44'), C('#7f97ab'), C('#b58a5a')][kind];
   const fr = kind === 3 ? 0.0038 : kind === 2 ? 0.0075 : 0.0062;
   const outline = (s, i, n) => { // точки контура линзы в локальных координатах (x наружу, y вверх)
     const f = (i / n) * TAU;
-    if (kind === 1) return [Math.cos(f) * 0.05, Math.sin(f) * 0.05];
+    if (kind === 1) return [Math.cos(f) * 0.053, Math.sin(f) * 0.053];
     if (kind === 2) {
-      const ex = 0.058, ey = 0.042, p = 4;
+      const ex = 0.065, ey = 0.047, p = 4;
       const c = Math.cos(f), sn = Math.sin(f);
       return [Math.sign(c) * Math.abs(c) ** (2 / p) * ex, Math.sign(sn) * Math.abs(sn) ** (2 / p) * ey];
     }
@@ -1138,7 +847,7 @@ function buildGlasses(ctx) {
   };
   for (const s of [-1, 1]) {
     const ec = eyeCenter(s);
-    const c = V(s * 0.1, ec.y + 0.004, ec.z - 0.05);
+    const c = V(ec.x * 1.04, ec.y + 0.004, ec.z - 0.05);
     const q = new THREE.Quaternion().setFromEuler(new THREE.Euler(0.04, -s * 0.12, 0));
     const ex = V(s, 0, 0).applyQuaternion(q), ey = V(0, 1, 0).applyQuaternion(q), ez = V(0, 0, -1).applyQuaternion(q);
     const P = (lx, ly, bulge, out) => out.copy(c).addScaledVector(ex, lx).addScaledVector(ey, ly).addScaledVector(ez, bulge);
@@ -1151,7 +860,12 @@ function buildGlasses(ctx) {
       const [lx, ly] = outline(s, Math.round(u * N), N);
       const k = 1 - v;
       return P(lx * k, ly * k, 0.004 * (1 - k * k), out);
-    }, N, 3, { wrap: true, flip: s < 0 }, (x, y, z, out) => out.copy(lensLow).lerp(lensC, sstep(c.y - 0.04, c.y + 0.03, y)), B.head);
+    }, N, 3, { wrap: true, flip: s < 0 }, (x, y, z, out) => {
+      out.copy(lensLow).lerp(lensC, sstep(c.y - 0.04, c.y + 0.03, y));
+      // диагональный блик-полоса на стекле, как в референсе
+      const lx = (x - c.x) * s, ly = y - c.y;
+      out.lerp(streak, 0.75 * Math.exp(-(((lx + ly * 0.9) - 0.006) ** 2) / 0.00018));
+    }, B.head);
     // дужка: от внешнего края к уху
     const [ox, oy] = outline(s, 0, N);
     const hinge = P(ox, oy + (kind === 3 ? 0.03 : 0.012), 0, V());

@@ -73,6 +73,9 @@ await shot('view-hold.png');
 await page.evaluate(() => {
   const G = window.__cozy.game, P = G.player;
   G.props.release(0);
+  // мяч возвращаем на место, чтобы не падал в следующие кадры
+  const b = G.props.byId.get('ball3');
+  b.pos.set(b.def.x, window.__ground(b.def.x, b.def.z) + b.k.r, b.def.z); b.vel.set(0, 0, 0); b.owner = null;
   P.pos.set(27, 0.8, -15.4); P.yaw = 0; P.pitch = -0.65;
   window.__step(10);
   P.applyCamera(G.camera, 1);
@@ -106,9 +109,11 @@ await page.evaluate(() => {
   P.wantThird = true; P.camDist = 3;
   window.__step(20);
   const av = G.avatar.root;
-  G.camera.position.set(av.position.x - Math.sin(0.4 + 0.5) * 2.2, av.position.y + 1.0, av.position.z - Math.cos(0.4 + 0.5) * 2.2);
-  G.camera.lookAt(av.position.x, av.position.y + 0.7, av.position.z);
+  G.camera.position.set(av.position.x - Math.sin(0.4 + 0.5) * 2.6, av.position.y + 1.0, av.position.z - Math.cos(0.4 + 0.5) * 2.6);
+  G.camera.lookAt(av.position.x, av.position.y + 0.68, av.position.z);
+  G.camera.fov = 42; G.camera.updateProjectionMatrix();
   window.__render();
+  G.camera.fov = 78; G.camera.updateProjectionMatrix();
 });
 await shot('view-avatar.png');
 

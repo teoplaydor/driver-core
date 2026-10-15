@@ -196,7 +196,7 @@ export class Animator {
     // ---------- 2. параметры походки ----------
     const freq = 1.4 + 0.65 * Math.sqrt(s);
     const cycle = Math.max(0.05, s / freq);
-    const stance = Math.min(0.36 + 0.006 * s, 0.65 * cycle);
+    const stance = Math.min(0.32 + 0.006 * s, 0.65 * cycle);
     const beta = clamp(stance / cycle, 0.14, 0.65);
     this.cycle = cycle; this.stance = stance; this.beta = beta;
     this.gaitW = damp(this.gaitW, grounded ? sstep(0.15, 1.2, s) : 0, 8, dt);
@@ -380,7 +380,8 @@ export class Animator {
     const strumBob = act && act.name === 'strum' ? 0.08 * actK * Math.sin(act.t * 9) : 0;
     // желаемая ориентация головы в системе корня → локальные шея/голова
     _q1.copy(b[B.pelvis].quaternion).multiply(b[B.spine].quaternion).multiply(b[B.chest].quaternion); // грудь относительно корня
-    _e.set(this.headLook.y + nod + strumBob + air * 0.12 * (1 - rise) - 0.06 * this.runW * gw, this.headLook.x, waveTilt - this.turnLean * 0.3, 'YXZ');
+    // голова чуть наклонена вперёд, как в референсе
+    _e.set(this.headLook.y - 0.07 + nod + strumBob + air * 0.12 * (1 - rise) - 0.06 * this.runW * gw, this.headLook.x, waveTilt - this.turnLean * 0.3, 'YXZ');
     _q2.setFromEuler(_e);
     _q3.copy(_q1).invert().multiply(_q2); // нужное вращение относительно груди
     b[B.neck].quaternion.identity().slerp(_q3, 0.35);
@@ -458,6 +459,14 @@ export class Animator {
       const ly = ANKLE_Y * cp + pz * sp;
       const lz = ANKLE_Y * sp - pz * cp;
       f.ankle.set(gx + sy * (pz + lz), gy + ly, gz + cy * (pz + lz));
+      // крен по склону: подошва ложится на землю целиком, лодыжка смещается вбок от центра подошвы
+      const roll = f.mode === 0 ? f.gr : f.gr * (1 - f.prog);
+      if (roll) {
+        const sr = Math.sin(roll);
+        f.ankle.x -= cy * ANKLE_Y * sr;
+        f.ankle.z += sy * ANKLE_Y * sr;
+        f.ankle.y -= ANKLE_Y * (1 - Math.cos(roll));
+      }
       // цель в воздухе: под тазом, колени поджаты на взлёте
       const hip = this.hip[i];
       const tuck = rise * (i === 0 ? 1 : 0.75);
@@ -722,9 +731,9 @@ export class Animator {
     const act = this.act;
     const wave = act && act.name === 'wave' ? this.actW : 0;
     const focus = act && (act.name === 'swing' || act.name === 'throw') ? this.actW : 0;
-    const lidRot = -1.22 * close + 0.22 * sur - 0.12 * focus + 0.05 * Math.sin(t * 0.4) * idleW;
-    b[B.lidL].rotation.set(lidRot, 0, 0);
-    b[B.lidR].rotation.set(lidRot, 0, 0);
+    // глаз — тёмный овал: моргание сплющивает его по вертикали, удивление чуть увеличивает
+    const lid = Math.max(0.08, 1 - 0.92 * close) * (1 + 0.18 * sur) * (1 - 0.15 * focus);
+    for (const k of [B.lidL, B.lidR]) b[k].scale.set(1 + 0.1 * sur, lid, 1);
     // взгляд: короткие саккады + цель
     this.gazeT -= dt;
     if (this.gazeT <= 0) {

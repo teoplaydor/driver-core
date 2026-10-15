@@ -6,6 +6,7 @@
 import * as THREE from 'three';
 import { clamp, damp } from '../util/math.js';
 import { Sculpt, V, sstep } from './sculpt.js';
+import { softShading } from './soft-shading.js';
 
 const TAU = Math.PI * 2;
 // пальцы: x основания (для правой кисти), длины фаланг, радиус
@@ -162,7 +163,7 @@ export class Hands {
     this.fill = new THREE.DirectionalLight(0xffe2cc, 0.35);
     this.fill.position.set(-0.3, -0.2, 1);
     this.scene.add(this.hemi, this.dir, this.fill);
-    this.mat = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.58, metalness: 0 });
+    this.mat = softShading(new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.8, metalness: 0 }));
     this.skin = new THREE.Color(skinHex);
     this.sleeve = new THREE.Color('#f3eee4');
 

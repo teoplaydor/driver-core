@@ -29,7 +29,7 @@ function parseVec(a, n, lim) {
 
 // Внешность: [кожа, наряд, шляпа, очки, цвет волос, причёска, борода]. Старые клиенты шлют 5 чисел.
 function parseLook(a) {
-  const lim = [6, 8, 7, 4, 6, 6, 4];
+  const lim = [6, 8, 6, 4, 6, 4, 3];
   if (!Array.isArray(a) || a.length < 5 || a.length > lim.length) return lim.map(() => 0);
   return lim.map((n, i) => (Number.isInteger(a[i]) && a[i] >= 0 && a[i] < n ? a[i] : 0));
 }

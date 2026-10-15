@@ -7,6 +7,7 @@ import * as THREE from 'three';
 import { clamp, TAU } from '../util/math.js';
 import { createSkeleton, B, armDir, gripLocal } from './rig.js';
 import { Animator, ACTIONS } from './anim.js';
+import { softShading } from './soft-shading.js';
 import {
   buildCharacter, SKINS, HAIRS, OUTFITS, HATS, GLASSES, HAIR_STYLES, FACIAL, sleeveColor,
 } from './character-geo.js';
@@ -21,9 +22,12 @@ export const holdToCode = (kind) => Math.max(0, HOLD_CODES.indexOf(kind || null)
 export const holdFromCode = (n) => HOLD_CODES[n | 0] || null;
 
 const rnd = (n) => Math.floor(Math.random() * n);
+// случайный образ: в ~70% случаев с очками, чаще каштановые волосы, усы/щетина изредка
 export const randomLook = () => ({
-  skin: rnd(SKINS.length), outfit: rnd(OUTFITS.length), hat: rnd(HATS.length), glasses: rnd(GLASSES.length),
-  hair: rnd(HAIRS.length), hairStyle: rnd(HAIR_STYLES.length), facial: Math.random() < 0.55 ? 0 : 1 + rnd(FACIAL.length - 1),
+  skin: Math.random() < 0.6 ? rnd(3) : rnd(SKINS.length), outfit: rnd(OUTFITS.length), hat: rnd(HATS.length),
+  glasses: Math.random() < 0.7 ? 1 + rnd(GLASSES.length - 1) : 0,
+  hair: Math.random() < 0.6 ? rnd(3) : rnd(HAIRS.length), hairStyle: rnd(HAIR_STYLES.length),
+  facial: Math.random() < 0.7 ? 0 : 1 + rnd(FACIAL.length - 1),
 });
 
 // Внешность по сети — массив из 7 чисел. Старые клиенты шлют 5 — недостающие считаем нулями.
@@ -110,11 +114,11 @@ function bubbleCanvas(text) {
   return c;
 }
 
-const bodyMat = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.74, metalness: 0 });
+const bodyMat = softShading(new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.86, metalness: 0 }));
 // невидимый «теневой двойник» из упрощённой геометрии: тень дешевле, а в 1-м лице только он и рисуется
 const shadowMat = new THREE.MeshBasicMaterial({ colorWrite: false, depthWrite: false });
 const glossMat = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.36, metalness: 0 });
-const TAG_H = 0.3;
+const TAG_H = 0.32;
 
 // ---------- сам аватар ----------
 
@@ -123,9 +127,8 @@ export class Avatar {
     this.local = local;
     this.root = new THREE.Group();
     this.root.name = 'avatar';
-    // у своего аватара материалы свои: в 1-м лице тело скрываем (но тень остаётся)
-    this.mat = local ? bodyMat.clone() : bodyMat;
-    this.glossMat = local ? glossMat.clone() : glossMat;
+    this.mat = bodyMat;
+    this.glossMat = glossMat;
     this.look = look;
     this.speaking = false;
     this.bubble = null;
@@ -301,10 +304,10 @@ export class Avatar {
     // ник: с расстоянием немного растёт (читается с 10+ м) и плавно гаснет вдали
     if (camera && !this.local) {
       const d = camera.position.distanceTo(this.root.position);
-      const k = clamp(d / 6.5, 1, 2.3);
+      const k = clamp(d / 5, 1, 2.6);
       if (Math.abs(k - this._tagK) > 0.01) { this._tagK = k; this._placeTag(); }
-      this.tag.material.opacity = clamp(1 - (d - 24) / 10, 0, 1);
-      this.tag.visible = d < 34;
+      this.tag.material.opacity = clamp(1 - (d - 26) / 10, 0, 1);
+      this.tag.visible = d < 36;
       if (this.bubble) this.bubble.sprite.scale.set(2.6 * Math.min(k, 1.7), 1.3 * Math.min(k, 1.7), 1);
     }
   }
@@ -315,7 +318,6 @@ export class Avatar {
     this.tagTex.dispose();
     this.tag.material.dispose();
     this.skeleton.dispose();
-    if (this.local) { this.mat.dispose(); this.glossMat.dispose(); }
   }
 }
 

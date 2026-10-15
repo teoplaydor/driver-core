@@ -7,10 +7,10 @@ import * as THREE from 'three';
 
 // ---------- пропорции ----------
 export const ARM_TILT = 0.42; // руки в покое разведены, чтобы не входить в пухлый живот
-export const HIP_Y = 0.4, HIP_X = 0.11, THIGH = 0.16, SHIN = 0.16, ANKLE_Y = 0.08, FOOT_X = 0.118;
-export const SHOULDER = new THREE.Vector3(0.27, 0.71, 0);
+export const HIP_Y = 0.37, HIP_X = 0.11, THIGH = 0.145, SHIN = 0.145, ANKLE_Y = 0.08, FOOT_X = 0.118; // короткие толстые ноги
+export const SHOULDER = new THREE.Vector3(0.265, 0.69, 0); // низкие покатые плечи
 export const UPPER = 0.15, FORE = 0.14;
-export const HEAD_C = new THREE.Vector3(0, 1.03, 0);
+export const HEAD_C = new THREE.Vector3(0, 0.975, 0);
 // подошва: пятка и носок относительно лодыжки
 export const HEEL_Z = 0.06, TOE_Z = -0.155;
 
@@ -27,16 +27,18 @@ export function sstep(e0, e1, x) {
 }
 
 // Форма головы: радиус по направлению (dx, dy, dz) — единичный вектор от центра HEAD_C.
+// Яйцо/груша как в референсе: макушка уже, внизу широкие брыли, шеи нет — низ лежит на воротнике.
 export function headRadius(dx, dy, dz) {
-  const ry = dy > 0 ? 0.262 : 0.252;
-  let r = 1 / Math.sqrt((dx / 0.272) ** 2 + (dy / ry) ** 2 + (dz / 0.258) ** 2);
-  const low = sstep(0.12, -0.62, dy);
+  const ry = dy > 0 ? 0.272 : 0.26;
+  let r = 1 / Math.sqrt((dx / 0.288) ** 2 + (dy / ry) ** 2 + (dz / 0.27) ** 2);
+  const horiz = Math.sqrt(Math.max(0, 1 - dy * dy));
   const front = Math.max(0, -dz);
-  r += 0.024 * low * (0.5 + 0.5 * front);                                    // полные щёки и брыли
-  r += 0.014 * Math.exp(-((dy + 0.22) ** 2) / 0.03) * Math.exp(-((Math.abs(dx) - 0.52) ** 2) / 0.05) * front; // «яблочки»
-  r -= 0.012 * Math.max(0, dz) * sstep(-0.2, 0.5, dy);                       // затылок чуть площе
-  r -= 0.035 * sstep(-0.72, -1, dy);                                         // низ поджат (прячется в воротник)
-  r += 0.006 * Math.exp(-((dy - 0.3) ** 2) / 0.02) * front;                  // лобик
+  r -= 0.034 * sstep(0.12, 0.75, dy) * horiz;                                // макушка уже
+  r += 0.062 * sstep(0.2, -0.5, dy) * horiz * (0.7 + 0.3 * front);           // брыли и щёки внизу
+  r += 0.012 * Math.exp(-((dy + 0.12) ** 2) / 0.04) * Math.exp(-((Math.abs(dx) - 0.55) ** 2) / 0.06) * front; // мягкие щёки
+  r -= 0.014 * Math.max(0, dz) * sstep(-0.3, 0.5, dy);                       // затылок чуть площе
+  r -= 0.02 * sstep(0.2, 0.85, dy) * front;                                  // лоб уходит назад
+  r -= 0.03 * sstep(-0.7, -1, dy);                                           // низ поджат (лежит на воротнике)
   return r;
 }
 
@@ -49,14 +51,14 @@ export function headPoint(dx, dy, dz, offset = 0, out = new THREE.Vector3()) {
 
 // Ориентиры лица (в пространстве модели)
 export const FACE = {
-  eyeDir: new THREE.Vector3(0.36, 0.1, -0.93).normalize(), // правый глаз; левый — зеркально по x
-  eyeR: 0.041,
-  browDir: new THREE.Vector3(0.34, 0.33, -0.88).normalize(),
-  noseDir: new THREE.Vector3(0, -0.07, -1).normalize(),
-  mouthDir: new THREE.Vector3(0, -0.37, -0.93).normalize(),
-  earDir: new THREE.Vector3(1, 0.02, 0.06).normalize(),
+  eyeDir: new THREE.Vector3(0.34, 0.06, -0.94).normalize(), // правый глаз; левый — зеркально по x
+  browDir: new THREE.Vector3(0.33, 0.22, -0.92).normalize(),
+  noseDir: new THREE.Vector3(0, -0.06, -1).normalize(),
+  mouthDir: new THREE.Vector3(0, -0.31, -0.95).normalize(),
+  earDir: new THREE.Vector3(1, -0.04, 0.1).normalize(),
 };
-export const eyeCenter = (side) => headPoint(side * FACE.eyeDir.x, FACE.eyeDir.y, FACE.eyeDir.z, -0.016);
+// глаз — маленький тёмный овал на поверхности лица; кость века сплющивает его при моргании
+export const eyeCenter = (side) => headPoint(side * FACE.eyeDir.x, FACE.eyeDir.y, FACE.eyeDir.z, -0.003);
 export const browCenter = (side) => headPoint(side * FACE.browDir.x, FACE.browDir.y, FACE.browDir.z, 0.006);
 export const mouthTop = () => headPoint(0, FACE.mouthDir.y, FACE.mouthDir.z, 0.0035);
 
