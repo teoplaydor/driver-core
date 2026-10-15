@@ -1,4 +1,4 @@
-// Меш земли и воды. В вершинах - "природный" цвет земли по биомам (под травой он совпадает
+// Меш земли (вода - в water.js). В вершинах - "природный" цвет земли по биомам (под травой он совпадает
 // с основанием травинок, поэтому дальние поля читаются как трава) и маски зон.
 // Мелкое (тропы с камешками и колеями, берег, полосы песчаника, искры снега, лужи) и ложный
 // рельеф (bump из шума через производные) рисует фрагментный шейдер.
@@ -6,7 +6,7 @@
 import * as THREE from 'three';
 import { Noise2D, smoothstep } from '../util/math.js';
 import {
-  N, CELL, MIN, WATER_Y, LAKE, getHeightGrid, heightAt, pathDist, slopeAt, zoneWeights, GRID_HALF,
+  N, CELL, MIN, WATER_Y, LAKE, getHeightGrid, pathDist, slopeAt, zoneWeights, GRID_HALF,
 } from './terrain-data.js';
 import { canopyDensity } from './nature/forest.js';
 import { GLSL_NOISE, NATURE } from './nature/shared.js';
@@ -346,89 +346,5 @@ export function buildTerrain({ lite = false } = {}) {
   const mesh = new THREE.Mesh(geo, mat);
   mesh.receiveShadow = true;
   mesh.name = 'terrain';
-  return mesh;
-}
-
-// Вода: прозрачность берётся из карты глубин, так берег получается мягким без depth-текстуры.
-export function buildWater(timeUniform) {
-  const size = LAKE.r * 3.6;
-  const res = 96;
-  const data = new Uint8Array(res * res);
-  for (let j = 0; j < res; j++) {
-    for (let i = 0; i < res; i++) {
-      const x = LAKE.x + (i / (res - 1) - 0.5) * size;
-      const z = LAKE.z + (j / (res - 1) - 0.5) * size;
-      const depth = WATER_Y - heightAt(x, z);
-      data[j * res + i] = Math.max(0, Math.min(255, Math.round((depth / 3.5) * 255)));
-    }
-  }
-  const tex = new THREE.DataTexture(data, res, res, THREE.RedFormat, THREE.UnsignedByteType);
-  tex.magFilter = THREE.LinearFilter;
-  tex.minFilter = THREE.LinearFilter;
-  tex.needsUpdate = true;
-
-  const uniforms = THREE.UniformsUtils.merge([
-    THREE.UniformsLib.fog,
-    {
-      uDepth: { value: tex },
-      uTime: timeUniform,
-      uShallow: { value: C('#7fd0c4') },
-      uDeep: { value: C('#2f7f9c') },
-      uFoam: { value: C('#ffffff') },
-    },
-  ]);
-  const mat = new THREE.ShaderMaterial({
-    uniforms,
-    transparent: true,
-    depthWrite: false,
-    fog: true,
-    vertexShader: `
-      #include <common>
-      #include <fog_pars_vertex>
-      varying vec2 vUv;
-      varying vec3 vWPos;
-      void main() {
-        vUv = uv;
-        vec4 wp = modelMatrix * vec4(position, 1.0);
-        vWPos = wp.xyz;
-        vec4 mvPosition = viewMatrix * wp;
-        gl_Position = projectionMatrix * mvPosition;
-        #include <fog_vertex>
-      }`,
-    fragmentShader: `
-      #include <common>
-      #include <fog_pars_fragment>
-      uniform sampler2D uDepth;
-      uniform float uTime;
-      uniform vec3 uShallow, uDeep, uFoam;
-      varying vec2 vUv;
-      varying vec3 vWPos;
-      float wh(vec2 p){ return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
-      float wn(vec2 p){
-        vec2 i = floor(p), f = fract(p);
-        f = f * f * (3.0 - 2.0 * f);
-        return mix(mix(wh(i), wh(i + vec2(1.0, 0.0)), f.x), mix(wh(i + vec2(0.0, 1.0)), wh(i + vec2(1.0, 1.0)), f.x), f.y);
-      }
-      void main() {
-        float d = texture2D(uDepth, vec2(vUv.x, 1.0 - vUv.y)).r;
-        float alpha = smoothstep(0.0, 0.06, d);
-        vec3 col = mix(uShallow, uDeep, smoothstep(0.02, 0.55, d));
-        vec2 p = vWPos.xz;
-        float rip = wn(p * 0.9 + vec2(uTime * 0.25, uTime * 0.18)) * 0.5 + wn(p * 2.3 - vec2(uTime * 0.32, uTime * 0.2)) * 0.5;
-        col *= 0.9 + 0.2 * rip;
-        float glint = pow(smoothstep(0.72, 0.95, rip), 3.0) * 0.55;
-        float foam = (1.0 - smoothstep(0.02, 0.11, d)) * (0.55 + 0.45 * sin(uTime * 1.3 + p.x * 1.2 + p.y * 0.9));
-        col = mix(col, uFoam, clamp(foam, 0.0, 1.0) * 0.7) + glint;
-        gl_FragColor = vec4(col, alpha * 0.88);
-        #include <tonemapping_fragment>
-        #include <colorspace_fragment>
-        #include <fog_fragment>
-      }`,
-  });
-  const mesh = new THREE.Mesh(new THREE.PlaneGeometry(size, size), mat);
-  mesh.rotation.x = -Math.PI / 2;
-  mesh.position.set(LAKE.x, WATER_Y, LAKE.z);
-  mesh.renderOrder = 1;
-  mesh.name = 'water';
   return mesh;
 }

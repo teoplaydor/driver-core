@@ -46,7 +46,7 @@ check('одиночный режим без ожидания сервера', aw
 check('демо-боты появились', (await page.evaluate(() => window.__cozy.game.remotes.size)) === 3);
 await page.waitForTimeout(1500);
 await page.evaluate(() => { document.getElementById('help').hidden = true; });
-await page.screenshot({ path: 'tests/out/preview-play.png' });
+await page.screenshot({ path: 'tests/out/preview-play.png', timeout: 180000 }); // программный рендер под нагрузкой медленный
 check('нет ошибок', errors.length === 0, errors.slice(0, 3).join(' | '));
 await browser.close();
 server.close();

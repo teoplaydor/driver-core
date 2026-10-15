@@ -35,7 +35,7 @@ const info = await page.evaluate(() => {
   const r = window.__cozy.renderer.info;
   return { calls: r.render.calls, triangles: r.render.triangles, geometries: r.memory.geometries, textures: r.memory.textures };
 });
-await page.screenshot({ path: out });
+await page.screenshot({ path: out, timeout: 180000 });
 console.log(`saved ${out} in ${((Date.now() - t0) / 1000).toFixed(1)}s`, JSON.stringify(info));
 if (problems.length) console.log('--- console ---\n' + [...new Set(problems)].slice(0, 20).join('\n'));
 await browser.close();

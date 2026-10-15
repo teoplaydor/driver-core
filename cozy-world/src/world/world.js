@@ -3,9 +3,11 @@
 
 import * as THREE from 'three';
 import { initTerrain } from './terrain-data.js';
-import { buildTerrain, buildWater } from './terrain.js';
+import { buildTerrain } from './terrain.js';
 import { Sky } from './sky.js';
 import { Atmosphere } from './atmosphere.js';
+import { Water } from './water.js';
+import { setRenderLite } from '../render/chunks.js';
 import { buildVegetation, HERO_MESHES } from './vegetation.js';
 import { GrassField } from './grass.js';
 import { Decor } from './decor.js';
@@ -15,8 +17,10 @@ import { Weather } from './weather.js';
 import { NATURE, MAX_BENDERS } from './nature/shared.js';
 
 export class World {
-  constructor(renderer, quality) {
+  // opts.post - кадр идёт через постобработку (тогда на high вода рисуется отдельным проходом с отражениями)
+  constructor(renderer, quality, opts = {}) {
     initTerrain();
+    setRenderLite(!!quality.renderLite); // до создания материалов и компиляции шейдеров
     this.renderer = renderer;
     this.quality = quality;
     this.scene = new THREE.Scene();
@@ -26,15 +30,17 @@ export class World {
     this.natureExclusions = [];
 
     this.atmosphere = new Atmosphere(this.scene, renderer);
-    this.atmosphere.setShadows(quality.shadow, quality.shadowRange);
+    this.atmosphere.setShadows(quality.shadow, quality.shadowRange, {
+      cascades: quality.shadowCascades ?? 1, nearSize: quality.shadowNear ?? 1024, nearRange: quality.shadowNearRange ?? 14,
+    });
 
-    this.sky = new Sky();
+    this.sky = new Sky({ detail: quality.skyDetail ?? 1 });
     this.scene.add(this.sky.dome, this.sky.clouds);
 
     this.terrain = buildTerrain({ lite: !!quality.terrainLite });
     this.scene.add(this.terrain);
-    this.water = buildWater(this.uTime);
-    this.scene.add(this.water);
+    this.water = new Water({ deferred: !!(quality.waterDeferred && opts.post), segments: quality.waterSegments ?? 64 });
+    this.scene.add(this.water.mesh);
 
     const shadows = quality.shadow > 0;
     this.vegetation = buildVegetation({
@@ -62,7 +68,7 @@ export class World {
     this.structures = buildStructures(this);
     this.scene.add(this.structures.group);
 
-    this.weather = new Weather(quality.trees);
+    this.weather = new Weather(quality.trees, { motes: !quality.renderLite });
     this.scene.add(this.weather.group);
   }
 
@@ -115,8 +121,9 @@ export class World {
   update(dt, time, camera, focus) {
     this.uTime.value = time;
     NATURE.uCamPos.value.copy(camera.position);
-    this.atmosphere.update(dt, focus);
+    this.atmosphere.update(dt, focus, camera);
     this.sky.update(camera, this.atmosphere, time);
+    this.water.update(this.atmosphere);
     const cx = camera.position.x, cz = camera.position.z;
     this.grass.update(cx, cz, 1);
     this.decor.update(cx, cz, 1);
