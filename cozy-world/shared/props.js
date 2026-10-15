@@ -15,7 +15,8 @@ export const KINDS = {
   cup: { r: 0.08, rest: 'up', hold: 'one', bounce: 0.1, mass: 0.3 },
   teapot: { r: 0.14, rest: 'up', hold: 'one', bounce: 0.1, mass: 0.8 },
   bat: { r: 0.14, rest: 'side', hold: 'bat', act: 'swing', bounce: 0.3, mass: 0.9 },
-  umbrella: { r: 0.16, rest: 'side', hold: 'umbrella', act: 'toggle', state: true, bounce: 0.2, mass: 0.8 },
+  // зонт держим перед грудью ('one'): в позе 'umbrella' (WS1) кулак уходит внутрь большой головы
+  umbrella: { r: 0.16, rest: 'side', hold: 'one', act: 'toggle', state: true, bounce: 0.2, mass: 0.8 },
   lantern: { r: 0.12, rest: 'up', hold: 'one', act: 'toggle', state: true, bounce: 0.1, mass: 0.9 },
   guitar: { r: 0.24, rest: 'flatZ', hold: 'two', act: 'strum', bounce: 0.2, mass: 1.3 },
   boombox: { r: 0.25, rest: 'up', hold: 'two', act: 'toggle', state: true, bounce: 0.12, mass: 1.8 },
@@ -35,7 +36,7 @@ export const STANDS = [
   { id: 'boomCrate', type: 'crateStand', x: 3.3, z: 3.3, ry: -0.49 }, // в просвете между брёвнами у костра
   { id: 'stump', type: 'stump', x: 6.4, z: 5.6 },
   { id: 'table', type: 'campTable', x: -3.4, z: 6.4, ry: 0.5 },
-  { id: 'umbRain', type: 'umbrellaStand', x: 2.2, z: 23.5 },
+  { id: 'umbRain', type: 'umbrellaStand', x: 3.1, z: 23.5 },
   { id: 'swing', type: 'swingSeat', x: -13.6, z: -20.5 }, // сиденье качелей у большого дерева (structures.js)
 ];
 const stand = (id) => STANDS.find((s) => s.id === id);

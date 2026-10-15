@@ -47,8 +47,8 @@ const H = (p, q = [0, 1, 0], z = [0, 0, 1], s = 1) => ({ p: V3(p), q: BQ(q, z), 
 const ID = [0, 1, 0];
 const HOLD = {
   bat: { tp: H([0, 0.3, 0]), fp: H([0, 0.3, 0]) },
-  // от первого лица зонт стоит почти вертикально над головой: видна ручка и край купола сверху
-  umbrella: { tp: H([0.155, 0.443, -0.028], [0.33, 0.94, -0.06]), fp: H([-0.085, 0.276, -0.044], [-0.29, 0.94, -0.15], [0, 0, 1], 0.62) },
+  // зонт в кулаке перед грудью, купол над головой; от первого лица (уменьшен) видна ручка и край купола сверху
+  umbrella: { tp: H([0.076, 0.531, 0.054], [0.14, 0.985, 0.1], [0, 0, 1], 1.15), fp: H([-0.068, 0.288, -0.038], [-0.227, 0.968, -0.128], [0, 0, 1], 0.62) },
   // от первого лица фонарь держим снизу за бак (иначе он висит ниже кадра)
   lantern: { tp: H([0, -0.205, 0], ID, [0.5, 0, 0.85]), fp: H([-0.01, 0.085, -0.03], ID, [0.45, 0, 0.9], 0.68) },
   mug: { tp: H([-0.085, 0, 0]), fp: H([-0.105, 0, 0.01]) },
@@ -148,6 +148,13 @@ function glowTexture() {
   gr.addColorStop(1, 'rgba(255,160,60,0)');
   g.fillStyle = gr;
   g.fillRect(0, 0, 64, 64);
+  // нижняя половина гаснет быстрее: ореол не обрезается землёй/столом жёсткой линией
+  const img = g.getImageData(0, 0, 64, 64), d = img.data;
+  for (let y = 33; y < 64; y++) {
+    const k = Math.max(0, 1 - ((y - 32) / 22) ** 1.5);
+    for (let x = 0; x < 64; x++) d[(y * 64 + x) * 4 + 3] *= k;
+  }
+  g.putImageData(img, 0, 0);
   const t = new THREE.CanvasTexture(c);
   t.colorSpace = THREE.SRGBColorSpace;
   return t;
@@ -759,6 +766,7 @@ export class Props {
 
   _attach(p, avatar) {
     const hold = HOLD[p.kind].tp;
+    p.holdScale = hold.s;
     if (avatar?.anchor) {
       const a = avatar.anchor(p.k.hold);
       a.updateWorldMatrix(true, false);
@@ -868,7 +876,7 @@ export class Props {
     m.visible = true;
     m.position.copy(p.pos);
     m.quaternion.copy(p.quat);
-    m.scale.setScalar(p.scale);
+    m.scale.setScalar(p.scale * (p.holdScale || 1));
   }
 
   _umbMorph(style) {
@@ -931,7 +939,7 @@ export class Props {
         this.group.add(s);
       }
       s.visible = true;
-      s.position.copy(_v);
+      s.position.copy(_v).addScaledVector(_v2.subVectors(cam.position, _v).normalize(), 0.22); // чуть ближе к камере
       const fl = 1 + Math.sin(this.game.time * 9 + n * 2) * 0.04 + Math.sin(this.game.time * 23 + n) * 0.03;
       s.scale.setScalar(0.72 * fl);
       n++;

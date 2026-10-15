@@ -94,7 +94,7 @@ try {
     const r = window.__cozy.game.remotes.get(id);
     return p.held && !!p.solo?.visible && r && p.pos.distanceTo(r.avatar.root.position) < 2.2;
   }, aId));
-  check('holdKind Alice = umbrella', await g(A, () => window.__cozy.game.holdKind === 'umbrella'));
+  check('holdKind Alice = one (зонт в руке)', await g(A, () => window.__cozy.game.holdKind === 'one'));
   await g(A, () => { const P = window.__cozy.game.props; P.release(0); P._rest(P.byId.get('umb1')); P.grab(P.byId.get('boombox1')); });
   await A.page.waitForTimeout(500);
   await g(A, () => { const P = window.__cozy.game.props; P.actT = 0; P.use(); });
