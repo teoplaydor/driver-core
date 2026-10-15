@@ -281,7 +281,7 @@ class TreeLOD {
         cell.push(type, i);
       });
       const [sw, sy0] = SWAY[type];
-      const nearMat = plantMaterial({ sway: sw, swayY0: sy0, key: `tree-${type}` });
+      const nearMat = plantMaterial({ sway: sw, swayY0: sy0 });
       const near = new THREE.InstancedMesh(detailedGeometry(type, detail), nearMat, n);
       near.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
       near.setColorAt(0, new THREE.Color(1, 1, 1));
@@ -290,6 +290,7 @@ class TreeLOD {
       near.frustumCulled = false; // отсекаем сами, поштучно
       near.castShadow = true;
       near.receiveShadow = true;
+      near.customDepthMaterial = nearMat.userData.depth;
       near.name = `trees-${type}`;
       near.matrixAutoUpdate = false;
       group.add(near);
@@ -298,7 +299,7 @@ class TreeLOD {
     }
 
     // дальний LOD: все типы чанка склеены в одну статичную геометрию (1 draw call на чанк)
-    const farMat = plantMaterial({ sway: 0.006, swayY0: 2.0, far: true, occlusion: false, textured: false, anchored: true, key: 'treefar' });
+    const farMat = plantMaterial({ sway: 0.006, swayY0: 2.0, far: true, occlusion: false, textured: false, anchored: true });
     const tpls = {};
     for (const type of Object.keys(this.byType)) tpls[type] = compactTemplate(farGeometry(type));
     for (const items of chunked(trees, FAR_CHUNK)) {
@@ -435,7 +436,9 @@ export function buildHeroTree(scale = 2.4, tint = '#6fbb42') {
     const k = A.getX(i);
     C.setXYZ(i, C.getX(i) * (1 + (t.r - 1) * k), C.getY(i) * (1 + (t.g - 1) * k), C.getZ(i) * (1 + (t.b - 1) * k));
   }
-  const mesh = new THREE.Mesh(geo, plantMaterial({ sway: 0.006, swayY0: 2.6, key: 'hero' }));
+  const mat = plantMaterial({ sway: 0.006, swayY0: 2.6 });
+  const mesh = new THREE.Mesh(geo, mat);
+  mesh.customDepthMaterial = mat.userData.depth;
   mesh.castShadow = true;
   mesh.receiveShadow = true;
   mesh.name = 'hero-tree';

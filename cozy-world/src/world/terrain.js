@@ -143,6 +143,7 @@ vec3 tSx = dFdx(-vViewPosition), tSy = dFdy(-vViewPosition);
 float tViewD = length(vViewPosition);
 float tFw1 = 1.0 - smoothstep(14.0, 32.0, tViewD);
 float tFw2 = 1.0 - smoothstep(6.0, 14.0, tViewD);
+float tFwB = 1.0 - smoothstep(2.5, 7.0, tViewD); // рельеф камешков - только вблизи
 float tCanyon = vMask.x, tSnow = vMask.y, tRain = vMask.z;
 float n1 = tFbm(tp * 0.35);
 float n2 = nzValue(tp * 1.7);
@@ -223,8 +224,9 @@ if (walkM > 0.001) {
   float rut = (1.0 - smoothstep(0.1, 0.32, abs(pd - 0.62))) * (0.6 + 0.4 * n2) * (1.0 - plazaM);
   ground *= 1.0 - rut * 0.22;
   // камешки
-  vec3 pb = tPebble(tp, 3.1, 0.2 - plazaM * 0.08, tFw1);
-  vec3 pbc = mix(${L('#a49b8c')}, ${L('#e1d8c8')}, pb.z);
+  vec3 pb = tPebble(tp, 3.1, 0.2 - plazaM * 0.13, tFw1);
+  // камешек: светлый верх, тёмная кромка-тень снизу (без резкого bump - вдали он рисует "дырки")
+  vec3 pbc = mix(${L('#b3aa9a')}, ${L('#ebe3d4')}, pb.z) * (0.8 + 0.25 * pb.y);
   ground = mix(ground, pbc, pb.x * 0.85);
   vec3 pb2 = tPebble(tp + 7.3, 8.0, 0.14 * (1.0 - plazaM * 0.7), tFw2);
   ground = mix(ground, mix(${L('#9a8f80')}, ${L('#d9cdb8')}, pb2.z), pb2.x * 0.45);
@@ -236,7 +238,7 @@ if (walkM > 0.001) {
   tPuddle = pz;
   ground = mix(ground, ground * ${L('#4a4640')}, pz);
   diffuseColor.rgb = mix(diffuseColor.rgb, ground, walkM);
-  tH = mix(tH, n3 * 0.3 + pb.y * 1.4 + pb2.y * 0.6 - rut * 0.8, walkM * (1.0 - pz));
+  tH = mix(tH, n3 * 0.3 + (pb.y * 0.5 + pb2.y * 0.25) * tFwB - rut * 0.8, walkM * (1.0 - pz));
   tBumpK = mix(tBumpK, 1.1, walkM);
   tRough = mix(tRough, 0.95, walkM);
 }

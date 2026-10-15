@@ -382,13 +382,18 @@ function lilyPad(seed, flower) {
   const b = new PlantBuilder();
   const rand = mulberry32(seed);
   const segs = 14, notch = 0.45;
-  const green = C('#3f8a34'), light = C('#6fb04a'), edge = C('#7a8f3a');
+  const green = C('#4a9a3a'), light = C('#86c457'), edge = C('#6f9a3a');
   const n = V(0, 1, 0);
+  // лист: светлый центр, средняя полоса, тёмно-зелёная кайма; жилки - чередованием оттенка секторов
   for (let i = 0; i < segs; i++) {
     const a0 = notch / 2 + (i / segs) * (TAU - notch), a1 = notch / 2 + ((i + 1) / segs) * (TAU - notch);
     const p0 = V(Math.cos(a0), 0.015, Math.sin(a0)), p1 = V(Math.cos(a1), 0.015, Math.sin(a1));
+    const m0 = p0.clone().multiplyScalar(0.62).setY(0.018), m1 = p1.clone().multiplyScalar(0.62).setY(0.018);
     const ctr = V(0, 0.02, 0);
-    b.vert(ctr, n, light, WHITE_UV, 1, 0); b.vert(p1, n, edge, WHITE_UV, 1, 0); b.vert(p0, n, edge, WHITE_UV, 1, 0);
+    const mid = green.clone().multiplyScalar(i % 2 ? 1 : 0.92);
+    b.vert(ctr, n, light, WHITE_UV, 1, 0); b.vert(m1, n, mid, WHITE_UV, 1, 0); b.vert(m0, n, mid, WHITE_UV, 1, 0);
+    b.vert(m0, n, mid, WHITE_UV, 1, 0); b.vert(m1, n, mid, WHITE_UV, 1, 0); b.vert(p1, n, edge, WHITE_UV, 1, 0);
+    b.vert(m0, n, mid, WHITE_UV, 1, 0); b.vert(p1, n, edge, WHITE_UV, 1, 0); b.vert(p0, n, edge, WHITE_UV, 1, 0);
   }
   if (flower) {
     const pink = C('#f29ac0'), white = C('#fdf3f6');
@@ -461,9 +466,10 @@ function sagebrush(seed) {
     const top = V(Math.cos(a) * 0.2, 0.1 + rand() * 0.06, Math.sin(a) * 0.2);
     stem(b, V(0, 0, 0), top, 0.01, twig, 0.2);
   }
-  // плотный серо-зелёный шар из мелких карточек, прижатый к земле
+  // плотный серо-зелёный шар из мелких карточек, прижатый к земле, с тёмной сердцевиной
   const sage = C('#7c8a5c'), sageL = C('#aab486');
   const cc = V(0, 0.17, 0);
+  blob(b, 0.2, 1, seed + 3, cc, V(1.1, 0.75, 1.1), (q, n, c) => c.copy(sage).multiplyScalar(0.62 + 0.25 * Math.max(0, n.y)), 0, 0.2);
   for (let i = 0; i < 20; i++) {
     const a = rand() * TAU, e = rand() * 1.3 - 0.25;
     const d = V(Math.cos(a) * Math.cos(e), Math.sin(e), Math.sin(a) * Math.cos(e));
@@ -763,11 +769,17 @@ export class Decor {
         if (y > WATER_Y - 0.5 && y < WATER_Y + 0.15) {
           if (ln < -0.05 || r1 > 0.55) continue;
           add('reeds', x, y - 0.05, z, 0.8 + rand() * 0.5);
-        } else if (y < WATER_Y - 0.55 && y > WATER_Y - 2.4) {
-          if (ln < 0.1 || r1 > 0.45) continue;
-          const fl = rand() < 0.18;
-          add(fl ? 'lilyFlower' : 'lily', x, WATER_Y + 0.02, z, 0.28 + rand() * 0.2, { sy: 1 });
         }
+      }
+      // кувшинки - отдельной выборкой: колониями в неглубокой воде
+      for (let i = 0; i < Math.round(420 * D); i++) {
+        const x = x0 + rand() * CH, z = z0 + rand() * CH;
+        const r1 = rand(), r2 = rand(), r3 = rand();
+        const y = heightAt(x, z);
+        if (!(y < WATER_Y - 0.45 && y > WATER_Y - 2.6)) continue;
+        if (lilyNoise.fbm(x * 0.07 + 5, z * 0.07, 2) < -0.02 || r1 > 0.7) continue;
+        if (segDist(x, z, this.pier) < 2.4) continue;
+        add(r2 < 0.22 ? 'lilyFlower' : 'lily', x, WATER_Y + 0.02, z, 0.36 + r3 * 0.3, { sy: 1 });
       }
     }
     // осень: ковёр листьев и тыквы
@@ -880,6 +892,7 @@ export class Decor {
       g.boundingSphere.radius += 1;
       const mesh = new THREE.Mesh(g, this.mat);
       mesh.castShadow = big && this.shadows;
+      if (mesh.castShadow) mesh.customDepthMaterial = this.mat.userData.depth;
       mesh.receiveShadow = true;
       mesh.matrixAutoUpdate = false;
       mesh.name = big ? 'decor-big' : 'decor-small';
