@@ -494,18 +494,21 @@ export class Animator {
       if (air > 0.001) f.ankle.lerp(f.air, air);
     }
     // 2) таз опускаем, если стопа в опоре не достаёт
-    let need = 0;
+    let need = 0, needStance = 0;
     for (const f of this.feet) {
       const hip = this.hip[f.side < 0 ? 0 : 1];
       const dx = f.ankle.x - hip.x, dz = f.ankle.z - hip.z;
       const reach = LEG * 0.985;
       const h2 = reach * reach - dx * dx - dz * dz;
       const maxHip = f.ankle.y + Math.sqrt(Math.max(0.0004, h2));
-      const w = f.mode === 0 ? 1 : 0.35 + 0.65 * sstep(0.6, 1, f.prog); // к постановке стопы таз заранее опускается
+      const w = f.mode === 0 ? 1 : 0.35;
       need = Math.max(need, (hip.y - maxHip) * w);
+      if (f.mode === 0) needStance = Math.max(needStance, hip.y - maxHip);
     }
     need = Math.max(0, Math.min(0.22, need)) * (1 - this.airW);
     this.drop = need > this.drop ? damp(this.drop, need, 40, dt) : damp(this.drop, need, 12, dt);
+    // опорная стопа обязана доставать землю в тот же кадр (иначе на склоне первый кадр опоры она висит)
+    this.drop = Math.max(this.drop, Math.max(0, Math.min(0.22, needStance)) * (1 - this.airW));
     b[B.pelvis].position.y -= this.drop;
     for (const h of this.hip) h.y -= this.drop;
     for (const s of this.shoulder) s.y -= this.drop;
