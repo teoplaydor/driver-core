@@ -293,7 +293,7 @@ function baseUniforms(box) {
 }
 
 export class Weather {
-  // quality - доля частиц; motes - пылинки и пыльца (на слабых устройствах выключены)
+  // quality - доля частиц; motes - пылинки, пыльца и светлячки (на слабых устройствах выключены)
   constructor(quality = 1, { motes = true } = {}) {
     this.group = new THREE.Group();
     this.group.name = 'weather';
@@ -343,7 +343,7 @@ export class Weather {
       this.pollen = add('pollen', new THREE.Points(points(n(420)), material(POINT_VERT, POINT_FRAG, u, { blending: THREE.AdditiveBlending })), u);
     }
     // светлячки у костра
-    {
+    if (motes) {
       const u = { ...baseUniforms(0), uCenter: { value: new THREE.Vector3(CAMPFIRE.x, HUB_H, CAMPFIRE.z) } };
       this.flies = add('fireflies', new THREE.Points(points(n(46)), material(FLY_VERT, FLY_FRAG, u, { blending: THREE.AdditiveBlending })), u);
     }
@@ -381,6 +381,6 @@ export class Weather {
     // светлячки - только у костра
     const dx = camera.position.x - CAMPFIRE.x, dz = camera.position.z - CAMPFIRE.z;
     const fly = out * (1 - Math.min(1, Math.max(0, (Math.hypot(dx, dz) - 40) / 20)));
-    if (this._set(this.flies, fly)) this.flies.u.uColor.value.setRGB(1.0, 0.92, 0.42);
+    if (this.flies && this._set(this.flies, fly)) this.flies.u.uColor.value.setRGB(1.0, 0.92, 0.42);
   }
 }

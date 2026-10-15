@@ -6,7 +6,7 @@
 // глубине) + aoSamples, bloomLevels/bloomStart (мипов bloom и делитель разрешения первого), aa ('smaa' | 'fxaa' | null),
 // shadowCascades (2 - ближний чёткий каскад shadowNear/shadowNearRange + дальний), waterDeferred (вода с экранными
 // отражениями и преломлением), waterSegments (волны вершинами), skyDetail (октавы облаков, число облаков),
-// renderLite (короткие шейдеры: туман только по расстоянию, без пылинок и пыльцы).
+// renderLite (короткие шейдеры: туман только по расстоянию, без пылинок, пыльцы и светлячков).
 
 export const QUALITY = {
   high: {

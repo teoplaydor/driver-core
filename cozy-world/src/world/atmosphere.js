@@ -162,7 +162,7 @@ export class Atmosphere {
     // лишние объекты, перед ближним каскадом - включаем обратно.
     const g = new THREE.BufferGeometry();
     g.setAttribute('position', new THREE.Float32BufferAttribute([0, 0, 0, 0, 0, 0, 0, 0, 0], 3));
-    g.setDrawRange(0, 0);
+    g.setDrawRange(0, -1); // отрицательное число вершин: three пропускает отрисовку, но onBeforeShadow вызывается
     this._hook = new THREE.Mesh(g, new THREE.MeshBasicMaterial({ colorWrite: false, depthWrite: false }));
     this._hook.name = 'shadow-cascade-hook';
     this._hook.castShadow = true;
@@ -217,6 +217,7 @@ export class Atmosphere {
     if (size <= 0) {
       this.sun.castShadow = false;
       if (this.sunFar) this.sunFar.castShadow = false;
+      if (this._hook.parent) this.scene.remove(this._hook);
       return;
     }
     this.sun.castShadow = true;
