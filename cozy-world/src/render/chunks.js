@@ -88,7 +88,7 @@ const FOG_PARS_FRAGMENT = /* glsl */`
 		#ifdef COZY_LITE
 		float dl = ( cozyFogA.x > 0.0 ? cozyFogA.x : legacyDensity ) * length( ray );
 		return 1.0 - exp( - dl * dl );
-		#endif
+		#else
 		float dist = length( ray );
 		float dens = cozyFogA.x > 0.0 ? cozyFogA.x : legacyDensity;
 		float dd = dens * dist;
@@ -105,16 +105,18 @@ const FOG_PARS_FRAGMENT = /* glsl */`
 			}
 		}
 		return 1.0 - exp( -optical );
+		#endif
 	}
 
 	// цвет дымки: к солнцу теплее и светлее (рассеяние вперёд)
 	vec3 cozyFogTint() {
 		#ifdef COZY_LITE
 		return fogColor;
-		#endif
+		#else
 		vec3 dir = normalize( vFogWorld - cameraPosition );
 		float s = max( dot( dir, cozyFogC.xyz ), 0.0 );
 		return fogColor + cozyFogB.rgb * ( cozyFogB.a * ( s * s * s * s * 0.45 + pow( s, 24.0 ) * 0.9 ) );
+		#endif
 	}
 #endif
 `;

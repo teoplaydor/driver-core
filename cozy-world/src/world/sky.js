@@ -152,7 +152,8 @@ export class Sky {
       depthWrite: false,
       depthFunc: THREE.LessEqualDepth,
       fog: false,
-      defines: { OCTAVES: octaves },
+      // на слабых (detail < 0.6) без процедурного слоя: небо - градиент, солнце и кучевые облака
+      defines: detail >= 0.6 ? { OCTAVES: octaves, SKY_CIRRUS: '' } : { OCTAVES: octaves },
       vertexShader: /* glsl */`
         varying vec3 vDir;
         void main() {
@@ -181,6 +182,7 @@ export class Sky {
           float veil = 1.0 - cover * 0.85;
           col += uSunColor * (smoothstep(0.99925, 0.99965, s) * 24.0 * veil + pow(s, 260.0) * 2.2 * veil + pow(s, 32.0) * 0.3 + pow(s, 5.0) * 0.08);
           // процедурный слой: перистые полосы в ясную погоду, сплошная пелена - в дождь
+          #ifdef SKY_CIRRUS
           if (y > -0.02 && cover > 0.01) {
             vec2 p = d.xz / (h + 0.09) * 0.55 + vec2(uCloud.z * 0.006, uCloud.z * 0.0025);
             // перистые: вытянуты по диагонали ветра и изогнуты (без прямых «столбов» к горизонту)
@@ -198,6 +200,10 @@ export class Sky {
             cc = mix(cc, hor, smoothstep(0.25, 0.0, h) * 0.7);
             col = mix(col, cc, c);
           }
+          #else
+          // без слоя: в пасмурную погоду небо просто серее
+          col = mix(col, mix(uMid, vec3(0.42, 0.47, 0.54), uCloud.y), cover * uCloud.y * smoothstep(-0.02, 0.2, y) * 0.8);
+          #endif
           col = mix(col, uFog * 0.15, uDim);
           gl_FragColor = vec4(col, 1.0);
           #include <tonemapping_fragment>
@@ -212,6 +218,7 @@ export class Sky {
     this._buildClouds(detail);
   }
 
+  // detail < 0.6: облака без шума по краю (дешевле на слабых устройствах)
   _buildClouds(detail) {
     const rand = mulberry32(99);
     const count = Math.round(26 * Math.max(0.6, detail));
@@ -250,6 +257,7 @@ export class Sky {
       transparent: true,
       depthWrite: false,
       fog: false,
+      defines: detail >= 0.6 ? { CLOUD_EDGE_NOISE: '' } : {},
       vertexShader: /* glsl */`
         attribute vec4 aCloud;  // угол, расстояние, высота, ширина
         attribute vec4 aCloud2; // ячейка атласа, высота/ширина, непрозрачность, зерно
@@ -298,8 +306,12 @@ export class Sky {
         void main() {
           vec4 t = texture2D(uAtlas, vUv);
           // рваный край: шум «съедает» тонкие места
+          #ifdef CLOUD_EDGE_NOISE
           vec2 q = vUv * vec2(48.0, 24.0) + vSeed * 17.0 + uTime * 0.01;
           float n = n2(q) * 0.6 + n2(q * 2.3) * 0.4;
+          #else
+          float n = 0.5;
+          #endif
           float a = smoothstep(0.08, 0.55, t.a - (n - 0.5) * 0.45 * (1.0 - t.g)) * vAlpha;
           if (a < 0.004) discard;
           vec3 dir = normalize(vDir);
