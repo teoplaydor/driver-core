@@ -207,6 +207,9 @@ export class Game {
       .on('owner', (m) => this.onOwner?.(m))
       .on('deny', (m) => this.onDeny?.(m))
       .on('rtc', (m) => this.onRtc?.(m))
+      .on('use', (m) => this.onPropUse?.(m)) // WS3: действия предметами, состояние, удар битой
+      .on('pst', (m) => this.onPropState?.(m))
+      .on('hit', (m) => this.onHit?.(m))
       .on('close', () => this.reconnect());
   }
 
@@ -387,6 +390,7 @@ export class Game {
 
     this.bots?.update(dt);
     this.remotes.update(dt, this.camera);
+    this.props.lateUpdate?.(dt); // WS3: предметы в руках крепятся к якорям после анимации аватаров
     this.voice.update(dt);
     this.audio.update(this.world.atmosphere, this.camera, player.pos);
     this.sendState();

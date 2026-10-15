@@ -5,12 +5,13 @@
 // только формат, диапазоны, частоту сообщений и владение предметами.
 
 import { WebSocketServer } from 'ws';
-import { PROP_IDS } from '../shared/props.js';
+import { PROP_IDS, STATE_IDS, USE_ACTIONS } from '../shared/props.js';
 
 const MAX_PLAYERS = 16;
 const TICK_MS = 66; // ~15 снапшотов в секунду
 const ROOM_TTL_MS = 5 * 60 * 1000; // пустая комната живёт 5 минут, чтобы не терять переставленные предметы
 const ROOM_RE = /^[a-zа-я0-9_-]{1,12}$/;
+const HIT_MS = 400; // удар битой по игроку — не чаще раза в 0.4 с от одного игрока
 
 const num = (v, min, max) => (typeof v === 'number' && Number.isFinite(v) ? Math.min(max, Math.max(min, v)) : null);
 const round = (v, k = 100) => Math.round(v * k) / k;
@@ -50,7 +51,7 @@ class Room {
   constructor(code) {
     this.code = code;
     this.clients = new Map();
-    this.props = new Map(); // id -> { p, q, owner, held, dirty }
+    this.props = new Map(); // id -> { p, q, owner, held, dirty, s }
     this.emptyAt = 0;
   }
 
@@ -129,7 +130,7 @@ export function attachGameServer(httpServer, { path = '/ws', iceServers } = {}) 
         const players = [...room.clients.values()].filter((c) => c !== client).map((c) => ({
           id: c.id, name: c.name, look: c.look, p: c.st.p, r: c.st.r, q: c.st.q, a: c.st.a, hk: c.st.hk,
         }));
-        const props = [...room.props].map(([id, pr]) => ({ id, p: pr.p, q: pr.q, o: pr.owner, h: pr.held ? 1 : 0 }));
+        const props = [...room.props].map(([id, pr]) => ({ id, p: pr.p, q: pr.q, o: pr.owner, h: pr.held ? 1 : 0, s: pr.s }));
         send({ t: 'welcome', id: client.id, room: code, players, props, ice });
         room.broadcast({ t: 'join', id: client.id, name: client.name, look: client.look }, client);
         return;
@@ -204,6 +205,42 @@ export function attachGameServer(httpServer, { path = '/ws', iceServers } = {}) 
           pr.held = false;
           pr.dirty = false;
           room.broadcast({ t: 'owner', id: m.id, o: null, h: 0, p: pr.p, q: pr.q });
+          break;
+        }
+        case 'kick': { // удар битой по предмету: доигрывает тот, кто ударил, если предмет не в чужих руках
+          if (typeof m.id !== 'string' || !PROP_IDS.has(m.id)) return;
+          let pr = room.props.get(m.id);
+          if (!pr) { pr = { p: null, q: null, owner: null, held: false, dirty: false }; room.props.set(m.id, pr); }
+          const ownerAlive = pr.owner && room.clients.has(pr.owner);
+          if (ownerAlive && pr.owner !== client.id) { send({ t: 'deny', id: m.id }); return; }
+          pr.owner = client.id;
+          pr.held = false;
+          room.broadcast({ t: 'owner', id: m.id, o: client.id, h: 0 });
+          break;
+        }
+        case 'use': { // действие предметом в руках — остальным для анимации и звука
+          const pr = room.props.get(m.id);
+          if (!pr || pr.owner !== client.id || !USE_ACTIONS.includes(m.a)) return;
+          const out = { t: 'use', id: m.id, a: m.a, from: client.id };
+          if (Number.isInteger(m.c) && m.c >= 0 && m.c < 16) out.c = m.c;
+          room.broadcast(out, client);
+          break;
+        }
+        case 'pst': { // состояние предмета (зонт раскрыт, фонарь, музыка): хранится и отдаётся в welcome
+          const pr = room.props.get(m.id);
+          if (!pr || pr.owner !== client.id || !STATE_IDS.has(m.id) || (m.s !== 0 && m.s !== 1)) return;
+          pr.s = m.s;
+          room.broadcast({ t: 'pst', id: m.id, s: m.s }, client);
+          break;
+        }
+        case 'hit': { // удар битой по игроку: отдачу считает сам получатель
+          const target = typeof m.to === 'string' ? room.clients.get(m.to) : null;
+          const v = parseVec(m.v, 3, 12);
+          if (!target || target === client || !v) return;
+          const now = Date.now();
+          if (now - (client.hitAt || 0) < HIT_MS) return;
+          client.hitAt = now;
+          if (target.ws.readyState === 1) target.ws.send(JSON.stringify({ t: 'hit', from: client.id, v: v.map((x) => round(x)) }));
           break;
         }
         case 'rtc': { // сигнальные сообщения WebRTC: просто пересылаем адресату

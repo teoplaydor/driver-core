@@ -47,6 +47,52 @@ const res = await page.evaluate(async () => {
   // 4. игрок рядом с ящиком не проходит сквозь него (коллизия ящика у костра не нужна), а вот скамейка в беседке держит
   const tableTop = G.world.collisions.supportY(27, -19, 1.2, 0.45);
   out.tableTop = +tableTop.toFixed(3);
+
+  // ось Y предмета в мире: насколько она смотрит вверх
+  const upY = (q) => 1 - 2 * (q.x * q.x + q.z * q.z);
+  const ground = (x, z) => G.world.collisions.supportY(x, z, 50);
+
+  // 5. бита падает с вращением и ложится на бок, не проваливается и в покое не дрожит
+  const bat = P.byId.get('bat4');
+  bat.owner = 'me'; bat.held = false; bat.restT = 0;
+  bat.pos.set(2, 3, 14); bat.vel.set(1, 0, -1); bat.ang.set(4, 1, 7);
+  step(bat, 10);
+  out.bat = { owner: bat.owner, axisY: +upY(bat.quat).toFixed(3), h: +(bat.pos.y - ground(bat.pos.x, bat.pos.z)).toFixed(3) };
+  const rest0 = bat.pos.clone();
+  bat.owner = 'me'; bat.restT = 0;
+  step(bat, 1);
+  out.bat.jitter = +bat.pos.distanceTo(rest0).toFixed(4);
+  out.bat.again = bat.owner;
+
+  // 6. кружка и чайник, брошенные с вращением, встают ровно
+  for (const id of ['mug1', 'teapot1']) {
+    const m = P.byId.get(id);
+    m.owner = 'me'; m.held = false; m.restT = 0;
+    m.pos.set(-2, 2.5, 13); m.vel.set(0.5, 1, 0.5); m.ang.set(6, 2, -5);
+    step(m, 8);
+    out[id] = { owner: m.owner, up: +upY(m.quat).toFixed(4), h: +(m.pos.y - ground(m.pos.x, m.pos.z)).toFixed(3) };
+  }
+
+  // 7. фрисби и мяч: одинаковый бросок (сила 1) из одной точки — фрисби планирует и улетает дальше
+  const throwFrom = (id) => {
+    const p = P.byId.get(id);
+    G.player.pos.set(0, ground(0, 9.5), 9.5); G.player.yaw = Math.PI; G.player.pitch = 0; G.player.vel.set(0, 0, 0);
+    P.grab(p);
+    p.pos.set(0, G.player.pos.y + 1.2, 9.9);
+    P._launch(p, 1);
+    const x0 = p.pos.x, z0 = p.pos.z;
+    let land = null, maxY = p.pos.y;
+    for (let i = 0; i < 600 && p.owner === 'me'; i++) {
+      const vy = p.vel.y;
+      P._simulate(p, 1 / 60);
+      maxY = Math.max(maxY, p.pos.y);
+      // первое касание земли: падение сменилось отскоком или остановкой
+      if (!land && vy < -0.5 && p.vel.y > vy + 0.4) land = Math.hypot(p.pos.x - x0, p.pos.z - z0);
+    }
+    return { land: +(land || 0).toFixed(2), rest: +Math.hypot(p.pos.x - x0, p.pos.z - z0).toFixed(2), owner: p.owner, maxY: +maxY.toFixed(2) };
+  };
+  out.frisbee = throwFrom('frisbee1');
+  out.ballThrow = throwFrom('ball3');
   return out;
 });
 console.log(JSON.stringify(res, null, 1));
@@ -59,6 +105,15 @@ ok(res.crate.owner === null && res.crate.y > 0 && res.crate.y < 3, 'ящик н�
 ok(res.pawn.owner === null && Math.abs(res.pawn.cellX - 2) < 0.01 && Math.abs(res.pawn.cellZ - 4) < 0.01, 'пешка не встала в клетку');
 ok(Math.abs(res.pawn.y - 1.705) < 0.01, `пешка стоит на высоте ${res.pawn.y}, а должна на доске (1.705)`);
 ok(Math.abs(res.tableTop - 1.63) < 0.02, `верх стола с доской ${res.tableTop}`);
+ok(res.bat.owner === null && Math.abs(res.bat.axisY) < 0.1, `бита не легла на бок (ось Y: ${res.bat.axisY})`);
+ok(res.bat.h > 0.02 && res.bat.h < 0.08, `бита на высоте ${res.bat.h} над землёй (провалилась или висит)`);
+ok(res.bat.jitter < 0.003 && res.bat.again === null, `бита дрожит в покое: сдвиг ${res.bat.jitter}`);
+for (const id of ['mug1', 'teapot1']) {
+  ok(res[id].owner === null && res[id].up > 0.999, `${id} не встал ровно (up ${res[id].up})`);
+  ok(res[id].h > 0.03 && res[id].h < 0.12, `${id} на высоте ${res[id].h} над землёй`);
+}
+ok(res.frisbee.land > res.ballThrow.land * 1.5, `фрисби (${res.frisbee.land} м) летит не дальше мяча (${res.ballThrow.land} м)`);
+ok(res.frisbee.owner === null && res.ballThrow.owner === null, 'после броска предметы не успокоились');
 ok(errors.length === 0, `ошибки: ${errors.join(' | ')}`);
 await browser.close();
 console.log(fails.length ? `ПРОВАЛ:\n- ${fails.join('\n- ')}` : 'физика ок');
