@@ -159,7 +159,7 @@ function scatter() {
       }
     } else if (rand() < 0.05 && r > 12) {
       const s = 0.35 + rand() * 0.9;
-      const v = 0.42 + rand() * 0.24; // серый камень, а не белый (на солнце светлые тона выгорают)
+      const v = 0.3 + rand() * 0.2; // серый камень, а не белый (на солнце светлые тона выгорают)
       const c = w.canyon > 0.3 ? new THREE.Color().setHSL(0.07, 0.55, 0.45 + rand() * 0.15) : new THREE.Color(v, v * 1.02, v * 1.06);
       const mossy = w.canyon < 0.3 && w.winter < 0.5 && rand() < 0.5;
       (mossy ? out.rockMoss : out.rock).push({ x, y: y - s * 0.2, z, ry: rand() * TAU, sx: s * 1.2, sy: s * 0.75, sz: s, color: c, cr: s * 0.7 });
