@@ -194,6 +194,8 @@ public final class MainActivity extends Activity implements Engine.Listener, Vie
         super.onStart();
         engine.uiVisible = true;
         engine.ensureLoaded();
+        // the watch link's service may use the microphone (the watch as a headset) once the app has been seen
+        WristService.promote(this);
     }
 
     @Override

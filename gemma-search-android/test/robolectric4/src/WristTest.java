@@ -501,6 +501,8 @@ public class WristTest {
             assertTrue(dl, lm.find());
             System.out.println("in the headphones: the answer began " + lm.group(1) + " ms after the voice, spoken over — stopped");
             cb.onCharacteristicWriteRequest(watch, 410, samples, false, true, 0, WristGesture.voiceEnd(22, voice.length + more.length, 2300));
+
+            headset(app, server, watch, samples, cb, am);
         } finally {
             java.lang.reflect.Method stop = Class.forName("io.github.teoplaydor.semsearch.app.Talk").getDeclaredMethod("stop");
             stop.setAccessible(true);
@@ -509,6 +511,157 @@ public class WristTest {
             server.messages = null;
             e.prefs().edit().putBoolean("wrist_talk", false).apply();
             mock.destroy();
+        }
+    }
+
+    /** The last settings told to the watch. */
+    static int lastConfig(WristLink.Server server) {
+        synchronized (server.messages) {
+            for (int i = server.messages.size() - 1; i >= 0; i--) {
+                byte[] m = server.messages.get(i);
+                if (m[0] == WristGesture.EV_CONFIG) return m[1] & 0xff;
+            }
+        }
+        return -1;
+    }
+
+    /**
+     * The watch as a Bluetooth headset (its calls through the watch on): offered to the watch once it is connected as one;
+     * at the mouth the watch only says «started» (no codec) — the phone opens the call's channel to it (communication
+     * device, voice-call mode), its microphone's voice goes to Gemini as it is said, all the time, the answer plays as
+     * a stream on the call's channel (none in pieces to the watch), a rising tone when Gemini listens, spoken over —
+     * stopped; the hand down — the channel released, the phone's sound as before. Without the microphone allowed: the
+     * watch told why and offered its own recording again.
+     */
+    static void headset(Application app, WristLink.Server server, BluetoothDevice watch, BluetoothGattCharacteristic samples,
+                        BluetoothGattServerCallback cb, android.media.AudioManager am) throws Exception {
+        Class<?> talk = Class.forName("io.github.teoplaydor.semsearch.app.Talk");
+        java.lang.reflect.Method stopTalk = talk.getDeclaredMethod("stop");
+        stopTalk.setAccessible(true);
+        stopTalk.invoke(null);
+        final Engine e = Engine.get(app);
+        android.media.AudioDeviceInfo a2dp = am.getDevices(android.media.AudioManager.GET_DEVICES_OUTPUTS)[0];
+        Shadows.shadowOf(am).removeOutputDevice(a2dp, false);
+        server.messages.clear();
+        WristLink.setVoiceNotes(app, true);
+        assertEquals("no headset: not offered", 0, lastConfig(server) & WristGesture.CFG_TALK_HEADSET);
+
+        // the watch connects as a headset: the watch told at once
+        android.media.AudioDeviceInfo sco = org.robolectric.shadows.AudioDeviceInfoBuilder.newBuilder()
+                .setType(android.media.AudioDeviceInfo.TYPE_BLUETOOTH_SCO).build();
+        Shadows.shadowOf(am).addInputDevice(sco, false);
+        Shadows.shadowOf(am).setAvailableCommunicationDevices(Arrays.asList(sco));
+        server.messages.clear();
+        Shadows.shadowOf(am).addOutputDevice(sco, true);
+        ShadowLooper.idleMainLooper();
+        Robo.waitFor("the watch told: through the headset", () -> (lastConfig(server) & WristGesture.CFG_TALK_HEADSET) != 0);
+
+        // the microphone not allowed: the watch told why, the headset not offered for a while
+        Shadows.shadowOf(app).denyPermissions(android.Manifest.permission.RECORD_AUDIO);
+        server.messages.clear();
+        cb.onCharacteristicWriteRequest(watch, 420, samples, false, true, 0, WristGesture.voiceStart(23, WristGesture.CODEC_LIVE, 16000, 0));
+        Robo.waitFor("the watch told why", () -> told(server, WristGesture.EV_TALK_END));
+        assertTrue(textTold(server), textTold(server).contains("гарнитура часов не открылась: нет доступа к микрофону"));
+        assertEquals("its own recording offered again", 0, lastConfig(server) & WristGesture.CFG_TALK_HEADSET);
+        assertEquals("the phone's sound as it was", android.media.AudioManager.MODE_NORMAL, am.getMode());
+        java.lang.reflect.Field failedAt = talk.getDeclaredField("headsetFailedAt");
+        failedAt.setAccessible(true);
+        failedAt.set(null, 0L);
+
+        // allowed (the app was open): the conversation through the headset
+        Shadows.shadowOf(app).grantPermissions(android.Manifest.permission.RECORD_AUDIO);
+        boolean wasVisible = e.uiVisible;
+        e.uiVisible = true;
+        // the watch's microphone: 1.3 s said, then quiet (the channel stays open — silence goes on too), speech again on cue
+        final java.util.concurrent.atomic.AtomicInteger toSay = new java.util.concurrent.atomic.AtomicInteger(16000 * 13 / 10);
+        final java.util.concurrent.atomic.AtomicLong heard = new java.util.concurrent.atomic.AtomicLong();
+        org.robolectric.shadows.ShadowAudioRecord.setSource(new org.robolectric.shadows.ShadowAudioRecord.AudioRecordSource() {
+            long phase;
+
+            @Override
+            public int readInShortArray(short[] a, int off, int n, boolean blocking) {
+                try {
+                    Thread.sleep(n * 1000L / 16000);
+                } catch (InterruptedException ex) {
+                    return 0;
+                }
+                for (int i = 0; i < n; i++) {
+                    boolean say = toSay.getAndUpdate(v -> Math.max(0, v - 1)) > 0;
+                    a[off + i] = say ? (short) (9000 * Math.sin(2 * Math.PI * 200 * phase / 16000.0)) : (short) 0;
+                    phase++;
+                }
+                heard.addAndGet(n);
+                return n;
+            }
+        });
+        // what plays on the call's channel
+        final java.util.List<int[]> played = Collections.synchronizedList(new ArrayList<int[]>());
+        org.robolectric.shadows.ShadowAudioTrack.OnAudioDataWrittenListener ear = (track, bytes, format) -> {
+            try {
+                java.lang.reflect.Field f = org.robolectric.shadows.ShadowAudioTrack.class.getDeclaredField("audioTrack");
+                f.setAccessible(true);
+                android.media.AudioTrack t = (android.media.AudioTrack) f.get(track);
+                played.add(new int[]{t.getAudioAttributes().getUsage(), format.getSampleRate(), bytes.length});
+            } catch (ReflectiveOperationException ex) {
+                throw new AssertionError(ex);
+            }
+        };
+        org.robolectric.shadows.ShadowAudioTrack.addAudioDataListener(ear);
+        try {
+            WristLog.flush();
+            final long from = WristLog.file(app).length();
+            server.messages.clear();
+            cb.onCharacteristicWriteRequest(watch, 421, samples, false, true, 0, WristGesture.voiceStart(24, WristGesture.CODEC_LIVE, 16000, 0));
+            Robo.waitFor("the call's channel open", () -> logSince(app, from).contains("TALK headset open in "));
+            assertEquals("voice-call mode", android.media.AudioManager.MODE_IN_COMMUNICATION, am.getMode());
+            assertNotNull("the watch the call's device", am.getCommunicationDevice());
+            assertEquals(android.media.AudioDeviceInfo.TYPE_BLUETOOTH_SCO, am.getCommunicationDevice().getType());
+            try {
+                Robo.waitFor("the answer begun", () -> logSince(app, from).contains("TALK answer in "));
+            } catch (AssertionError err) {
+                throw new AssertionError(err.getMessage() + "\n" + logSince(app, from));
+            }
+            // spoken over: a second more said while it plays
+            toSay.set(16000);
+            Robo.waitFor("stopped when spoken over", () -> logSince(app, from).contains("TALK interrupted: the answer stopped"));
+            String dl = logSince(app, from);
+            assertTrue(dl, dl.contains("answers through the watch as a headset (both ways at once)"));
+            assertTrue(dl, dl.contains("TALK call save_note"));
+            assertFalse("nothing recorded by the watch's app: no pieces to it", told(server, WristGesture.EV_TALK_AUDIO));
+            int tone = 0, answer = 0;
+            synchronized (played) {
+                for (int[] p : played) {
+                    assertEquals("on the voice call's channel", android.media.AudioAttributes.USAGE_VOICE_COMMUNICATION, p[0]);
+                    if (p[1] == 16000) tone += p[2];
+                    else if (p[1] == 24000) answer += p[2];
+                }
+            }
+            assertEquals("the rising tone: Gemini listens", 16000 / 8 * 2 * 2, tone);
+            assertTrue("the answer as a stream: " + answer, answer > 0);
+            java.util.regex.Matcher lm = java.util.regex.Pattern.compile("TALK answer in (\\d+) ms after the voice").matcher(dl);
+            assertTrue(dl, lm.find());
+            System.out.println("through the watch as a headset: the answer began " + lm.group(1) + " ms after the voice, "
+                    + answer / 2 + " samples at 24 kHz played on the call's channel, spoken over — stopped; the watch's microphone "
+                    + String.format(java.util.Locale.ROOT, "%.1f", heard.get() / 16000.0) + " s");
+
+            // the hand down: the channel released once the answer is over, the phone's sound as before
+            cb.onCharacteristicWriteRequest(watch, 422, samples, false, true, 0, WristGesture.voiceEnd(24, 0, 3000));
+            long until = System.currentTimeMillis() + 15000;
+            while (!logSince(app, from).contains("TALK headset closed: ") && System.currentTimeMillis() < until) {
+                ShadowLooper.idleMainLooper(1, java.util.concurrent.TimeUnit.SECONDS);
+                Thread.sleep(100);
+            }
+            assertTrue(logSince(app, from), logSince(app, from).contains("TALK headset closed: the answer over"));
+            assertEquals("the phone's sound as before", android.media.AudioManager.MODE_NORMAL, am.getMode());
+            assertNull("the watch no longer the call's device", am.getCommunicationDevice());
+            Thread.sleep(100);
+            long after = heard.get();
+            Thread.sleep(300);
+            assertEquals("the watch's microphone closed", after, heard.get());
+        } finally {
+            org.robolectric.shadows.ShadowAudioTrack.removeAudioDataListener(ear);
+            org.robolectric.shadows.ShadowAudioRecord.clearSource();
+            e.uiVisible = wasVisible;
         }
     }
 

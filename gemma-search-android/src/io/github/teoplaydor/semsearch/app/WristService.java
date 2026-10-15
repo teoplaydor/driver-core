@@ -23,6 +23,14 @@ public final class WristService extends Service {
     static final int NOTIFICATION = 4302;
     private static final String CHANNEL = "wrist";
     private static volatile WristService running;
+    /**
+     * The service runs with the microphone allowed (a foreground service of type «microphone», started while the app
+     * was on the screen — Android gives the microphone to a service in the background only so): the watch as a headset
+     * needs it. Started otherwise (after a restart of the phone), it gets it the next time the app is opened.
+     */
+    private static volatile boolean mic;
+    /** ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE, …_MICROPHONE. */
+    static final int TYPE_CONNECTED_DEVICE = 16, TYPE_MICROPHONE = 128;
 
     private final BroadcastReceiver bluetooth = new BroadcastReceiver() {
         @Override
@@ -42,7 +50,7 @@ public final class WristService extends Service {
     public void onCreate() {
         super.onCreate();
         running = this;
-        startForeground(NOTIFICATION, notification(this));
+        foreground(this, Engine.get(this).uiVisible);
         WristLink.Server s = new WristLink.Server(this);
         WristLink.server = s;
         registerReceiver(bluetooth, new IntentFilter(BluetoothAdapter.ACTION_STATE_CHANGED));
@@ -76,6 +84,44 @@ public final class WristService extends Service {
         if (s != null) s.close();
         WristLink.setStatus("");
         super.onDestroy();
+    }
+
+    /** Foreground with the connected device's type, and the microphone's when it may have it (the app on the screen). */
+    private static void foreground(WristService s, boolean visible) {
+        Notification n = notification(s);
+        if (Build.VERSION.SDK_INT < 29) {
+            s.startForeground(NOTIFICATION, n);
+            mic = true;
+            return;
+        }
+        boolean wantMic = visible && s.checkSelfPermission(android.Manifest.permission.RECORD_AUDIO) == android.content.pm.PackageManager.PERMISSION_GRANTED;
+        try {
+            java.lang.reflect.Method m = Service.class.getMethod("startForeground", int.class, Notification.class, int.class);
+            try {
+                m.invoke(s, NOTIFICATION, n, TYPE_CONNECTED_DEVICE | (wantMic ? TYPE_MICROPHONE : 0));
+                mic = wantMic;
+            } catch (java.lang.reflect.InvocationTargetException e) {
+                // refused with the microphone: without it
+                m.invoke(s, NOTIFICATION, n, TYPE_CONNECTED_DEVICE);
+                mic = false;
+            }
+        } catch (ReflectiveOperationException e) {
+            s.startForeground(NOTIFICATION, n);
+            mic = false;
+        }
+    }
+
+    /** The app is on the screen: the running service takes the microphone too (for the watch as a headset). */
+    static void promote(Context c) {
+        WristService s = running;
+        if (s == null || mic) return;
+        foreground(s, true);
+        WristLog.add(c, "HEADSET", "the service " + (mic ? "may use the microphone now" : "still without the microphone"));
+    }
+
+    /** The microphone may be used from the background now. */
+    static boolean micAllowed() {
+        return mic;
     }
 
     @Override

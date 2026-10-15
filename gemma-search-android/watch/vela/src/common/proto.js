@@ -31,6 +31,8 @@ export const CFG_DEBUG = 4
 /** The watch at the mouth is a conversation rather than a note; its answers are played on the watch. */
 export const CFG_TALK = 8
 export const CFG_TALK_WATCH = 16
+/** The conversation goes through the watch as a Bluetooth headset (its calls): the app only says when it starts and ends. */
+export const CFG_TALK_HEADSET = 32
 /** With a VOICE start's codec: a conversation as it is said — the phone streams it on, nothing is sent again. */
 export const CODEC_LIVE = 0x80
 export const VOICE_SAVED = 0
@@ -253,6 +255,7 @@ export function parseEvent(v) {
     e.debug = (v[1] & CFG_DEBUG) !== 0
     e.talk = (v[1] & CFG_TALK) !== 0
     e.talkWatch = (v[1] & CFG_TALK_WATCH) !== 0
+    e.talkHeadset = (v[1] & CFG_TALK_HEADSET) !== 0
     e.mtu = v.length >= 4 ? v[2] | (v[3] << 8) : 0
   } else if (ev === EV_VOICE_FROM && v.length >= 6) {
     e.id = v[1]

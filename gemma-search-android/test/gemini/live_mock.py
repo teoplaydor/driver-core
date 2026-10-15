@@ -59,6 +59,13 @@ def out(msg):
     return msg.model_dump_json(by_alias=True, exclude_none=True)
 
 
+def loud(d):
+    """Speech, not silence (a microphone that is always on — a headset — sends silence too)."""
+    n = len(d) // 2
+    rms = math.sqrt(sum(int.from_bytes(d[2 * i:2 * i + 2], "little", signed=True) ** 2 for i in range(n)) / max(1, n))
+    return rms > 300
+
+
 def tone(seconds, rate=24000, f=440.0):
     n = int(seconds * rate)
     b = bytearray()
@@ -131,11 +138,12 @@ async def serve(port, log_path):
             if ri is None:
                 continue
             if ri.audio is not None:
-                audio += len(ri.audio.data)
+                if loud(ri.audio.data):
+                    audio += len(ri.audio.data)
                 if ri.audio.mime_type != "audio/pcm;rate=16000":
                     await ws.close(1007, "unexpected audio format " + str(ri.audio.mime_type))
                     return
-            # a turn: a second of voice since the last answer, or the stream paused
+            # a turn: a second of speech since the last answer, or the stream paused
             if (audio - answered_at >= 32000 or ri.audio_stream_end) and audio > answered_at:
                 answered_at = audio
                 turns += 1
@@ -176,7 +184,7 @@ async def serve(port, log_path):
                     log.write(text + "\n")
                     log.flush()
                     m = types.LiveClientMessage.model_validate_json(text)
-                    if m.realtime_input is not None and m.realtime_input.audio is not None:
+                    if m.realtime_input is not None and m.realtime_input.audio is not None and loud(m.realtime_input.audio.data):
                         spoken += len(m.realtime_input.audio.data)
                 if spoken >= 16000:
                     await ws.send(out(types.LiveServerMessage(server_content=types.LiveServerContent(interrupted=True))))

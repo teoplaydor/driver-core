@@ -847,6 +847,25 @@ async function vela() {
   say11([12, ...Buffer.from('Готово, напомню завтра в девять.')])
   ok(p11.note === 'Готово, напомню завтра в девять.', 'vela (talk): the answer\'s line shown — «' + p11.note + '»')
   say11([13])
+
+  // the watch as a headset (its Bluetooth calls): at the mouth only «started» (codec 0x80: no voice from the app — the
+  // headset carries it), no recording, no bells; lowered — «ended»
+  say11([6, 3 | 8 | 32, 247, 0])
+  ok(p11.talkHeadset, 'vela (talk, headset): told — the conversation through the watch as a headset')
+  for (let i = 0; i < 40; i++) await step11(HANG11)
+  const w14 = W.writes.length
+  const rec14 = W.recStarts
+  const played14 = W.played.length
+  for (let i = 0; i <= 10; i++) await step11(HANG11.map((h, j) => h + (MOUTH11[j] - h) * (i / 10)))
+  for (let i = 0; i < 30; i++) await step11(MOUTH11)
+  const hsw = W.writes.slice(w14).filter((w) => w[1] === SAMPLES).map((w) => w[2])
+  ok(hsw.some((w) => w.startsWith('50') && w.slice(4, 6) === '80') && W.recStarts === rec14 && !W.played.slice(played14).some((x) => /start\.mp3/.test(x[0])),
+    'vela (talk, headset): at the mouth — «started» (codec 0x80), no recording, no bells («' + p11.note + '»)')
+  for (let i = 0; i <= 20; i++) await step11(MOUTH11.map((m, j) => m + (HANG11[j] - m) * Math.min(1, i / 10)))
+  await advance(300)
+  const hw2 = W.writes.slice(w14).filter((w) => w[1] === SAMPLES).map((w) => w[2])
+  ok(hw2[hw2.length - 1].startsWith('52') && !hw2.some((w) => w.startsWith('51')) && p11.voices.length === 0 && !p11.hs,
+    'vela (talk, headset): lowered — «ended», no voice bytes sent («' + p11.note + '»)')
   p11.stop()
 }
 

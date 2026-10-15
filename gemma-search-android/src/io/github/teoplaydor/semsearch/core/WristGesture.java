@@ -70,9 +70,10 @@ public final class WristGesture {
             EV_TALK_END = 13;
     /**
      * EV_CONFIG's flags: the watch on the left hand, voice notes on, the sensor and the watch's doings to the log; the
-     * watch at the mouth is a conversation (with Gemini) rather than a note, its answers played on the watch.
+     * watch at the mouth is a conversation (with Gemini) rather than a note, its answers played on the watch; the
+     * conversation goes through the watch as a Bluetooth headset (the watch's app only says when it starts and ends).
      */
-    public static final int CFG_LEFT_HAND = 1, CFG_VOICE = 2, CFG_DEBUG = 4, CFG_TALK = 8, CFG_TALK_WATCH = 16;
+    public static final int CFG_LEFT_HAND = 1, CFG_VOICE = 2, CFG_DEBUG = 4, CFG_TALK = 8, CFG_TALK_WATCH = 16, CFG_TALK_HEADSET = 32;
     /**
      * What became of a voice note: a note made (with its reminder…), nothing said in it, kept as a recording without
      * text (no recognition on this phone), a question answered or a search (not a note), the recording not readable.

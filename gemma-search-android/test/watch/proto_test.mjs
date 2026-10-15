@@ -337,7 +337,9 @@ ok(va.codec === P.CODEC_ADPCM && Buffer.from(va.bytes()).equals(encAll) && hex(v
 {
   const u8 = (a) => new Uint8Array(a)
   const cfg = P.parseEvent(u8([6, 2 | 8 | 16, 247, 0]))
-  ok(cfg.talk && cfg.talkWatch && cfg.voice && cfg.mtu === 247, 'config: at the mouth a conversation, the answers on the watch')
+  ok(cfg.talk && cfg.talkWatch && cfg.voice && cfg.mtu === 247 && !cfg.talkHeadset, 'config: at the mouth a conversation, the answers on the watch')
+  const hcfg = P.parseEvent(u8([6, 2 | 8 | 32, 247, 0]))
+  ok(hcfg.talk && hcfg.talkHeadset && !hcfg.talkWatch, 'config: the conversation through the watch as a headset')
   const au = P.parseEvent(u8([10, 3, 0xe8, 3, 0, 0, 9, 8, 7]))
   ok(au.ev === P.EV_TALK_AUDIO && au.seg === 3 && au.offset === 1000 && Array.from(au.data).join() === '9,8,7', 'EV_TALK_AUDIO: piece 3 at 1000, its bytes')
   const sg = P.parseEvent(u8([11, 3, 0x40, 0x20, 0, 0, 21, 0]))

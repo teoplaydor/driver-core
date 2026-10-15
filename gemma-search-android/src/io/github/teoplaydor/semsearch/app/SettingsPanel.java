@@ -55,8 +55,9 @@ final class SettingsPanel extends FrameLayout implements Engine.Listener {
     private TextView ocrValue, ocrNote, ocrButton, ocrDelete;
     private TextView speechValue, speechNote, speechButton, speechDelete;
     private TextView talkKey, talkModel, talkNote;
-    private Toggle talkToggle, talkWatchToggle;
-    private View talkWatchRow;
+    private Toggle talkToggle, talkWatchToggle, talkHeadsetToggle;
+    private View talkWatchRow, talkHeadsetRow;
+    private TextView talkHeadsetHint;
     private Toggle speechToggle;
     private View speechToggleRow;
     private ProgressLine speechProgress;
@@ -1269,8 +1270,9 @@ final class SettingsPanel extends FrameLayout implements Engine.Listener {
         TextView about = note(card);
         about.setText("Живой голосовой разговор: поднесите часы ко рту и говорите — ваш голос идёт прямо в Gemini Live (через "
                 + "телефон, по вашему ключу API; модель с родным звуком — слышит и говорит сама, без перевода в текст), его голос "
-                + "сразу обратно. Говорите, пока держите руку; опустили — разговор помнится ещё 45 с. С наушниками у телефона "
-                + "ответ звучит в них без задержки, и Gemini можно перебивать. «Запиши…», «напомни…» — сохранит заметку сам.");
+                + "сразу обратно. Говорите, пока держите руку; опустили — разговор помнится ещё 45 с. Лучше всего — часы как "
+                + "гарнитура (Bluetooth-звонки на часах): звук идёт потоком в обе стороны, как в звонке, и Gemini можно перебивать. "
+                + "«Запиши…», «напомни…» — сохранит заметку сам.");
         about.setVisibility(VISIBLE);
         talkKey = row(card, "Ключ API Gemini", "Google AI Studio → Get API key; хранится только на телефоне", new Runnable() {
             @Override
@@ -1300,8 +1302,18 @@ final class SettingsPanel extends FrameLayout implements Engine.Listener {
                 Talk.setOnWatch(getContext(), on);
             }
         });
-        talkWatchRow = toggleRow(card, "Ответ звучит в часах", "кусками, с задержкой около секунды; выключено — в динамике телефона. "
-                + "Наушники у телефона — всегда в них", talkWatchToggle);
+        talkHeadsetToggle = new Toggle(c, Talk.headset(c));
+        talkHeadsetToggle.setListener(new Toggle.Listener() {
+            @Override
+            public void changed(boolean on) {
+                Talk.setHeadset(getContext(), on);
+                showTalk();
+            }
+        });
+        talkHeadsetRow = toggleRow(card, "Часы как гарнитура", "", talkHeadsetToggle);
+        talkHeadsetHint = (TextView) ((LinearLayout) ((LinearLayout) talkHeadsetRow).getChildAt(0)).getChildAt(1);
+        talkWatchRow = toggleRow(card, "Ответ звучит в часах", "когда часы не гарнитура: кусками, с задержкой около секунды; выключено — "
+                + "в динамике телефона. Наушники у телефона — всегда в них", talkWatchToggle);
         talkNote = note(card);
     }
 
@@ -1425,6 +1437,12 @@ final class SettingsPanel extends FrameLayout implements Engine.Listener {
         if (talkToggle.isOn() != Talk.chosen(c)) talkToggle.setOn(Talk.chosen(c), false);
         if (talkWatchToggle.isOn() != Talk.onWatch(c)) talkWatchToggle.setOn(Talk.onWatch(c), false);
         talkWatchRow.setVisibility(Talk.chosen(c) ? VISIBLE : GONE);
+        if (talkHeadsetToggle.isOn() != Talk.headset(c)) talkHeadsetToggle.setOn(Talk.headset(c), false);
+        talkHeadsetRow.setVisibility(Talk.chosen(c) ? VISIBLE : GONE);
+        String hs = Headset.name(c);
+        talkHeadsetHint.setText(hs.isEmpty()
+                ? "голос и ответ потоком в обе стороны, как в звонке; сейчас не подключены — включите на часах Bluetooth-звонки"
+                : "голос и ответ потоком в обе стороны, как в звонке; подключены: " + hs);
         String last = Talk.last(c);
         String note = Talk.chosen(c) && !key ? "Нужен ключ API — без него часы делают заметки, как раньше" : last;
         talkNote.setText(note);

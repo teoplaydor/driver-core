@@ -12,7 +12,7 @@ import {
   SERVICE, SAMPLES, EVENTS, EV_NEXT, EV_PREVIOUS, EV_LEARNED, EV_IGNORED, EV_PAUSE, EV_STREAM, EV_CONFIG, EV_VOICE_FROM,
   EV_VOICE_DONE, VOICE_SAVED, VOICE_SILENT, VOICE_KEPT, VOICE_ANSWER, SOURCE_COMPASS, RAW_MAX, advertises, createPacker,
   parseEvent, createTalk, createVoice, rawPacket, diagPacket, diagPackets, EV_TALK_AUDIO, EV_TALK_SEG, EV_TALK_TEXT, EV_TALK_END,
-  voicePlayed, CODEC_ADPCM
+  voicePlayed, CODEC_ADPCM, CODEC_LIVE
 } from './proto.js'
 
 /** The silence that keeps the app running in the background, and how soon it is started again when stopped. */
@@ -420,6 +420,8 @@ export function createLink(sys) {
       this.diagOut = []
       this.talkMode = false
       this.talkWatch = false
+      this.talkHeadset = false
+      this.hs = null
       this.talkIn = null
       this.talkQueue = []
       this.talkPlaying = null
@@ -918,7 +920,7 @@ export function createLink(sys) {
       this.listen(false)
       this.queue = []
       this.writing = false
-      if (this.rec || this.pending) this.stopNote(false)
+      if (this.rec || this.pending || this.hs) this.stopNote(false)
       const g = this.gatt
       this.gatt = null
       if (g) {
@@ -958,13 +960,15 @@ export function createLink(sys) {
         this.setDebug(e.debug)
         this.talkMode = e.talk
         this.talkWatch = e.talkWatch
+        this.talkHeadset = e.talkHeadset
         this.talk.setTalk(e.talk)
         this.logLine('настройки: ' + (e.leftHand ? 'левая' : 'правая') + ' рука, заметки ' + (e.voice ? 'вкл' : 'выкл') + (e.talk
-          ? ', у рта — разговор с Gemini (ответ ' + (e.talkWatch ? 'в часах' : 'в телефоне') + ')' : '') + ', MTU ' + e.mtu)
+          ? ', у рта — разговор с Gemini (' + (e.talkHeadset ? 'часы как гарнитура' : 'ответ ' + (e.talkWatch ? 'в часах' : 'в телефоне')) + ')'
+          : '') + ', MTU ' + e.mtu)
         if (e.voice !== this.voiceOn) {
           this.voiceOn = e.voice
           storage.set({ key: 'wrist_voice', value: e.voice ? '1' : '0' })
-          if (!e.voice && (this.rec || this.pending)) this.stopNote(true)
+          if (!e.voice && (this.rec || this.pending || this.hs)) this.stopNote(true)
         }
         if (this.voiceOn && !this.listening && this.linkedOk) this.listen(true)
         else if (!this.voiceOn && !this.playing) this.listen(false)
@@ -1288,9 +1292,21 @@ export function createLink(sys) {
      * not in it.
      */
     startNote(now) {
-      if (this.rec || this.pending) return
+      if (this.rec || this.pending || this.hs) return
       this.noteId = (this.noteId + 1) & 0xff
       vibrator.vibrate({ mode: 'short' })
+      if (this.talkMode && this.talkHeadset) {
+        // the watch as a headset: the voice and the answer go through its Bluetooth call channel — here only «started»
+        // (the phone opens the channel and gives a tone when Gemini listens) and later «ended»
+        const v = createVoice(this.noteId, 'none', PCM_REC.sampleRate, true)
+        v.codec = CODEC_LIVE
+        this.voices.push(v)
+        this.hs = { v, at: now }
+        this.note = 'говорите с Gemini — через гарнитуру часов'
+        this.phase('разговор через гарнитуру')
+        this.pump()
+        return
+      }
       const live = !!this.talkMode
       this.note = live ? 'говорите с Gemini… опустите руку — конец' : 'говорите… опустите руку — отправлю'
       const pending = { at: now }
@@ -1416,6 +1432,17 @@ export function createLink(sys) {
 
     /** Taken away from the mouth (cancel: too soon, or voice notes switched off): the recording stops. */
     stopNote(cancel) {
+      if (this.hs) {
+        // the conversation through the headset: its end told (the answer may still be coming)
+        const hs = this.hs
+        this.hs = null
+        hs.v.end(Date.now() - hs.at)
+        this.pump()
+        this.talk.done(Date.now())
+        this.note = cancel ? '' : 'Gemini отвечает…'
+        if (!cancel) vibrator.vibrate({ mode: 'short' })
+        return
+      }
       if (!this.rec && this.pending) {
         // taken away while the bells still rang: no note (a conversation already told — its end told too)
         if (this.pending.v) {

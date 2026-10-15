@@ -404,8 +404,41 @@ public final class WristLink {
             tick.postDelayed(music, MUSIC_MS);
         }
 
+        /** The watch connected or gone as a headset (its Bluetooth calls): the watch told how a conversation goes now. */
+        private final android.media.AudioDeviceCallback headsets = new android.media.AudioDeviceCallback() {
+            @Override
+            public void onAudioDevicesAdded(android.media.AudioDeviceInfo[] added) {
+                for (android.media.AudioDeviceInfo d : added) {
+                    if (d.getType() == Headset.SCO) {
+                        log("HEADSET", "connected: " + d.getProductName());
+                        reconfigure();
+                        return;
+                    }
+                }
+            }
+
+            @Override
+            public void onAudioDevicesRemoved(android.media.AudioDeviceInfo[] removed) {
+                for (android.media.AudioDeviceInfo d : removed) {
+                    if (d.getType() == Headset.SCO) {
+                        log("HEADSET", "gone: " + d.getProductName());
+                        reconfigure();
+                        return;
+                    }
+                }
+            }
+        };
+        private boolean headsetsWatched;
+
         /** Opens the server and starts advertising; false (with the reason in the status) when it cannot. */
         synchronized boolean open() {
+            if (!headsetsWatched) {
+                AudioManager am = (AudioManager) c.getSystemService(Context.AUDIO_SERVICE);
+                if (am != null) {
+                    am.registerAudioDeviceCallback(headsets, tick);
+                    headsetsWatched = true;
+                }
+            }
             if (gatt != null) return true;
             BluetoothManager bm = (BluetoothManager) c.getSystemService(Context.BLUETOOTH_SERVICE);
             BluetoothAdapter ad = bm == null ? null : bm.getAdapter();
@@ -447,6 +480,11 @@ public final class WristLink {
         }
 
         synchronized void close() {
+            if (headsetsWatched) {
+                AudioManager am = (AudioManager) c.getSystemService(Context.AUDIO_SERVICE);
+                if (am != null) am.unregisterAudioDeviceCallback(headsets);
+                headsetsWatched = false;
+            }
             tick.removeCallbacks(music);
             tick.removeCallbacks(released);
             outbox.clear();
@@ -520,12 +558,14 @@ public final class WristLink {
         /** The watch's settings: which hand, voice notes on, and the link's MTU (how big its writes may be). */
         private void sendConfig(Conn k) {
             boolean debug = debug(c);
-            boolean talk = Talk.on(c), talkWatch = talk && Talk.onWatch(c) && k.mtu - 3 >= Talk.MIN_ROOM;
+            boolean talk = Talk.on(c), talkHeadset = talk && Talk.headsetUsable(c), talkWatch = talk && Talk.onWatch(c) && k.mtu - 3 >= Talk.MIN_ROOM;
             // the watch at the mouth works for a conversation even with voice notes off
             int flags = (leftHand(c) ? WristGesture.CFG_LEFT_HAND : 0) | (voiceNotes(c) || talk ? WristGesture.CFG_VOICE : 0)
-                    | (debug ? WristGesture.CFG_DEBUG : 0) | (talk ? WristGesture.CFG_TALK : 0) | (talkWatch ? WristGesture.CFG_TALK_WATCH : 0);
-            log("CFG", "left=" + leftHand(c) + " voice=" + voiceNotes(c) + " debug=" + debug + " talk=" + talk + (talk ? " answers on the "
-                    + (talkWatch ? "watch" : "phone") : "") + " mtu=" + k.mtu);
+                    | (debug ? WristGesture.CFG_DEBUG : 0) | (talk ? WristGesture.CFG_TALK : 0) | (talkWatch ? WristGesture.CFG_TALK_WATCH : 0)
+                    | (talkHeadset ? WristGesture.CFG_TALK_HEADSET : 0);
+            log("CFG", "left=" + leftHand(c) + " voice=" + voiceNotes(c) + " debug=" + debug + " talk=" + talk + (talk ? talkHeadset
+                    ? " through the watch as a headset (" + Headset.name(c) + ")" : " answers on the " + (talkWatch ? "watch" : "phone") : "")
+                    + " mtu=" + k.mtu);
             message(k, WristGesture.config(flags, k.mtu));
             tick.removeCallbacks(debugOver);
             if (debug) tick.postDelayed(debugOver, debugUntil(c) - System.currentTimeMillis() + 500);

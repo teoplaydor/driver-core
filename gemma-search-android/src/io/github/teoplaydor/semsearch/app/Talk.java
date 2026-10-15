@@ -35,7 +35,12 @@ import io.github.teoplaydor.semsearch.core.WristGesture;
  */
 final class Talk {
     static final String PREF_KEY = "gemini_key", PREF_MODEL = "gemini_model", PREF_ON = "wrist_talk", PREF_ON_WATCH = "wrist_talk_watch",
-            PREF_LAST = "gemini_last";
+            PREF_LAST = "gemini_last", PREF_HEADSET = "wrist_talk_headset";
+    /** After the watch's headset failed to open, not offered to the watch again for this long. */
+    static final long HEADSET_PAUSE_MS = 10 * 60_000L;
+    /** The hand down right after speaking: the headset kept this long for the answer to begin. */
+    static final long ANSWER_WAIT_MS = 6000;
+    private static volatile long headsetFailedAt;
     /** The conversation kept this long after the hand went down and the answer ended. */
     static final long KEEP_MS = 45_000;
     /** The answer for the watch in pieces: the first short (heard sooner), the next ones longer (fewer gaps). */
@@ -97,6 +102,24 @@ final class Talk {
         WristLink.reconfigure(c);
     }
 
+    /**
+     * The watch as a headset for the conversation (its Bluetooth calls on): the voice and the answer as a stream, both
+     * ways at once. On unless switched off.
+     */
+    static boolean headset(Context c) {
+        return WristLink.prefs(c).getBoolean(PREF_HEADSET, true);
+    }
+
+    static void setHeadset(Context c, boolean on) {
+        WristLink.prefs(c).edit().putBoolean(PREF_HEADSET, on).apply();
+        WristLink.reconfigure(c);
+    }
+
+    /** The headset way offered to the watch now: chosen, connected as a headset, and it did not just fail. */
+    static boolean headsetUsable(Context c) {
+        return headset(c) && Headset.available(c) && System.currentTimeMillis() - headsetFailedAt > HEADSET_PAUSE_MS;
+    }
+
     /** The model chosen (or found best when the key was checked); "" — not yet. */
     static String model(Context c) {
         return WristLink.prefs(c).getString(PREF_MODEL, "");
@@ -146,6 +169,8 @@ final class Talk {
      */
     private boolean duplex;
     private long lastLoudAt, raisedAt;
+    /** Speech passed on since the last answer began: its answer may still be coming (the headset kept for it). */
+    private boolean unanswered;
     private boolean firstAudioOfTurn = true;
     /** Answers stopped (interrupted) so far: what was queued for the phone's speaker before is not played. */
     private volatile int speakGen;
@@ -153,6 +178,16 @@ final class Talk {
     private short[] ans = new short[0];
     private int ansN, ansRate = 24000;
     private int seg, segsOut, playFailures;
+    /** The watch as a headset this time (its microphone and speaker through the call's channel). */
+    private boolean viaHeadset;
+    private Headset headset;
+    private boolean headsetReady, toneDue;
+    private final Runnable headsetCloser = new Runnable() {
+        @Override
+        public void run() {
+            closeHeadset("the answer over");
+        }
+    };
     private AudioTrack track;
     private final StringBuilder heard = new StringBuilder(), said = new StringBuilder();
     private long voiceSent, connectAt;
@@ -174,7 +209,8 @@ final class Talk {
 
     /** The watch at the mouth (a VOICE start marked live): the conversation started, or the one still open goes on. */
     static synchronized void start(Context c, Watch w, int id, int codec, int rate) {
-        if ((codec & 0x7f) != WristGesture.CODEC_ADPCM || rate != GeminiLive.IN_RATE) {
+        boolean viaHeadset = (codec & 0x7f) == 0; // no voice from the watch's app: the headset carries it
+        if (!viaHeadset && ((codec & 0x7f) != WristGesture.CODEC_ADPCM || rate != GeminiLive.IN_RATE)) {
             // only the watch's PCM made ADPCM at 16 kHz goes on as it comes (an older watch app records Opus)
             WristLog.add(c, "TALK", "the watch's voice is codec " + (codec & 0x7f) + " at " + rate + " Hz — not for a conversation");
             w.send(WristGesture.talkText("Для разговора обновите приложение на часах", w.room()));
@@ -239,10 +275,14 @@ final class Talk {
         dec = new Adpcm.Decoder();
         handDown = false;
         raisedAt = SystemClock.elapsedRealtime();
-        duplex = headphones(c);
+        viaHeadset = (codec & 0x7f) == 0;
+        MAIN.removeCallbacks(headsetCloser);
+        duplex = viaHeadset || headphones(c);
         watchAudio = !duplex && onWatch(c) && watch.room() >= MIN_ROOM && playFailures < 2;
-        log("raised id=" + id + " codec=" + (codec & 0x7f) + " rate=" + rate + " answers " + (duplex ? "in the headphones (may be spoken over)"
+        log("raised id=" + id + " codec=" + (codec & 0x7f) + " rate=" + rate + " answers " + (viaHeadset
+                ? "through the watch as a headset (both ways at once)" : duplex ? "in the headphones (may be spoken over)"
                 : watchAudio ? "on the watch" : "on the phone's speaker") + (live != null && live.ready() ? " (the conversation goes on)" : ""));
+        if (viaHeadset) openHeadset();
         WristLink.setStatus("разговор с Gemini…");
     }
 
@@ -311,6 +351,67 @@ final class Talk {
         return f;
     }
 
+    /** The call's channel to the watch opened (off the Bluetooth thread); its microphone's voice goes to Gemini as it comes. */
+    private void openHeadset() {
+        if (headset != null && headset.isOpen()) {
+            headsetReady = true;
+            return;
+        }
+        final Headset h = new Headset(c);
+        headset = h;
+        headsetReady = false;
+        new Thread(new Runnable() {
+            @Override
+            public void run() {
+                long t0 = SystemClock.elapsedRealtime();
+                try {
+                    if (c.checkSelfPermission(android.Manifest.permission.RECORD_AUDIO) != android.content.pm.PackageManager.PERMISSION_GRANTED) {
+                        throw new IllegalStateException("нет доступа к микрофону — разрешите его приложению");
+                    }
+                    if (!WristService.micAllowed() && !Engine.get(c).uiVisible) {
+                        throw new IllegalStateException("откройте приложение на телефоне один раз — тогда микрофон часов будет доступен в фоне");
+                    }
+                    h.open(new Headset.Voice() {
+                        @Override
+                        public void heard(short[] pcm) {
+                            boolean down;
+                            synchronized (Talk.this) {
+                                down = handDown || headset != h;
+                            }
+                            if (!down) onVoice(pcm);
+                        }
+                    });
+                } catch (Exception e) {
+                    headsetFailedAt = System.currentTimeMillis();
+                    WristLink.reconfigure(c); // the watch records itself next time
+                    fail("гарнитура часов не открылась: " + e.getMessage());
+                    return;
+                }
+                boolean tone;
+                synchronized (Talk.this) {
+                    headsetReady = true;
+                    tone = live != null && live.ready();
+                    if (!tone) toneDue = true;
+                }
+                log("headset open in " + (SystemClock.elapsedRealtime() - t0) + " ms: " + Headset.name(c));
+                if (tone) h.tone(true);
+            }
+        }, "headset-open").start();
+    }
+
+    /** The headset's channel closed (the watch's «call» over); the conversation itself may go on. */
+    private void closeHeadset(String why) {
+        Headset h;
+        synchronized (this) {
+            h = headset;
+            headset = null;
+            headsetReady = false;
+        }
+        if (h == null) return;
+        log("headset closed: " + why);
+        h.close();
+    }
+
     /** The voice is not passed on while an answer comes or plays (and a moment after) — unless in headphones. */
     private boolean muted() {
         return !duplex && (answering || SystemClock.elapsedRealtime() < playingUntil);
@@ -342,10 +443,19 @@ final class Talk {
             if (n <= 0) return;
             expected = offset + n;
             pcm = dec.decode(p, from, n);
+        }
+        onVoice(pcm);
+    }
+
+    /** A piece of the voice (16 kHz), from the watch's app or its headset: on to Gemini, or kept till it is ready. */
+    private void onVoice(short[] pcm) {
+        synchronized (this) {
             double e = 0;
             for (short v : pcm) e += (double) v * v;
-            if (pcm.length > 0 && Math.sqrt(e / pcm.length) >= LOUD) lastLoudAt = SystemClock.elapsedRealtime();
+            boolean loud = pcm.length > 0 && Math.sqrt(e / pcm.length) >= LOUD;
+            if (loud) lastLoudAt = SystemClock.elapsedRealtime();
             if (muted()) return;
+            if (loud) unanswered = true;
             if (live == null || !live.ready()) {
                 if (earlySamples < EARLY_S * GeminiLive.IN_RATE) {
                     early.add(pcm);
@@ -413,6 +523,12 @@ final class Talk {
             }
             log("ready in " + (SystemClock.elapsedRealtime() - connectAt) + " ms; voice said meanwhile " + pending.size() + " pieces");
             for (short[] p : pending) send(p);
+            Headset h = null;
+            synchronized (Talk.this) {
+                if (toneDue && headsetReady) h = headset;
+                toneDue = false;
+            }
+            if (h != null) h.tone(true); // Gemini listens: a rising tone in the watch
             if (handDown) lowered();
         }
 
@@ -423,6 +539,7 @@ final class Talk {
                 if (firstAudioOfTurn) {
                     // how soon the answer came: from the end of the voice (its last loud piece) to its first sound here
                     firstAudioOfTurn = false;
+                    unanswered = false;
                     long now = SystemClock.elapsedRealtime();
                     log("answer in " + (now - Math.max(lastLoudAt, raisedAt)) + " ms after the voice");
                 }
@@ -440,6 +557,15 @@ final class Talk {
             // to the watch outside the lock (the Bluetooth side holds its own while it hands the voice here)
             if (out != null) {
                 for (byte[] b : out) tell(b);
+                return;
+            }
+            Headset h = headset;
+            if (viaHeadset && h != null) {
+                MAIN.removeCallbacks(headsetCloser); // the hand down before the answer came: kept till it has played
+                synchronized (Talk.this) {
+                    playingUntil = Math.max(playingUntil, SystemClock.elapsedRealtime()) + 1000L * pcm.length / rate;
+                }
+                h.play(pcm, rate);
                 return;
             }
             speak(pcm, rate);
@@ -496,6 +622,8 @@ final class Talk {
                 playingUntil = 0;
             }
             log("interrupted: the answer stopped");
+            Headset h = headset;
+            if (h != null) h.hush();
             hush();
         }
 
@@ -688,15 +816,22 @@ final class Talk {
 
     /** The hand down, the answer over and played: closed after a while (raised again — it goes on). */
     private void idleLater() {
-        boolean idle;
+        boolean idle, awaited;
         long wait;
         synchronized (this) {
             // pieces still playing on the watch: counted in playingUntil (their «played» may never come from an older watch)
             idle = handDown && turnDone && !answering;
             wait = Math.max(0, playingUntil - SystemClock.elapsedRealtime());
+            awaited = unanswered;
         }
         MAIN.removeCallbacks(closer);
-        if (idle) MAIN.postDelayed(closer, KEEP_MS + wait);
+        MAIN.removeCallbacks(headsetCloser);
+        if (idle) {
+            MAIN.postDelayed(closer, KEEP_MS + wait);
+            // the watch's «call» released once the answer has played (raised again — opened again)
+            // (what was said last may still be answered: a while given for it to begin)
+            if (headset != null) MAIN.postDelayed(headsetCloser, Math.max(wait + 600, awaited ? ANSWER_WAIT_MS : 0));
+        }
     }
 
     private void fail(String why) {
@@ -714,7 +849,9 @@ final class Talk {
             g = live;
         }
         MAIN.removeCallbacks(closer);
+        MAIN.removeCallbacks(headsetCloser);
         log("closing: " + why);
+        closeHeadset("the conversation closed");
         if (g != null) g.close();
         tell(WristGesture.talkEnd());
         synchronized (Talk.class) {
