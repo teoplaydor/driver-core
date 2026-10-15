@@ -383,7 +383,8 @@ function lilyPad(seed, flower) {
   const b = new PlantBuilder();
   const rand = mulberry32(seed);
   const segs = 22, notch = 0.42;
-  const green = C('#3f8f34'), light = C('#86c457'), vein = C('#9fd06a'), edge = C('#5b7d2c'), rim = C('#7a4a3a');
+  const green = C('#46943a'), light = C('#86c457'), edge = C('#4f8a30'), rim = C('#7a5a3a');
+  const vein = green.clone().lerp(light, 0.3);
   const n = V(0, 1, 0);
   // лист: светлый центр, жилки по границам секторов (светлые) и тёмная середина сектора,
   // край чуть загнут вверх и темнее (у кувшинки он красноватый)
@@ -395,7 +396,7 @@ function lilyPad(seed, flower) {
     const m0 = ring(a0, 0.55, 0.02), m1 = ring(a1, 0.55, 0.02), mm = ring(am, 0.55, 0.02);
     const o0 = ring(a0, 0.93 * wob, 0.018), o1 = ring(a1, 0.93 * wob, 0.018), om = ring(am, 0.93 * wob, 0.018);
     const r0 = ring(a0, 1.0 * wob, 0.04), r1 = ring(a1, 1.0 * wob, 0.04), rm = ring(am, 1.0 * wob, 0.04);
-    const mid = green.clone().multiplyScalar(0.92 + rand() * 0.12);
+    const mid = green.clone().multiplyScalar(0.94 + rand() * 0.08);
     const tri = (p, cp, q, cq, r, cr) => { b.vert(p, n, cp, WHITE_UV, 1, 0); b.vert(q, n, cq, WHITE_UV, 1, 0); b.vert(r, n, cr, WHITE_UV, 1, 0); };
     tri(ctr, light, m1, vein, mm, mid); tri(ctr, light, mm, mid, m0, vein);
     tri(m0, vein, mm, mid, o0, vein); tri(mm, mid, om, mid, o0, vein);
@@ -470,7 +471,7 @@ function snowdrift(seed) {
       const lump = 0.8 + 0.45 * noise3(Math.cos(a) * r * 1.6, Math.sin(a) * r * 1.6, 2.5, seed + 1) + 0.25 * Math.cos(a) * r;
       const h = (1 + SINK) * k * k * lump - SINK;
       const R = r * outline(a);
-      pos.push(Math.cos(a) * R, h, Math.sin(a) * R);
+      pos.push(Math.cos(a) * R * 1.45, h, Math.sin(a) * R); // вытянут вдоль ветра
     }
   }
   const at = (i, j) => (i === 0 ? 0 : 1 + (i - 1) * SEG + (j % SEG));
@@ -848,7 +849,7 @@ export class Decor {
       const y = heightAt(x, z);
       if (pathDist(x, z) < 2.4 || this._blocked(x, z) || slopeAt(x, z) > 0.35) continue;
       const s = 0.9 + rand() * 1.3;
-      add('drift', x, y - 0.04, z, s, { sy: 0.3 + rand() * 0.2 });
+      add('drift', x, y - 0.04, z, s, { sy: 0.2 + rand() * 0.14 });
     }
     // каньон: полынь
     for (let i = 0; i < Math.round(60 * D); i++) {

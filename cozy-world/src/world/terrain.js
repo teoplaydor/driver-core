@@ -255,7 +255,7 @@ if (walkM > 0.001) {
   tPuddle = pz;
   ground = mix(ground, ground * ${L('#4a4640')}, pz);
   diffuseColor.rgb = mix(diffuseColor.rgb, ground, walkM);
-  tH = mix(tH, n3 * 0.3 + (pb.y * 0.5 + pb2.y * 0.25) * tFwB - rut * 0.8, walkM * (1.0 - pz));
+  tH = mix(tH, n3 * 0.3 + (pb.y * 0.5 + pb2.y * 0.25) * tFwB - rut * 0.25, walkM * (1.0 - pz));
   tBumpK = mix(tBumpK, 1.1, walkM);
   tRough = mix(tRough, 0.95, walkM);
 }
