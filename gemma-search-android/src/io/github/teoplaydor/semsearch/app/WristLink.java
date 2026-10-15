@@ -341,6 +341,11 @@ public final class WristLink {
                 public int room() {
                     return mtu - 3;
                 }
+
+                @Override
+                public boolean mp3() {
+                    return d.playsMp3();
+                }
             };
 
             Conn(BluetoothDevice dev) {
@@ -927,7 +932,7 @@ public final class WristLink {
                 return;
             }
             if (type == WristGesture.VOICE_PLAYED && p.length >= 4) {
-                Talk.played(p[1] & 0xff, p[2] & 0xff, p[3] == 0);
+                Talk.played(p[1] & 0xff, p[2] & 0xff, p[3] & 0xff);
                 return;
             }
             if (k.liveId >= 0 && (p[1] & 0xff) == k.liveId && (type == WristGesture.VOICE_DATA || type == WristGesture.VOICE_END)) {

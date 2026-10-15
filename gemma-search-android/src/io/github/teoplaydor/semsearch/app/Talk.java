@@ -51,8 +51,10 @@ final class Talk {
     static final int FIRST_SEG_MS = 700, SEG_MS = 1800;
     /** A piece of voice this loud (RMS, of 16-bit) is speech: the answer's delay is counted from the last such. */
     static final int LOUD = 600;
-    /** The answer's voice on the watch: 8 kHz (its speaker is small; ~4 KB a second over Bluetooth). */
+    /** The answer's voice on the watch as WAV (IMA ADPCM, an older watch app): 8 kHz (~4 KB a second over Bluetooth). */
     static final int WATCH_RATE = 8000;
+    /** …as MP3 (the watch's app 1.12 on — its player takes no ADPCM): 16 kHz at 32 kbit/s, the same 4 KB a second. */
+    static final int MP3_KBPS = 32;
     /** Answers on the watch only over a link that takes this much in a notification (MTU ≥ 100). */
     static final int MIN_ROOM = 97;
     /** After an answer has played, the voice is passed on again this much later (the room's echo). */
@@ -69,6 +71,9 @@ final class Talk {
 
         /** Bytes a notification holds (MTU − 3). */
         int room();
+
+        /** The watch plays the answer's pieces as MP3 (else WAV with IMA ADPCM). */
+        boolean mp3();
     }
 
     // ------------------------------------------------------------------ settings
@@ -276,12 +281,12 @@ final class Talk {
     }
 
     /** The watch played a piece of the answer (or could not). */
-    static void played(int id, int seg, boolean ok) {
+    static void played(int id, int seg, int outcome) {
         Talk t;
         synchronized (Talk.class) {
             t = current;
         }
-        if (t != null) t.playedOut(seg, ok);
+        if (t != null) t.playedOut(seg, outcome);
     }
 
     /** The watch went away: the conversation ends. */
@@ -829,24 +834,38 @@ final class Talk {
         for (int i = 0; i < n; i++) x[i] = ans[i] / 32768f;
         System.arraycopy(ans, n, ans, 0, ansN - n);
         ansN -= n;
-        float[] y = Pcm.resample(x, ansRate, WATCH_RATE);
-        short[] s = new short[y.length];
-        for (int i = 0; i < y.length; i++) s[i] = (short) Math.max(-32768, Math.min(32767, Math.round(y[i] * 32767)));
-        byte[] wav = Adpcm.imaWav(s, WATCH_RATE);
-        int ms = (int) (1000L * s.length / WATCH_RATE);
+        byte[] wav;
+        int ms, format;
+        if (watch.mp3()) {
+            // what any player plays (the watch's takes no ADPCM): MP3, 16 kHz — twice the sound of 8 kHz for the same bytes
+            float[] y = Pcm.resample(x, ansRate, io.github.teoplaydor.semsearch.core.Mp3.RATE);
+            for (int i = 0; i < y.length; i++) y[i] = Math.max(-1f, Math.min(1f, y[i]));
+            wav = io.github.teoplaydor.semsearch.core.Mp3.encode(y, MP3_KBPS);
+            ms = io.github.teoplaydor.semsearch.core.Mp3.durationMs(wav, MP3_KBPS);
+            format = WristGesture.TALK_MP3;
+        } else {
+            float[] y = Pcm.resample(x, ansRate, WATCH_RATE);
+            short[] s = new short[y.length];
+            for (int i = 0; i < y.length; i++) s[i] = (short) Math.max(-32768, Math.min(32767, Math.round(y[i] * 32767)));
+            wav = Adpcm.imaWav(s, WATCH_RATE);
+            ms = (int) (1000L * s.length / WATCH_RATE);
+            format = WristGesture.TALK_WAV;
+        }
         seg = (seg + 1) & 0xff;
         int room = watch.room() - 6;
         for (int o = 0; o < wav.length; o += room) out.add(WristGesture.talkAudio(seg, o, wav, o, Math.min(room, wav.length - o)));
-        out.add(WristGesture.talkSeg(seg, wav.length, ms));
+        out.add(WristGesture.talkSeg(seg, wav.length, ms, format));
         segsOut++;
         // when it will have played (sent at ~4 KB a second, then played after the ones before): the voice waits till then
         long now = SystemClock.elapsedRealtime();
         playingUntil = Math.max(playingUntil, now + wav.length / 4) + ms + ECHO_MS;
-        log("piece " + seg + ": " + ms + " ms, " + wav.length + " bytes in " + ((wav.length + room - 1) / room) + " notifications");
+        log("piece " + seg + " (" + (format == WristGesture.TALK_MP3 ? "MP3" : "WAV") + "): " + ms + " ms, " + wav.length + " bytes in "
+                + ((wav.length + room - 1) / room) + " notifications");
         return out;
     }
 
-    private void playedOut(int s, boolean ok) {
+    private void playedOut(int s, int outcome) {
+        boolean ok = outcome == WristGesture.PLAYED;
         boolean phone = false;
         synchronized (this) {
             segsOut = Math.max(0, segsOut - 1);
@@ -857,11 +876,16 @@ final class Talk {
                 phone = true;
             }
         }
+        String why = outcome == WristGesture.NOT_WHOLE ? "not whole on the watch (a notification lost)"
+                : outcome == WristGesture.NOT_WRITTEN ? "the watch could not write its file" : "the watch's player would not play it";
+        if (!ok) log("piece " + s + " not played on the watch: " + why);
         if (phone) {
-            log("the watch does not play the answers — on the phone from now on");
-            tell(WristGesture.talkText("Звук в часах не играет — отвечаю через телефон", watch.room()));
+            log("the watch does not play the answers (" + why + ") — on the phone from now on");
+            tell(WristGesture.talkText(outcome == WristGesture.NOT_WHOLE ? "Ответ теряется по Bluetooth — отвечаю через телефон"
+                    : outcome == WristGesture.NOT_WRITTEN ? "Часы не записали ответ в файл — отвечаю через телефон"
+                    : watch.mp3() ? "Звук в часах не играет — отвечаю через телефон"
+                    : "Звук в часах не играет — обновите приложение на часах; пока отвечаю через телефон", watch.room()));
         }
-        if (!ok) log("piece " + s + " not played on the watch");
         idleLater();
     }
 

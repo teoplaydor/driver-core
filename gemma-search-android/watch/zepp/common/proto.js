@@ -50,6 +50,16 @@ export const SOURCE_COMPASS = 2
 /** HELLO versions: samples follow / the watch finds the turns and ROLL packets follow. */
 export const VERSION = 1
 export const VERSION_TURNS = 2
+/** HELLO version: the turns found here, and a conversation's answer played from MP3 pieces (the Vela app 1.12 on). */
+export const VERSION_MP3 = 3
+/** TALK_SEG's format of a piece: a WAV file (IMA ADPCM), an MP3 file. */
+export const TALK_WAV = 0
+export const TALK_MP3 = 1
+/** VOICE played's outcome: played; the player would not; not whole (a write lost); its file not written. */
+export const PLAYED = 0
+export const NOT_PLAYED = 1
+export const NOT_WHOLE = 2
+export const NOT_WRITTEN = 3
 
 function put16(b, o, v) {
   v = v & 0xffff
@@ -106,9 +116,10 @@ function put32(b, o, v) {
   put16(b, o + 2, (v >>> 16) & 0xffff)
 }
 
-/** VOICE played: a piece of a conversation's answer played out on the watch (ok false — it would not play). */
+/** VOICE played: a piece of a conversation's answer played out on the watch — ok true / false, or the outcome (PLAYED…). */
 export function voicePlayed(id, seg, ok) {
-  return new Uint8Array([0x53, id & 0xff, seg & 0xff, ok ? 0 : 1]).buffer
+  const outcome = ok === true ? PLAYED : ok === false ? NOT_PLAYED : ok
+  return new Uint8Array([0x53, id & 0xff, seg & 0xff, outcome & 0xff]).buffer
 }
 
 /** VOICE start: the note's id, its codec (1 — as recorded), samples a second, bytes in all (0 — not known yet). */
@@ -272,6 +283,7 @@ export function parseEvent(v) {
     e.seg = v[1]
     e.total = (v[2] | (v[3] << 8) | (v[4] << 16) | (v[5] << 24)) >>> 0
     e.ms = v[6] * 100
+    e.format = v.length >= 8 ? v[7] : TALK_WAV
   } else if (ev === EV_TALK_TEXT) {
     e.line = utf8(v, 1)
   }
@@ -1191,7 +1203,7 @@ export function createPacker(opts) {
           const rate = ((count - 1) * 1000) / (now - t0)
           factor = Math.max(1, Math.round(rate / target))
           const m = Math.sqrt(x * x + y * y + z * z) * scale
-          if (finder) opts.send(hello(opts.id, Math.max(1, Math.round(rate)), clamp16(m), opts.platform, VERSION_TURNS))
+          if (finder) opts.send(hello(opts.id, Math.max(1, Math.round(rate)), clamp16(m), opts.platform, opts.version || VERSION_TURNS))
           else opts.send(hello(opts.id, Math.max(1, Math.round(rate / factor)), clamp16(m), opts.platform))
           ready = true
         }

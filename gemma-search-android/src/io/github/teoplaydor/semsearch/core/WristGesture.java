@@ -20,7 +20,8 @@ package io.github.teoplaydor.semsearch.core;
  *
  * <p>The protocol (little-endian; fits the 20 bytes of a Bluetooth LE write):
  * <pre>
- *   HELLO  [0]=0x00 [1]=version: 1 — samples follow, 2 — the watch finds the turns
+ *   HELLO  [0]=0x00 [1]=version: 1 — samples follow, 2 — the watch finds the turns, 3 — and plays an answer's pieces
+ *          as MP3
  *          [2..5]=watch id (u32, random, kept by the watch) [6..7]=samples per second (u16)
  *          [8..9]=counts per g (u16, 0 = not known) [10..]=platform, ASCII (≤ 10)
  *   ACCEL  [0]=0x10|n (n = 1..15 samples) [1]=sequence (u8, +1 per packet) then n × (x, y, z) as int16
@@ -53,7 +54,11 @@ public final class WristGesture {
             SAMPLES = "a7b7e002-9ca3-4574-a1f0-3c9840e24d01",
             EVENTS = "a7b7e003-9ca3-4574-a1f0-3c9840e24d01";
     /** HELLO versions: the watch streams samples / the watch finds the turns itself. */
-    public static final int VERSION = 1, VERSION_TURNS = 2;
+    public static final int VERSION = 1, VERSION_TURNS = 2, VERSION_MP3 = 3;
+    /** EV_TALK_SEG's format: a WAV file (IMA ADPCM), an MP3 file. */
+    public static final int TALK_WAV = 0, TALK_MP3 = 1;
+    /** VOICE_PLAYED's outcome: played; the player would not; not whole (a write lost); the file not written. */
+    public static final int PLAYED = 0, NOT_PLAYED = 1, NOT_WHOLE = 2, NOT_WRITTEN = 3;
     public static final int KIND_HELLO = 0, KIND_ACCEL = 1, KIND_TURN = 2, KIND_SWING = 3, KIND_ROLL = 4, KIND_VOICE = 5,
             KIND_RAW = 6, KIND_DIAG = 7;
     /** VOICE packets; VOICE_PLAYED — a piece of a spoken answer played out on the watch ({@link #voicePlayed}). */
@@ -128,6 +133,11 @@ public final class WristGesture {
     /** Does the watch find the turns itself (ROLL packets) rather than stream samples? */
     public boolean recognises() {
         return version >= VERSION_TURNS;
+    }
+
+    /** The watch plays an answer's pieces as MP3 (its app 1.12 on). */
+    public boolean playsMp3() {
+        return version >= VERSION_MP3;
     }
 
     public String platform() {
@@ -385,14 +395,19 @@ public final class WristGesture {
         return p;
     }
 
-    /** EV_TALK_SEG: answer piece {@code seg} is whole — {@code bytes} long, {@code ms} to play. */
+    /** EV_TALK_SEG: answer piece {@code seg} is whole — {@code bytes} long, {@code ms} to play, a WAV file. */
     public static byte[] talkSeg(int seg, long bytes, int ms) {
+        return talkSeg(seg, bytes, ms, TALK_WAV);
+    }
+
+    /** EV_TALK_SEG with the piece's format ({@link #TALK_WAV}, {@link #TALK_MP3}). */
+    public static byte[] talkSeg(int seg, long bytes, int ms, int format) {
         byte[] p = new byte[8];
         p[0] = (byte) EV_TALK_SEG;
         p[1] = (byte) seg;
         put32(p, 2, bytes);
         p[6] = (byte) Math.min(255, (ms + 99) / 100);
-        p[7] = 0;
+        p[7] = (byte) format;
         return p;
     }
 
@@ -413,7 +428,12 @@ public final class WristGesture {
 
     /** VOICE_PLAYED (watch → phone): answer piece {@code seg} of conversation {@code id} played (ok) or not. */
     public static byte[] voicePlayed(int id, int seg, boolean ok) {
-        return new byte[]{(byte) VOICE_PLAYED, (byte) id, (byte) seg, (byte) (ok ? 0 : 1)};
+        return voicePlayed(id, seg, ok ? PLAYED : NOT_PLAYED);
+    }
+
+    /** VOICE_PLAYED with its outcome ({@link #PLAYED}, {@link #NOT_PLAYED}, {@link #NOT_WHOLE}, {@link #NOT_WRITTEN}). */
+    public static byte[] voicePlayed(int id, int seg, int outcome) {
+        return new byte[]{(byte) VOICE_PLAYED, (byte) id, (byte) seg, (byte) outcome};
     }
 
     /** VOICE start, data and end (for the tests: the watch's side is in its JavaScript). */

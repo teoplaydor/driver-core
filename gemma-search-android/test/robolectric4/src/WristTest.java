@@ -452,6 +452,60 @@ public class WristTest {
                     && sent.contains("toolResponse") && sent.contains("activityStart") && sent.contains("activityEnd")
                     && !sent.contains("audioStreamEnd") && !sent.contains("test-key"));
 
+            // a watch app that plays MP3 (HELLO version 3): the answer's pieces as MP3 — FFmpeg reads them; one the
+            // watch's player would not play is told so, and why goes to the log
+            cb.onCharacteristicWriteRequest(watch, 430, samples, false, true, 0,
+                    WristGesture.hello(WristGesture.VERSION_MP3, 0x12345678, 16, 981, "vela"));
+            WristLink.setVoiceNotes(app, true);
+            server.messages.clear();
+            WristLog.flush();
+            final long mp3From = WristLog.file(app).length();
+            cb.onCharacteristicWriteRequest(watch, 431, samples, false, true, 0,
+                    WristGesture.voiceStart(25, WristGesture.CODEC_ADPCM | WristGesture.CODEC_LIVE, 16000, 0));
+            for (int o = 0; o < voice.length; o += 238) {
+                cb.onCharacteristicWriteRequest(watch, 432, samples, false, true, 0,
+                        WristGesture.voiceData(25, o, voice, o, Math.min(238, voice.length - o)));
+                Thread.sleep(10);
+            }
+            Robo.waitFor("MP3 pieces of the answer", () -> {
+                synchronized (server.messages) {
+                    for (byte[] m : server.messages) if (m[0] == WristGesture.EV_TALK_SEG && m.length >= 8 && m[7] == WristGesture.TALK_MP3) return true;
+                }
+                return false;
+            });
+            Robo.waitFor("the answer over", () -> logSince(app, mp3From).contains("TALK turn: "));
+            java.util.Map<Integer, java.io.ByteArrayOutputStream> mp3s = new java.util.TreeMap<Integer, java.io.ByteArrayOutputStream>();
+            synchronized (server.messages) {
+                for (byte[] m : server.messages) {
+                    if (m[0] == WristGesture.EV_TALK_AUDIO) mp3s.computeIfAbsent(m[1] & 0xff, k -> new java.io.ByteArrayOutputStream()).write(m, 6, m.length - 6);
+                    if (m[0] == WristGesture.EV_TALK_SEG) assertEquals("every piece MP3", WristGesture.TALK_MP3, m[7]);
+                }
+            }
+            int decoded = 0;
+            for (java.util.Map.Entry<Integer, java.io.ByteArrayOutputStream> p : mp3s.entrySet()) {
+                byte[] mp3 = p.getValue().toByteArray();
+                assertTrue("an MPEG-2 Layer III frame first", (mp3[0] & 0xff) == 0xff && (mp3[1] & 0xff) == 0xf3);
+                File f = File.createTempFile("piece", ".mp3");
+                java.nio.file.Files.write(f.toPath(), mp3);
+                Process dec = new ProcessBuilder("ffmpeg", "-v", "error", "-i", f.getPath(), "-f", "s16le", "-ac", "1", "-").start();
+                byte[] pcm = readAll(dec.getInputStream());
+                String errs = new String(readAll(dec.getErrorStream()), StandardCharsets.UTF_8).trim();
+                dec.waitFor();
+                assertTrue("FFmpeg reads piece " + p.getKey() + ": " + errs, errs.isEmpty() && pcm.length > 0);
+                decoded += pcm.length / 2;
+            }
+            System.out.println("Gemini's answer to an MP3 watch: " + mp3s.size() + " piece(s), " + decoded + " samples at 16 kHz");
+            assertTrue("0.9 s of answer at 16 kHz (each piece with the encoder's delay): " + decoded, decoded >= 14400);
+            int firstSeg = mp3s.keySet().iterator().next();
+            cb.onCharacteristicWriteRequest(watch, 433, samples, false, true, 0, WristGesture.voicePlayed(25, firstSeg, WristGesture.NOT_PLAYED));
+            Robo.waitFor("why, in the log", () -> logSince(app, mp3From).contains("not played on the watch: the watch's player would not play it"));
+            String ml = logSince(app, mp3From);
+            assertTrue(ml, ml.contains("TALK piece " + firstSeg + " (MP3): "));
+            cb.onCharacteristicWriteRequest(watch, 434, samples, false, true, 0, WristGesture.voiceEnd(25, voice.length, 1700));
+            java.lang.reflect.Method stopMp3 = Class.forName("io.github.teoplaydor.semsearch.app.Talk").getDeclaredMethod("stop");
+            stopMp3.setAccessible(true);
+            stopMp3.invoke(null);
+
             // answers on the phone now: nothing to the watch but the text
             e.prefs().edit().putBoolean("wrist_talk_watch", false).apply();
             WristLink.setVoiceNotes(app, true);
@@ -672,6 +726,14 @@ public class WristTest {
             org.robolectric.shadows.ShadowAudioRecord.clearSource();
             e.uiVisible = wasVisible;
         }
+    }
+
+    static byte[] readAll(java.io.InputStream in) throws java.io.IOException {
+        java.io.ByteArrayOutputStream b = new java.io.ByteArrayOutputStream();
+        byte[] buf = new byte[65536];
+        int n;
+        while ((n = in.read(buf)) > 0) b.write(buf, 0, n);
+        return b.toByteArray();
     }
 
     static String logSince(Application app, long from) throws Exception {

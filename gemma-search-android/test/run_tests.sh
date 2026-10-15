@@ -89,6 +89,9 @@ java -Dfile.encoding=UTF-8 -Dstdout.encoding=UTF-8 -cp "$T/cls:$T/ort-desktop.ja
 # where speech starts and ends, found on the phone (the end of a phrase told to Gemini at once): made-up voices with
 # gaps between words, a street's noise, the answer heard back, the hand lowered
 java -Dfile.encoding=UTF-8 -Dstdout.encoding=UTF-8 -cp "$T/cls" SpeechTurnsTest
+# the answer's pieces for the watch as MP3 (core/Mp3, MPEG-2 Layer III): FFmpeg's decoder reads them without an error,
+# the sound back as it went in
+java -Dfile.encoding=UTF-8 -Dstdout.encoding=UTF-8 -cp "$T/cls" Mp3Test "$T/mp3"
 # a conversation with Gemini Live from the phone (core/GeminiLive over core/WebSocket) against a stand-in held to Google's
 # SDK (google-genai): the setup the same as the SDK's, every message valid for it, function calls, the answer's voice;
 # the answer for the watch as IMA ADPCM WAV that FFmpeg plays; the talk packets (also for the Robolectric WristTest)

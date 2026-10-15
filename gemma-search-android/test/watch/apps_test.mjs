@@ -308,7 +308,7 @@ async function vela() {
   const d = page.diag.match(/^поворот \d+° за [\d,]+ с · датчик (\d+) \(ui\) · компас ждёт · повороты (\d+) · записи (\d+): ✓(\d+) ✗(\d+) ⏱(\d+)/)
   ok(d && +d[1] > 200 && +d[2] === sent.length - 1 && +d[3] === all.length && +d[4] === all.length && +d[5] === 0,
     'vela: the counters on the screen — the last turn, sensor, turns, writes and how they ended («' + page.diag + '»)')
-  ok(sent.length === 3 && sent[0][2].startsWith('0002') && Buffer.from(sent[0][2].slice(20), 'hex').toString() === 'vela'
+  ok(sent.length === 3 && sent[0][2].startsWith('0003') && Buffer.from(sent[0][2].slice(20), 'hex').toString() === 'vela'
     && sent.slice(1).every((w) => w[2].startsWith('40')),
     'vela: HELLO (the watch finds the turns) first, then one packet per turn: ' + (sent.length - 1))
   ok(sent.every((w) => w[2].length <= 40 && w[0] === SERVICE && Array.isArray(w[3])), 'vela: every write fits 20 bytes, with its service and descriptors')
@@ -416,7 +416,7 @@ async function vela() {
     await advance(0)
   }
   ok(W.acc && W.acc.interval === 'normal' && p2.paceKnown, 'vela (static sensor): «ui» gave one value over and over — «normal» now')
-  const hellos = W.writes.slice(w1).filter((w) => w[1] === SAMPLES && w[2].startsWith('0002'))
+  const hellos = W.writes.slice(w1).filter((w) => w[1] === SAMPLES && w[2].startsWith('0003'))
   ok(hellos.length === 2 && hellos[0][2].slice(12, 16) === '1100' && hellos[1][2].slice(12, 16) === '0500',
     'vela (static sensor): HELLO at ~17 a second, then again at 5 (' + hellos.map((h) => h[2].slice(12, 16)).join(', ') + ')')
   p2.showDiag()
@@ -440,7 +440,7 @@ async function vela() {
   }
   await advance(300)
   const s5w = W.writes.slice(w3).filter((w) => w[1] === SAMPLES).filter(notDiag)
-  ok(s5w.length === 3 && s5w[0][2].startsWith('0002') && s5w[1][2].startsWith('40') && s5w[2][2].startsWith('40')
+  ok(s5w.length === 3 && s5w[0][2].startsWith('0003') && s5w[1][2].startsWith('40') && s5w[2][2].startsWith('40')
     && /повороты 2/.test(p3.diag), 'vela (S5: whole m/s², samples in batches): HELLO and both turns — «' + p3.diag + '»')
   fs.writeFileSync(path.join(out, 'vela_s5_app.hex'), s5w.map((w) => w[2]).join('\n') + '\n')
   p3.stop()
@@ -632,7 +632,7 @@ async function vela() {
   }
   await advance(300)
   const b6 = W.writes.slice(w6).filter((w) => w[1] === SAMPLES).filter(notDiag)
-  ok(b6.length === 3 && b6[0][2].startsWith('0002') && b6[1][2].startsWith('40') && b6[2][2].startsWith('40'),
+  ok(b6.length === 3 && b6[0][2].startsWith('0003') && b6[1][2].startsWith('40') && b6[2][2].startsWith('40'),
     'vela (background): no page — HELLO and both turns still sent')
   const plays6 = W.audioPlays
   W.audioOn = false
@@ -813,14 +813,15 @@ async function vela() {
   const liveId = parseInt(tw.find((w) => w.startsWith('50')).slice(2, 4), 16)
   // the answer: two pieces, the second while the first plays
   const wav = (n, seed) => { const b = Buffer.alloc(n); b.write('RIFF', 0); for (let i = 4; i < n; i++) b[i] = (i * seed) & 0xff; return b }
-  const sendPiece = (seg, b, skip) => {
+  const sendPiece = (seg, b, skip, format) => {
     for (let o = 0; o < b.length; o += 238) {
       if (skip && o === 238) continue
       const n = Math.min(238, b.length - o)
       say11([10, seg, o & 0xff, (o >> 8) & 0xff, 0, 0, ...b.subarray(o, o + n)])
     }
-    say11([11, seg, b.length & 0xff, (b.length >> 8) & 0xff, 0, 0, 9, 0])
+    say11([11, seg, b.length & 0xff, (b.length >> 8) & 0xff, 0, 0, 9, format || 0])
   }
+  ok(W.writes.some((w) => w[1] === SAMPLES && w[2].startsWith('0003')), 'vela (talk): HELLO says version 3 — the answer\'s pieces may come as MP3')
   const a1 = wav(1500, 7)
   const a2 = wav(900, 13)
   const w12 = W.writes.length
@@ -843,7 +844,25 @@ async function vela() {
   sendPiece(3, wav(800, 3), true)
   await flush(); await advance(100); await flush()
   const pl3 = W.writes.slice(w13).filter((w) => w[1] === SAMPLES && w[2].startsWith('53')).map((w) => w[2])
-  ok(pl3.join() === '53' + idh + '0301' && W.audio.src === '/common/quiet.mp3', 'vela (talk): a spoilt piece — told not played (' + pl3.join() + ')')
+  ok(pl3.join() === '53' + idh + '0302' && W.audio.src === '/common/quiet.mp3', 'vela (talk): a spoilt piece — told not whole (' + pl3.join() + ')')
+  // an MP3 piece (format 1): its file .mp3, played, told played
+  const m4 = Buffer.concat([Buffer.from([0xff, 0xf3, 0x84, 0xc4]), wav(700, 5).subarray(4)])
+  const w15 = W.writes.length
+  sendPiece(4, m4, false, 1)
+  await flush(); await flush()
+  ok(W.files['internal://files/talk0.mp3'] && W.files['internal://files/talk0.mp3'].equals(m4) && W.audio.src === 'internal://files/talk0.mp3',
+    'vela (talk): an MP3 piece — written as talk0.mp3 and played')
+  await advance(1000); await flush(); await advance(100); await flush()
+  const pl4 = W.writes.slice(w15).filter((w) => w[1] === SAMPLES && w[2].startsWith('53')).map((w) => w[2])
+  ok(pl4.join() === '53' + idh + '0400', 'vela (talk): …told played (' + pl4.join() + ')')
+  // the player would not: told so (1)
+  const w16 = W.writes.length
+  sendPiece(5, m4, false, 1)
+  await flush(); await flush()
+  W.audio.onerror()
+  await flush()
+  const pl5 = W.writes.slice(w16).filter((w) => w[1] === SAMPLES && w[2].startsWith('53')).map((w) => w[2])
+  ok(pl5.join() === '53' + idh + '0501', 'vela (talk): the player would not — told not played (' + pl5.join() + ')')
   say11([12, ...Buffer.from('Готово, напомню завтра в девять.')])
   ok(p11.note === 'Готово, напомню завтра в девять.', 'vela (talk): the answer\'s line shown — «' + p11.note + '»')
   say11([13])

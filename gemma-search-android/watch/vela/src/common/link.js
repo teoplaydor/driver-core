@@ -12,7 +12,7 @@ import {
   SERVICE, SAMPLES, EVENTS, EV_NEXT, EV_PREVIOUS, EV_LEARNED, EV_IGNORED, EV_PAUSE, EV_STREAM, EV_CONFIG, EV_VOICE_FROM,
   EV_VOICE_DONE, VOICE_SAVED, VOICE_SILENT, VOICE_KEPT, VOICE_ANSWER, SOURCE_COMPASS, RAW_MAX, advertises, createPacker,
   parseEvent, createTalk, createVoice, rawPacket, diagPacket, diagPackets, EV_TALK_AUDIO, EV_TALK_SEG, EV_TALK_TEXT, EV_TALK_END,
-  voicePlayed, CODEC_ADPCM, CODEC_LIVE
+  voicePlayed, CODEC_ADPCM, CODEC_LIVE, VERSION_MP3, TALK_MP3, PLAYED, NOT_PLAYED, NOT_WHOLE, NOT_WRITTEN
 } from './proto.js'
 
 /** The silence that keeps the app running in the background, and how soon it is started again when stopped. */
@@ -792,6 +792,8 @@ export function createLink(sys) {
       this.packer = createPacker({
         id: this.id,
         platform: 'vela',
+        // HELLO says this app plays a conversation's answer from MP3 pieces (the watch's player takes no ADPCM WAV)
+        version: VERSION_MP3,
         turns: true,
         send(buf) {
           self.send(buf)
@@ -1544,7 +1546,7 @@ export function createLink(sys) {
       this.talkIn = null
       if (!t || t.seg !== e.seg || t.bad || t.len !== e.total) {
         this.logLine('ответ: кусок ' + e.seg + ' не целый (' + (t ? t.len : 0) + ' из ' + e.total + ')', true)
-        this.send(voicePlayed(this.noteId, e.seg, false))
+        this.send(voicePlayed(this.noteId, e.seg, NOT_WHOLE))
         return
       }
       const buf = new Uint8Array(t.len)
@@ -1553,7 +1555,7 @@ export function createLink(sys) {
         buf.set(p, o)
         o += p.length
       }
-      const uri = 'internal://files/talk' + (e.seg % TALK_FILES) + '.wav'
+      const uri = 'internal://files/talk' + (e.seg % TALK_FILES) + (e.format === TALK_MP3 ? '.mp3' : '.wav')
       const self = this
       const seg = e.seg
       const ms = e.ms
@@ -1566,7 +1568,7 @@ export function createLink(sys) {
         }),
         fail: safe('ответ: файл', function (data, code) {
           self.logLine('ответ: файл не записан (' + code + ')', true)
-          self.send(voicePlayed(self.noteId, seg, false))
+          self.send(voicePlayed(self.noteId, seg, NOT_WRITTEN))
         })
       })
     },
@@ -1602,7 +1604,7 @@ export function createLink(sys) {
       if (this.talkTimer) clearTimeout(this.talkTimer)
       this.talkTimer = 0
       if (!ok) this.logLine('ответ: кусок ' + piece.seg + ' не сыгран', true)
-      this.send(voicePlayed(this.noteId, piece.seg, ok))
+      this.send(voicePlayed(this.noteId, piece.seg, ok ? PLAYED : NOT_PLAYED))
       this.playTalk()
     },
 

@@ -90,8 +90,11 @@ public class WristJsTest {
                 "RAW and DIAG (the log): read by the phone as the watch wrote them");
         ok(Arrays.equals(fixed.get(8), WristGesture.rawPacket(5, raw)), "RAW: the same bytes as the phone's");
         ok(Arrays.equals(fixed.get(10), WristGesture.voiceStart(7, WristGesture.CODEC_ADPCM | WristGesture.CODEC_LIVE, 16000, 0))
-                && Arrays.equals(fixed.get(11), WristGesture.voicePlayed(7, 3, true)) && Arrays.equals(fixed.get(12), WristGesture.voicePlayed(7, 4, false)),
-                "a conversation: the live voice's start and «played» — the same bytes as the phone's");
+                && Arrays.equals(fixed.get(11), WristGesture.voicePlayed(7, 3, true)) && Arrays.equals(fixed.get(12), WristGesture.voicePlayed(7, 4, false))
+                && Arrays.equals(fixed.get(13), WristGesture.voicePlayed(7, 5, WristGesture.NOT_WHOLE))
+                && Arrays.equals(fixed.get(14), WristGesture.voicePlayed(7, 6, WristGesture.NOT_WRITTEN))
+                && Arrays.equals(fixed.get(15), WristGesture.hello(WristGesture.VERSION_MP3, 0x0badcafe, 25, 1000, "vela")),
+                "a conversation: the live voice's start, «played» with its outcomes, HELLO version 3 (MP3 pieces) — the same bytes as the phone's");
         ok(Arrays.equals(fixed.get(5), WristGesture.voiceStart(7, WristGesture.CODEC_RECORDED, 16000, 0))
                 && Arrays.equals(fixed.get(6), WristGesture.voiceData(7, 70000, new byte[]{1, 2, 3, (byte) 250, (byte) 255}, 0, 5))
                 && Arrays.equals(fixed.get(7), WristGesture.voiceEnd(7, 70005, 4321)), "VOICE: the same bytes as the phone's");

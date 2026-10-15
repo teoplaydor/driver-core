@@ -80,6 +80,9 @@ fs.writeFileSync(path.join(out, 'fixed.hex'), [
   hex(P.voiceStart(7, P.CODEC_ADPCM | P.CODEC_LIVE, 16000, 0)),
   hex(P.voicePlayed(7, 3, true)),
   hex(P.voicePlayed(7, 4, false)),
+  hex(P.voicePlayed(7, 5, P.NOT_WHOLE)),
+  hex(P.voicePlayed(7, 6, P.NOT_WRITTEN)),
+  hex(P.hello(0x0badcafe, 25, 1000, 'vela', P.VERSION_MP3)),
 ].join('\n') + '\n')
 
 
@@ -343,7 +346,9 @@ ok(va.codec === P.CODEC_ADPCM && Buffer.from(va.bytes()).equals(encAll) && hex(v
   const au = P.parseEvent(u8([10, 3, 0xe8, 3, 0, 0, 9, 8, 7]))
   ok(au.ev === P.EV_TALK_AUDIO && au.seg === 3 && au.offset === 1000 && Array.from(au.data).join() === '9,8,7', 'EV_TALK_AUDIO: piece 3 at 1000, its bytes')
   const sg = P.parseEvent(u8([11, 3, 0x40, 0x20, 0, 0, 21, 0]))
-  ok(sg.ev === P.EV_TALK_SEG && sg.seg === 3 && sg.total === 0x2040 && sg.ms === 2100, 'EV_TALK_SEG: piece 3 whole, 8256 bytes, 2.1 s')
+  ok(sg.ev === P.EV_TALK_SEG && sg.seg === 3 && sg.total === 0x2040 && sg.ms === 2100 && sg.format === P.TALK_WAV, 'EV_TALK_SEG: piece 3 whole, 8256 bytes, 2.1 s, a WAV file')
+  const sm = P.parseEvent(u8([11, 4, 0x40, 0x20, 0, 0, 21, 1]))
+  ok(sm.format === P.TALK_MP3 && P.parseEvent(u8([11, 4, 0x40, 0x20, 0, 0, 21])).format === P.TALK_WAV, 'EV_TALK_SEG: an MP3 piece (format 1); no format byte — WAV')
   const tx = P.parseEvent(u8([12, ...Buffer.from('Готово')]))
   ok(tx.ev === P.EV_TALK_TEXT && tx.line === 'Готово', 'EV_TALK_TEXT: the line')
   ok(P.parseEvent(u8([13])).ev === P.EV_TALK_END, 'EV_TALK_END')
