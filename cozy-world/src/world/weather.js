@@ -347,36 +347,40 @@ export class Weather {
       const u = { ...baseUniforms(0), uCenter: { value: new THREE.Vector3(CAMPFIRE.x, HUB_H, CAMPFIRE.z) } };
       this.flies = add('fireflies', new THREE.Points(points(n(46)), material(FLY_VERT, FLY_FRAG, u, { blending: THREE.AdditiveBlending })), u);
     }
-    this._px = 0.001;
+    this._f = { time: 0, camera: null, atm: null, scale: 1 };
+  }
+
+  // Включить систему, если её доля заметна, и обновить общие униформы (кадр - в this._f).
+  _set(s, amount) {
+    s.obj.visible = amount > 0.02;
+    if (!s.obj.visible) return false;
+    const f = this._f, u = s.u;
+    u.uTime.value = f.time;
+    u.uAmount.value = amount;
+    u.uCam.value.copy(f.camera.position);
+    u.uScale.value = f.scale;
+    u.uSunDir.value.copy(f.atm.sunDir);
+    return true;
   }
 
   update(time, camera, atm, viewportH) {
     const scale = viewportH / (2 * Math.tan((camera.fov * Math.PI) / 360));
     const out = 1 - atm.indoor;
-    const near = (s, amount) => {
-      s.obj.visible = amount > 0.02;
-      if (!s.obj.visible) return false;
-      const u = s.u;
-      u.uTime.value = time;
-      u.uAmount.value = amount;
-      u.uCam.value.copy(camera.position);
-      u.uScale.value = scale;
-      u.uSunDir.value.copy(atm.sunDir);
-      return true;
-    };
+    const f = this._f;
+    f.time = time; f.camera = camera; f.atm = atm; f.scale = scale;
     // дождь: светлее дымки, на свету - с оттенком неба
-    if (near(this.rain, atm.rain)) {
+    if (this._set(this.rain, atm.rain)) {
       this.rain.u.uPx.value = 1 / scale;
       this.rain.u.uColor.value.copy(atm.fogColor).lerp(atm.hemiSky, 0.4).multiplyScalar(1.6);
     }
-    if (this.splash && near(this.splash, atm.rain)) this.splash.u.uColor.value.copy(atm.fogColor).lerp(atm.hemiSky, 0.5).multiplyScalar(1.3);
-    if (near(this.snow, atm.snow)) this.snow.u.uColor.value.copy(atm.hemiSky).lerp(atm.sunColor, 0.4).multiplyScalar(0.55 + atm.sunIntensity * 0.15 + atm.hemiIntensity * 0.2);
-    if (near(this.leaves, atm.leaves)) this.leaves.u.uColor.value.copy(atm.sunColor).multiplyScalar(0.55 + atm.sunIntensity * 0.12);
-    if (this.dust && near(this.dust, atm.dust * 0.9)) this.dust.u.uColor.value.copy(atm.sunColor).multiplyScalar(0.55);
-    if (this.pollen && near(this.pollen, atm.pollen * 0.8)) this.pollen.u.uColor.value.setRGB(1, 0.95, 0.7).multiplyScalar(0.5);
+    if (this.splash && this._set(this.splash, atm.rain)) this.splash.u.uColor.value.copy(atm.fogColor).lerp(atm.hemiSky, 0.5).multiplyScalar(1.3);
+    if (this._set(this.snow, atm.snow)) this.snow.u.uColor.value.copy(atm.hemiSky).lerp(atm.sunColor, 0.4).multiplyScalar(0.55 + atm.sunIntensity * 0.15 + atm.hemiIntensity * 0.2);
+    if (this._set(this.leaves, atm.leaves)) this.leaves.u.uColor.value.copy(atm.sunColor).multiplyScalar(0.55 + atm.sunIntensity * 0.12);
+    if (this.dust && this._set(this.dust, atm.dust * 0.9)) this.dust.u.uColor.value.copy(atm.sunColor).multiplyScalar(0.55);
+    if (this.pollen && this._set(this.pollen, atm.pollen * 0.8)) this.pollen.u.uColor.value.setRGB(1, 0.95, 0.7).multiplyScalar(0.5);
     // светлячки - только у костра
     const dx = camera.position.x - CAMPFIRE.x, dz = camera.position.z - CAMPFIRE.z;
     const fly = out * (1 - Math.min(1, Math.max(0, (Math.hypot(dx, dz) - 40) / 20)));
-    if (near(this.flies, fly)) this.flies.u.uColor.value.setRGB(1.0, 0.92, 0.42);
+    if (this._set(this.flies, fly)) this.flies.u.uColor.value.setRGB(1.0, 0.92, 0.42);
   }
 }

@@ -452,9 +452,10 @@ export class Game {
     const fp = p.cameraMode ? p.cameraMode === 'fp' : !p.wantThird; // C1
     const handsOn = this.state === 'play' && fp && !p.thirdPerson && !this.debugCam;
     if (this.post) {
-      this.post.render(this.world.scene, this.camera, {
-        hands: handsOn ? this.hands : null, water: this.world.water, grade: this.world.atmosphere.grade, dt,
-      });
+      const o = this._postOpts || (this._postOpts = { hands: null, water: this.world.water, grade: this.world.atmosphere.grade, dt: 0 });
+      o.hands = handsOn ? this.hands : null;
+      o.dt = dt;
+      this.post.render(this.world.scene, this.camera, o);
       return;
     }
     r.setRenderTarget(null);
