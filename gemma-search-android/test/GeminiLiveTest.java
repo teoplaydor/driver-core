@@ -21,11 +21,13 @@ import io.github.teoplaydor.semsearch.core.WristGesture;
  * A conversation with Gemini Live from the phone's side (core/GeminiLive over core/WebSocket), against a stand-in
  * server held to Google's SDK (test/gemini/live_mock.py): the setup the same as the SDK's; voice up in 100 ms pieces,
  * every message valid for the SDK; what was heard, a function call answered, the answer's voice (24 kHz) and text, turn
- * complete; a second turn after «the stream paused»; a wrong key closed with the server's reason; the live models
+ * complete; a second turn after «the stream paused»; the phone telling where speech starts and ends instead (the
+ * server's finding off, no thinking first — the setup the SDK's too): answered at «activity end», an answer cut short
+ * by «activity start»; a wrong key closed with the server's reason; the live models
  * listed over two pages and the best one first. And the answer's voice for the watch: IMA ADPCM WAV the way FFmpeg
  * reads it; the watch's live voice decoded piece by piece as in one go; the talk packets.
  *
- * usage: GeminiLiveTest PORT SETUP_REF_JSON CLIENT_LOG OUT_DIR
+ * usage: GeminiLiveTest PORT SETUP_REF_JSON CLIENT_LOG OUT_DIR [SETUP_REF_MANUAL_JSON]
  */
 public class GeminiLiveTest {
     static int bad = 0;
@@ -246,6 +248,89 @@ public class GeminiLiveTest {
         ok(refused.await(10, TimeUnit.SECONDS) && Integer.valueOf(1008).equals(why[0]) && String.valueOf(why[1]).contains("API key not valid"),
                 "a wrong key: closed with the server's reason (" + why[0] + " " + why[1] + ")");
         wrong.close();
+
+        // the phone telling where speech starts and ends (no waiting for the server to hear the silence), no thinking
+        GeminiLive.Config mc = new GeminiLive.Config();
+        mc.model = c.model;
+        mc.systemInstruction = c.systemInstruction;
+        mc.voice = c.voice;
+        mc.functions.add(saveNote());
+        mc.manualActivity = true;
+        mc.thinkingBudget = 0;
+        if (args.length > 4) {
+            Object mm = sorted(camel(MiniJson.parse(GeminiLive.setup(mc))));
+            Object ms = sorted(camel(MiniJson.parse(new String(Files.readAllBytes(new File(args[4]).toPath()), StandardCharsets.UTF_8).trim())));
+            ok(MiniJson.write(mm).equals(MiniJson.write(ms)), "setup, the phone finding the speech, no thinking: the same as the SDK's\n     phone: "
+                    + MiniJson.write(mm) + "\n     SDK:   " + MiniJson.write(ms));
+        }
+        final java.util.concurrent.LinkedBlockingQueue<String> ev = new java.util.concurrent.LinkedBlockingQueue<String>();
+        final StringBuilder said2 = new StringBuilder();
+        GeminiLive m = GeminiLive.connect(host, "test-key", mc, new GeminiLive.Listener() {
+            public void onReady() {
+                ev.add("ready");
+            }
+
+            boolean first = true;
+
+            public void onAudio(short[] pcm, int r) {
+                if (first) ev.add("audio");
+                first = false;
+            }
+
+            public void onInputText(String t) {
+            }
+
+            public void onOutputText(String t) {
+                synchronized (said2) {
+                    said2.append(t);
+                }
+            }
+
+            public void onTurnComplete() {
+                first = true;
+                ev.add("turn");
+            }
+
+            public void onInterrupted() {
+                ev.add("interrupted");
+            }
+
+            public void onToolCall(String id, String name, Map<String, Object> a) {
+                ev.add("call " + id + " " + name);
+            }
+
+            public void onGoAway(String t) {
+            }
+
+            public void onClosed(int code, String reason) {
+                ev.add("closed " + code + " " + reason);
+            }
+        });
+        ok("ready".equals(ev.poll(10, TimeUnit.SECONDS)), "the phone finding the speech: set up");
+        g = m;
+        g.sendAudio(voice, 0, 3200); // before any «activity start»: not a turn
+        g.activityStart();
+        for (int o = 0; o < voice.length; o += 320) g.sendAudio(voice, o, Math.min(320, voice.length - o));
+        long t0 = System.nanoTime();
+        g.activityEnd();
+        String e1 = ev.poll(10, TimeUnit.SECONDS);
+        ok("call call-1 save_note".equals(e1), "«activity end»: answered at once — " + e1 + String.format(" (%.0f ms)", (System.nanoTime() - t0) / 1e6));
+        g.toolResponse("call-1", "save_note", res);
+        String e2 = ev.poll(10, TimeUnit.SECONDS);
+        ok("audio".equals(e2), "the answer's voice — " + e2);
+        // spoken over: «activity start» while it plays
+        g.activityStart();
+        String e3 = ev.poll(10, TimeUnit.SECONDS), e4 = ev.poll(10, TimeUnit.SECONDS);
+        ok("interrupted".equals(e3) && "turn".equals(e4), "«activity start» while it plays: cut short — " + e3 + ", " + e4);
+        for (int o = 0; o < 8000; o += 320) g.sendAudio(voice, o, 320);
+        g.activityEnd();
+        String e5 = ev.poll(10, TimeUnit.SECONDS), e6 = ev.poll(10, TimeUnit.SECONDS);
+        String s2;
+        synchronized (said2) {
+            s2 = said2.toString();
+        }
+        ok("audio".equals(e5) && "turn".equals(e6) && s2.endsWith("Всё хорошо, спасибо!"), "what was said over it answered — «" + s2 + "»");
+        g.close();
 
         // the live models, both pages, best first
         List<String> models = GeminiLive.liveModels(host, "test-key");

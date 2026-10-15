@@ -22,15 +22,18 @@ import java.util.regex.Pattern;
 /**
  * A spoken conversation with Gemini through the Live API (BidiGenerateContent over a WebSocket), as Google's own SDK
  * (google-genai) speaks it: the setup (model, spoken answers, the system instruction, the functions it may call, both
- * sides transcribed, the end of speech found by the server), then the voice as it is said — 16 kHz PCM, base64 in
- * JSON — and back the answer's voice (PCM, 24 kHz), what each side said as text, «turn complete», «interrupted», the
- * function calls to answer. The key goes in a header (x-goog-api-key), never in the address.
+ * sides transcribed, the end of speech found by the server — or told by the phone, sooner: {@link #activityStart},
+ * {@link #activityEnd}), then the voice as it is said — 16 kHz PCM, base64 in JSON — and back the answer's voice (PCM,
+ * 24 kHz), what each side said as text, «turn complete», «interrupted», the function calls to answer. The key goes in a
+ * header (x-goog-api-key), never in the address.
  */
 public final class GeminiLive implements Closeable {
     public static final String HOST = "generativelanguage.googleapis.com";
     static final String WS_PATH = "/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent";
     /** The voice goes up at this rate. */
     public static final int IN_RATE = 16000;
+    /** The answer's voice comes at this rate. */
+    public static final int OUT_RATE = 24000;
 
     public interface Listener {
         /** Set up: the voice may go. */
@@ -73,6 +76,16 @@ public final class GeminiLive implements Closeable {
         public int silenceMs;
         /** How soon the server takes the speech for ended: «END_SENSITIVITY_HIGH» (sooner) or «…_LOW»; null — its default. */
         public String endSensitivity;
+        /**
+         * The server does not look for the speech's start and end itself: the client tells them ({@link #activityStart},
+         * {@link #activityEnd}) — no waiting for the server to hear the silence; the start of speech still cuts an
+         * answer short.
+         */
+        public boolean manualActivity;
+        /** The model's thinking before it answers, in tokens (0 — none); null — the model's default. */
+        public Integer thinkingBudget;
+        /** The same for the models that take a level («MINIMAL», «LOW», …); null — the model's default. */
+        public String thinkingLevel;
     }
 
     private final WebSocket ws;
@@ -126,6 +139,12 @@ public final class GeminiLive implements Closeable {
         if (c.voice != null && !c.voice.isEmpty()) {
             gen.put("speechConfig", map("voiceConfig", map("prebuiltVoiceConfig", map("voiceName", c.voice))));
         }
+        if (c.thinkingBudget != null || c.thinkingLevel != null) {
+            Map<String, Object> t = new LinkedHashMap<String, Object>();
+            if (c.thinkingBudget != null) t.put("thinkingBudget", c.thinkingBudget);
+            if (c.thinkingLevel != null) t.put("thinkingLevel", c.thinkingLevel);
+            gen.put("thinkingConfig", t);
+        }
         Map<String, Object> s = new LinkedHashMap<String, Object>();
         s.put("model", c.model.startsWith("models/") ? c.model : "models/" + c.model);
         s.put("generationConfig", gen);
@@ -133,7 +152,9 @@ public final class GeminiLive implements Closeable {
             s.put("systemInstruction", map("parts", list(map("text", c.systemInstruction)), "role", "user"));
         }
         if (!c.functions.isEmpty()) s.put("tools", list(map("functionDeclarations", new ArrayList<Object>(c.functions))));
-        if (c.silenceMs > 0 || c.endSensitivity != null) {
+        if (c.manualActivity) {
+            s.put("realtimeInputConfig", map("automaticActivityDetection", map("disabled", Boolean.TRUE)));
+        } else if (c.silenceMs > 0 || c.endSensitivity != null) {
             Map<String, Object> vad = new LinkedHashMap<String, Object>();
             if (c.endSensitivity != null) vad.put("endOfSpeechSensitivity", c.endSensitivity);
             if (c.silenceMs > 0) vad.put("silenceDurationMs", c.silenceMs);
@@ -170,9 +191,19 @@ public final class GeminiLive implements Closeable {
                 "mimeType", "audio/pcm;rate=" + IN_RATE)))));
     }
 
-    /** The voice paused (the microphone off for now): what was said is answered. */
+    /** The voice paused (the microphone off for now): what was said is answered (the server finding the speech only). */
     public void audioStreamEnd() throws IOException {
         ws.sendText(MiniJson.write(map("realtimeInput", map("audioStreamEnd", Boolean.TRUE))));
+    }
+
+    /** Speech begins ({@link Config#manualActivity}): the voice from here is the turn; an answer playing is cut short. */
+    public void activityStart() throws IOException {
+        ws.sendText(MiniJson.write(map("realtimeInput", map("activityStart", new LinkedHashMap<String, Object>()))));
+    }
+
+    /** The speech is over ({@link Config#manualActivity}): answered at once. */
+    public void activityEnd() throws IOException {
+        ws.sendText(MiniJson.write(map("realtimeInput", map("activityEnd", new LinkedHashMap<String, Object>()))));
     }
 
     /** Something typed instead of said. */

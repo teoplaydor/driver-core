@@ -2,7 +2,6 @@ package io.github.teoplaydor.semsearch.app;
 
 import android.content.Context;
 import android.media.AudioAttributes;
-import android.media.AudioFormat;
 import android.media.AudioTrack;
 import android.os.Handler;
 import android.os.Looper;
@@ -21,6 +20,7 @@ import java.util.concurrent.Executors;
 import io.github.teoplaydor.semsearch.core.Adpcm;
 import io.github.teoplaydor.semsearch.core.GeminiLive;
 import io.github.teoplaydor.semsearch.core.Pcm;
+import io.github.teoplaydor.semsearch.core.SpeechTurns;
 import io.github.teoplaydor.semsearch.core.WristGesture;
 
 /**
@@ -35,7 +35,11 @@ import io.github.teoplaydor.semsearch.core.WristGesture;
  */
 final class Talk {
     static final String PREF_KEY = "gemini_key", PREF_MODEL = "gemini_model", PREF_ON = "wrist_talk", PREF_ON_WATCH = "wrist_talk_watch",
-            PREF_LAST = "gemini_last", PREF_HEADSET = "wrist_talk_headset";
+            PREF_LAST = "gemini_last", PREF_HEADSET = "wrist_talk_headset", PREF_END_PAUSE = "gemini_end_pause",
+            PREF_THINK_REFUSED = "gemini_think_refused";
+    /** The pause that ends a phrase (ms), as the settings offer it: the shorter, the sooner the answer. */
+    static final int[] END_PAUSES = {200, 250, 400};
+    static final int END_PAUSE = 250;
     /** After the watch's headset failed to open, not offered to the watch again for this long. */
     static final long HEADSET_PAUSE_MS = 10 * 60_000L;
     /** The hand down right after speaking: the headset kept this long for the answer to begin. */
@@ -154,8 +158,19 @@ final class Talk {
     private boolean connecting, closing, goingAway;
     private final ExecutorService net = Executors.newSingleThreadExecutor();
     private final ExecutorService speaker = Executors.newSingleThreadExecutor();
-    private final List<short[]> early = new ArrayList<short[]>();
+    /** What was said before Gemini is ready: the frames of a turn, its start and end — sent in order once it is. */
+    private final List<Object> early = new ArrayList<Object>();
     private int earlySamples;
+    /** Gemini took the setup: what is said goes straight on. */
+    private boolean ready;
+    /** Where speech starts and ends, found on the phone — told to Gemini at once (it does not wait for the silence). */
+    private final SpeechTurns turns = new SpeechTurns();
+    private static final Object START = new Object(), END = new Object();
+    /** When the last phrase's speech ended, when its end went to Gemini (elapsedRealtime). */
+    private long speechEndAt, endSentAt;
+    /** The answer asked for without thinking first (refused by a model: once more without, and not asked again). */
+    private boolean thinkingOff, thinkingRetried;
+    private String modelName = "";
     private Adpcm.Decoder dec = new Adpcm.Decoder();
     private int id = -1;
     private long expected;
@@ -201,6 +216,16 @@ final class Talk {
     private Talk(Context c, Watch w) {
         this.c = c.getApplicationContext();
         this.watch = w;
+        turns.endSilenceMs = endPause(c);
+    }
+
+    /** The pause that ends a phrase, ms. */
+    static int endPause(Context c) {
+        return WristLink.prefs(c).getInt(PREF_END_PAUSE, END_PAUSE);
+    }
+
+    static void setEndPause(Context c, int ms) {
+        WristLink.prefs(c).edit().putInt(PREF_END_PAUSE, ms).apply();
     }
 
     private void log(String text) {
@@ -275,6 +300,9 @@ final class Talk {
         dec = new Adpcm.Decoder();
         handDown = false;
         raisedAt = SystemClock.elapsedRealtime();
+        if (turns.active()) turns.finish(sink); // a phrase still open is told over first (Gemini would wait for its end)
+        turns.reset();
+        turns.endSilenceMs = endPause(c);
         viaHeadset = (codec & 0x7f) == 0;
         MAIN.removeCallbacks(headsetCloser);
         duplex = viaHeadset || headphones(c);
@@ -283,6 +311,7 @@ final class Talk {
                 ? "through the watch as a headset (both ways at once)" : duplex ? "in the headphones (may be spoken over)"
                 : watchAudio ? "on the watch" : "on the phone's speaker") + (live != null && live.ready() ? " (the conversation goes on)" : ""));
         if (viaHeadset) openHeadset();
+        else if (!watchAudio) warmSpeaker();
         WristLink.setStatus("разговор с Gemini…");
     }
 
@@ -300,8 +329,14 @@ final class Talk {
                         model = m.get(0);
                         setModel(c, model);
                     }
-                    log("connecting " + model);
-                    GeminiLive g = GeminiLive.connect(host(), key(c), config(model), listener);
+                    GeminiLive.Config cfg = config(model);
+                    boolean noThinking = noThinking(cfg, model);
+                    synchronized (Talk.this) {
+                        modelName = model;
+                        thinkingOff = noThinking;
+                    }
+                    log("connecting " + model + (noThinking ? " (answers without thinking first)" : ""));
+                    GeminiLive g = GeminiLive.connect(host(), key(c), cfg, listener);
                     synchronized (Talk.this) {
                         live = g;
                         if (closing) g.close();
@@ -316,9 +351,8 @@ final class Talk {
     private GeminiLive.Config config(String model) {
         GeminiLive.Config cfg = new GeminiLive.Config();
         cfg.model = model;
-        // the end of a phrase taken soon (half a second of silence): the answer starts sooner
-        cfg.silenceMs = 500;
-        cfg.endSensitivity = "END_SENSITIVITY_HIGH";
+        // the phone tells where speech starts and ends (SpeechTurns): no waiting for the server to hear the silence
+        cfg.manualActivity = true;
         cfg.systemInstruction = "Ты голосовой помощник, с которым говорят через умные часы: человек подносит часы ко рту и говорит, "
                 + "ответ слушает из маленького динамика. Отвечай по-русски (или на языке, на котором спросили), коротко и по делу — "
                 + "одно-три предложения, если не просят подробнее; без списков и разметки. Если просят что-то запомнить, записать или "
@@ -330,6 +364,25 @@ final class Talk {
                 "text", "Текст заметки, как его сказал человек, со временем напоминания словами"));
         cfg.functions.add(function("ask_notes", "Найти ответ в заметках человека", "question", "Вопрос"));
         return cfg;
+    }
+
+    /**
+     * The model asked to answer at once, without thinking first (the native-audio models think by default — time
+     * before the first sound): Gemini 2.5 — a budget of 0, Gemini 3 — the least level. Not for a model that refused it.
+     */
+    private boolean noThinking(GeminiLive.Config cfg, String model) {
+        String refused = WristLink.prefs(c).getString(PREF_THINK_REFUSED, "");
+        if (("\n" + refused + "\n").contains("\n" + model + "\n")) return false;
+        String m = model.toLowerCase(Locale.ROOT);
+        if (m.contains("gemini-3")) {
+            cfg.thinkingLevel = "MINIMAL";
+            return true;
+        }
+        if (m.contains("2.5") && m.contains("native-audio")) {
+            cfg.thinkingBudget = 0;
+            return true;
+        }
+        return false;
     }
 
     private static Map<String, Object> function(String name, String description, String param, String paramDescription) {
@@ -390,7 +443,7 @@ final class Talk {
                 boolean tone;
                 synchronized (Talk.this) {
                     headsetReady = true;
-                    tone = live != null && live.ready();
+                    tone = ready;
                     if (!tone) toneDue = true;
                 }
                 log("headset open in " + (SystemClock.elapsedRealtime() - t0) + " ms: " + Headset.name(c));
@@ -454,17 +507,75 @@ final class Talk {
             for (short v : pcm) e += (double) v * v;
             boolean loud = pcm.length > 0 && Math.sqrt(e / pcm.length) >= LOUD;
             if (loud) lastLoudAt = SystemClock.elapsedRealtime();
-            if (muted()) return;
-            if (loud) unanswered = true;
-            if (live == null || !live.ready()) {
-                if (earlySamples < EARLY_S * GeminiLive.IN_RATE) {
-                    early.add(pcm);
-                    earlySamples += pcm.length;
-                }
+            if (handDown) return;
+            if (muted()) {
+                // one at a time (the answer from a speaker): a phrase still going is over
+                if (turns.active()) turns.finish(sink);
                 return;
             }
+            // while the answer plays (in the headphones, the watch as a headset) it may come back in the microphone:
+            // speech must be louder and longer to cut it short
+            turns.feed(pcm, duplex && (answering || SystemClock.elapsedRealtime() < playingUntil), sink);
         }
-        send(pcm);
+    }
+
+    /** The turns found in the voice (called under the lock). */
+    private final SpeechTurns.Sink sink = new SpeechTurns.Sink() {
+        @Override
+        public void start() {
+            unanswered = true;
+            queue(START);
+        }
+
+        @Override
+        public void audio(short[] frame) {
+            queue(frame);
+        }
+
+        @Override
+        public void end(int silentMs) {
+            speechEndAt = SystemClock.elapsedRealtime() - silentMs;
+            queue(END);
+        }
+    };
+
+    /** On to Gemini in order, or kept till it is ready (under the lock). */
+    private void queue(Object o) {
+        if (ready) {
+            dispatch(o);
+            return;
+        }
+        if (o instanceof short[]) {
+            if (earlySamples >= EARLY_S * GeminiLive.IN_RATE) return;
+            earlySamples += ((short[]) o).length;
+        }
+        early.add(o);
+    }
+
+    private void dispatch(final Object o) {
+        onNet(new Runnable() {
+            @Override
+            public void run() {
+                GeminiLive g = live;
+                if (g == null || !g.ready()) return;
+                try {
+                    if (o == START) {
+                        g.activityStart();
+                    } else if (o == END) {
+                        g.activityEnd();
+                        synchronized (Talk.this) {
+                            endSentAt = SystemClock.elapsedRealtime();
+                        }
+                    } else {
+                        short[] f = (short[]) o;
+                        g.sendAudio(f, 0, f.length);
+                        voiceSent += f.length;
+                    }
+                } catch (java.io.IOException e) {
+                    // the close is told by the listener
+                }
+            }
+        });
     }
 
     /** On the network thread (nothing once closed). */
@@ -476,72 +587,59 @@ final class Talk {
         }
     }
 
-    private void send(final short[] pcm) {
-        onNet(new Runnable() {
-            @Override
-            public void run() {
-                GeminiLive g = live;
-                if (g == null || !g.ready()) return;
-                try {
-                    g.sendAudio(pcm, 0, pcm.length);
-                    voiceSent += pcm.length;
-                } catch (java.io.IOException e) {
-                    // the close is told by the listener
-                }
-            }
-        });
-    }
-
     private void lowered() {
         synchronized (this) {
             handDown = true;
+            // the hand down ends the phrase at once: no pause to wait for
+            turns.finish(sink);
         }
         log(String.format(Locale.ROOT, "lowered id=%d, voice passed on %.1f s", id, voiceSent / (float) GeminiLive.IN_RATE));
-        onNet(new Runnable() {
-            @Override
-            public void run() {
-                GeminiLive g = live;
-                try {
-                    if (g != null && g.ready()) g.audioStreamEnd();
-                } catch (java.io.IOException ignored) {
-                    // closed: told by the listener
-                }
-            }
-        });
         idleLater();
     }
 
     private final GeminiLive.Listener listener = new GeminiLive.Listener() {
         @Override
         public void onReady() {
-            List<short[]> pending;
+            int pending;
             synchronized (Talk.this) {
                 connecting = false;
-                pending = new ArrayList<short[]>(early);
+                ready = true;
+                // in order, before anything said from now on
+                for (Object o : early) dispatch(o);
+                pending = early.size();
                 early.clear();
                 earlySamples = 0;
             }
-            log("ready in " + (SystemClock.elapsedRealtime() - connectAt) + " ms; voice said meanwhile " + pending.size() + " pieces");
-            for (short[] p : pending) send(p);
+            log("ready in " + (SystemClock.elapsedRealtime() - connectAt) + " ms; said meanwhile " + pending + " pieces");
             Headset h = null;
             synchronized (Talk.this) {
                 if (toneDue && headsetReady) h = headset;
                 toneDue = false;
             }
             if (h != null) h.tone(true); // Gemini listens: a rising tone in the watch
-            if (handDown) lowered();
         }
 
         @Override
         public void onAudio(short[] pcm, int rate) {
             List<byte[]> out = null;
+            Runnable mark = null;
             synchronized (Talk.this) {
                 if (firstAudioOfTurn) {
-                    // how soon the answer came: from the end of the voice (its last loud piece) to its first sound here
+                    // how soon the answer came: from the end of the speech (as the phone found it; else its last loud
+                    // piece) to its first sound here — the pause that ended it, then Gemini's own time
                     firstAudioOfTurn = false;
                     unanswered = false;
                     long now = SystemClock.elapsedRealtime();
-                    log("answer in " + (now - Math.max(lastLoudAt, raisedAt)) + " ms after the voice");
+                    boolean found = speechEndAt >= raisedAt && speechEndAt > 0;
+                    final long from = found ? speechEndAt : Math.max(lastLoudAt, raisedAt);
+                    log("answer in " + (now - from) + " ms after the voice" + (found && endSentAt >= speechEndAt
+                            ? " (the pause " + (endSentAt - speechEndAt) + " ms, Gemini " + (now - endSentAt) + " ms)" : ""));
+                    mark = new Runnable() {
+                        @Override
+                        public void run() {
+                            log("sound out " + (SystemClock.elapsedRealtime() - from) + " ms after the voice");
+                        }
+                    };
                 }
                 answering = true;
                 turnDone = false;
@@ -565,10 +663,10 @@ final class Talk {
                 synchronized (Talk.this) {
                     playingUntil = Math.max(playingUntil, SystemClock.elapsedRealtime()) + 1000L * pcm.length / rate;
                 }
-                h.play(pcm, rate);
+                h.play(pcm, rate, mark);
                 return;
             }
-            speak(pcm, rate);
+            speak(pcm, rate, mark);
         }
 
         @Override
@@ -647,9 +745,21 @@ final class Talk {
         @Override
         public void onClosed(int code, String reason) {
             log("closed " + code + " " + reason);
-            boolean mine;
+            boolean mine, again;
+            String model;
             synchronized (Talk.this) {
                 mine = closing;
+                // refused before it was set up, having been asked to answer without thinking: once more without it
+                again = !mine && !ready && thinkingOff && !thinkingRetried && (reason == null || !reason.toLowerCase(Locale.ROOT).contains("key"));
+                if (again) thinkingRetried = true;
+                model = modelName;
+            }
+            if (again) {
+                String refused = WristLink.prefs(c).getString(PREF_THINK_REFUSED, "");
+                WristLink.prefs(c).edit().putString(PREF_THINK_REFUSED, refused.isEmpty() ? model : refused + "\n" + model).apply();
+                log("the model refused to answer without thinking: again with its own way");
+                connect();
+                return;
             }
             if (!mine) fail(code == 1000 ? "разговор закрыт" : "Gemini: " + (reason == null || reason.isEmpty() ? "код " + code : reason));
         }
@@ -776,8 +886,28 @@ final class Talk {
         }
     }
 
+    /** The phone's player made before the answer comes (making it then would delay the first sound). */
+    private void warmSpeaker() {
+        try {
+            speaker.execute(new Runnable() {
+                @Override
+                public void run() {
+                    if (track != null) return;
+                    try {
+                        track = Headset.track(AudioAttributes.USAGE_MEDIA, GeminiLive.OUT_RATE);
+                        track.play();
+                    } catch (RuntimeException e) {
+                        log("phone speaker: " + e);
+                    }
+                }
+            });
+        } catch (java.util.concurrent.RejectedExecutionException ignored) {
+            // closed
+        }
+    }
+
     /** The answer on the phone: its speaker, or the headphones. */
-    private void speak(final short[] pcm, final int rate) {
+    private void speak(final short[] pcm, final int rate, final Runnable mark) {
         final int gen;
         synchronized (this) {
             playingUntil = Math.max(playingUntil, SystemClock.elapsedRealtime()) + 1000L * pcm.length / rate;
@@ -791,14 +921,11 @@ final class Talk {
                 try {
                     if (track == null || track.getSampleRate() != rate) {
                         if (track != null) track.release();
-                        int min = AudioTrack.getMinBufferSize(rate, AudioFormat.CHANNEL_OUT_MONO, AudioFormat.ENCODING_PCM_16BIT);
-                        track = new AudioTrack(new AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_MEDIA)
-                                .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH).build(), new AudioFormat.Builder().setSampleRate(rate)
-                                .setEncoding(AudioFormat.ENCODING_PCM_16BIT).setChannelMask(AudioFormat.CHANNEL_OUT_MONO).build(),
-                                Math.max(min, rate), AudioTrack.MODE_STREAM, android.media.AudioManager.AUDIO_SESSION_ID_GENERATE);
+                        track = Headset.track(AudioAttributes.USAGE_MEDIA, rate);
                         track.play();
                     }
-                    track.write(pcm, 0, pcm.length);
+                    Headset.write(track, pcm);
+                    if (mark != null) mark.run();
                 } catch (RuntimeException e) {
                     log("phone speaker: " + e);
                 }

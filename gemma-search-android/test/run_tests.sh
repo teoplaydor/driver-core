@@ -86,16 +86,20 @@ python3 -m pip install -q onnx-asr==0.12.0 onnx onnxruntime numpy
 rm -rf "$T/gigaam" && python3 test/gigaam/make_gigaam_dummy.py "$T/gigaam"
 python3 test/gigaam/reference_gigaam.py "$T/gigaam" > "$T/gigaam/reference.json"
 java -Dfile.encoding=UTF-8 -Dstdout.encoding=UTF-8 -cp "$T/cls:$T/ort-desktop.jar" GigaAmTest "$T/gigaam"
+# where speech starts and ends, found on the phone (the end of a phrase told to Gemini at once): made-up voices with
+# gaps between words, a street's noise, the answer heard back, the hand lowered
+java -Dfile.encoding=UTF-8 -Dstdout.encoding=UTF-8 -cp "$T/cls" SpeechTurnsTest
 # a conversation with Gemini Live from the phone (core/GeminiLive over core/WebSocket) against a stand-in held to Google's
 # SDK (google-genai): the setup the same as the SDK's, every message valid for it, function calls, the answer's voice;
 # the answer for the watch as IMA ADPCM WAV that FFmpeg plays; the talk packets (also for the Robolectric WristTest)
 python3 -m pip install -q google-genai websockets
 mkdir -p "$T/gemini"
 python3 test/gemini/live_mock.py setup-ref > "$T/gemini/setup_ref.json"
+python3 test/gemini/live_mock.py setup-ref manual > "$T/gemini/setup_ref_manual.json"
 python3 test/gemini/live_mock.py serve 18766 "$T/gemini/client.jsonl" > "$T/gemini/mock.out" 2>&1 &
 MOCK=$!
 sleep 3
-java -Dfile.encoding=UTF-8 -Dstdout.encoding=UTF-8 -cp "$T/cls" GeminiLiveTest 18766 "$T/gemini/setup_ref.json" "$T/gemini/client.jsonl" "$T/gemini" \
+java -Dfile.encoding=UTF-8 -Dstdout.encoding=UTF-8 -cp "$T/cls" GeminiLiveTest 18766 "$T/gemini/setup_ref.json" "$T/gemini/client.jsonl" "$T/gemini" "$T/gemini/setup_ref_manual.json" \
   || { kill $MOCK; exit 1; }
 kill $MOCK
 # the watch apps (Xiaomi Vela, Zepp OS): their protocol module and their pages over stand-ins of the watches' modules,

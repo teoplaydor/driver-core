@@ -57,7 +57,7 @@ final class SettingsPanel extends FrameLayout implements Engine.Listener {
     private TextView talkKey, talkModel, talkNote;
     private Toggle talkToggle, talkWatchToggle, talkHeadsetToggle;
     private View talkWatchRow, talkHeadsetRow;
-    private TextView talkHeadsetHint;
+    private TextView talkHeadsetHint, talkPause;
     private Toggle speechToggle;
     private View speechToggleRow;
     private ProgressLine speechProgress;
@@ -1312,6 +1312,18 @@ final class SettingsPanel extends FrameLayout implements Engine.Listener {
         });
         talkHeadsetRow = toggleRow(card, "Часы как гарнитура", "", talkHeadsetToggle);
         talkHeadsetHint = (TextView) ((LinearLayout) ((LinearLayout) talkHeadsetRow).getChildAt(0)).getChildAt(1);
+        talkPause = row(card, "Конец фразы", "пауза, после которой Gemini сразу отвечает: короче — быстрее ответ, но можно не успеть "
+                + "договорить (тогда просто продолжайте — он замолчит и дослушает). Опущенная рука — конец сразу", new Runnable() {
+            @Override
+            public void run() {
+                int now = Talk.endPause(getContext()), next = Talk.END_PAUSES[0];
+                for (int i = 0; i < Talk.END_PAUSES.length; i++) {
+                    if (Talk.END_PAUSES[i] == now) next = Talk.END_PAUSES[(i + 1) % Talk.END_PAUSES.length];
+                }
+                Talk.setEndPause(getContext(), next);
+                showTalk();
+            }
+        });
         talkWatchRow = toggleRow(card, "Ответ звучит в часах", "когда часы не гарнитура: кусками, с задержкой около секунды; выключено — "
                 + "в динамике телефона. Наушники у телефона — всегда в них", talkWatchToggle);
         talkNote = note(card);
@@ -1439,6 +1451,9 @@ final class SettingsPanel extends FrameLayout implements Engine.Listener {
         talkWatchRow.setVisibility(Talk.chosen(c) ? VISIBLE : GONE);
         if (talkHeadsetToggle.isOn() != Talk.headset(c)) talkHeadsetToggle.setOn(Talk.headset(c), false);
         talkHeadsetRow.setVisibility(Talk.chosen(c) ? VISIBLE : GONE);
+        int pause = Talk.endPause(c);
+        talkPause.setText("0," + (pause % 100 == 0 ? pause / 100 : pause / 10) + " с");
+        rowOf(talkPause).setVisibility(Talk.chosen(c) ? VISIBLE : GONE);
         String hs = Headset.name(c);
         talkHeadsetHint.setText(hs.isEmpty()
                 ? "голос и ответ потоком в обе стороны, как в звонке; сейчас не подключены — включите на часах Bluetooth-звонки"

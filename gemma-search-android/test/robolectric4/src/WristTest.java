@@ -380,9 +380,10 @@ public class WristTest {
             assertEquals("told: at the mouth — a conversation, answers on the watch (MTU 247)",
                     WristGesture.CFG_TALK | WristGesture.CFG_TALK_WATCH, cfg[1] & (WristGesture.CFG_TALK | WristGesture.CFG_TALK_WATCH));
 
-            // the watch at the mouth: its live voice, ADPCM as the watch makes it, in writes as it is said
-            float[] x = new float[16000 * 13 / 10];
-            for (int i = 0; i < x.length; i++) x[i] = (float) (0.3 * Math.sin(2 * Math.PI * 200 * i / 16000.0));
+            // the watch at the mouth: its live voice, ADPCM as the watch makes it, in writes as it is said — 1.3 s said,
+            // then a pause (the phone finds the end of the phrase and tells Gemini at once)
+            float[] x = new float[16000 * 17 / 10];
+            for (int i = 0; i < 16000 * 13 / 10; i++) x[i] = (float) (0.3 * Math.sin(2 * Math.PI * 200 * i / 16000.0));
             byte[] voice = adpcm(x);
             BluetoothGattServerCallback cb = sg.getGattServerCallback();
             cb.onCharacteristicWriteRequest(watch, 400, samples, false, true, 0,
@@ -428,7 +429,11 @@ public class WristTest {
             assertTrue("0.9 s of answer at 8 kHz: " + total, Math.abs(total - 7200) < 200);
             WristLog.flush();
             String wlog = new String(java.nio.file.Files.readAllBytes(WristLog.file(app).toPath()), StandardCharsets.UTF_8);
-            assertTrue(wlog, wlog.contains("TALK connecting models/gemini-3-flash-native-audio-preview-2026-03-02"));
+            assertTrue(wlog, wlog.contains("TALK connecting models/gemini-3-flash-native-audio-preview-2026-03-02 (answers without thinking first)"));
+            // this model refuses the thinking config (the stand-in): once more without it, and not asked again
+            assertTrue(wlog, wlog.contains("TALK the model refused to answer without thinking: again with its own way"));
+            assertTrue(wlog, wlog.contains("TALK connecting models/gemini-3-flash-native-audio-preview-2026-03-02\n")
+                    || wlog.contains("TALK connecting models/gemini-3-flash-native-audio-preview-2026-03-02\r"));
             assertTrue(wlog, wlog.contains("TALK call save_note") && wlog.contains("TALK turn: you «Напомни завтра в 9 купить хлеб» — Gemini «Готово, напомню завтра в девять.»"));
             // played on the watch; the hand down: kept a while, then closed and the watch told
             for (int sgn : pieces.keySet()) cb.onCharacteristicWriteRequest(watch, 402, samples, false, true, 0, WristGesture.voicePlayed(20, sgn, true));
@@ -443,8 +448,9 @@ public class WristTest {
             }
             assertTrue("closed, the watch told", told(server, WristGesture.EV_TALK_END));
             String sent = new String(java.nio.file.Files.readAllBytes(log.toPath()), StandardCharsets.UTF_8);
-            assertTrue("every message the SDK's; the voice went up", sent.contains("\"realtimeInput\"") && sent.contains("toolResponse")
-                    && sent.contains("audioStreamEnd") && !sent.contains("test-key"));
+            assertTrue("every message the SDK's; the voice went up, its start and end told by the phone", sent.contains("\"realtimeInput\"")
+                    && sent.contains("toolResponse") && sent.contains("activityStart") && sent.contains("activityEnd")
+                    && !sent.contains("audioStreamEnd") && !sent.contains("test-key"));
 
             // answers on the phone now: nothing to the watch but the text
             e.prefs().edit().putBoolean("wrist_talk_watch", false).apply();
@@ -630,16 +636,19 @@ public class WristTest {
             assertFalse("nothing recorded by the watch's app: no pieces to it", told(server, WristGesture.EV_TALK_AUDIO));
             int tone = 0, answer = 0;
             synchronized (played) {
-                for (int[] p : played) {
+                for (int i = 0; i < played.size(); i++) {
+                    int[] p = played.get(i);
                     assertEquals("on the voice call's channel", android.media.AudioAttributes.USAGE_VOICE_COMMUNICATION, p[0]);
-                    if (p[1] == 16000) tone += p[2];
-                    else if (p[1] == 24000) answer += p[2];
+                    assertEquals("one player at the answers' rate (the tone too: nothing made again for the answer)", 24000, p[1]);
+                    if (i == 0) tone = p[2];
+                    else answer += p[2];
                 }
             }
-            assertEquals("the rising tone: Gemini listens", 16000 / 8 * 2 * 2, tone);
+            assertEquals("the rising tone first: Gemini listens", 24000 / 8 * 2 * 2, tone);
             assertTrue("the answer as a stream: " + answer, answer > 0);
             java.util.regex.Matcher lm = java.util.regex.Pattern.compile("TALK answer in (\\d+) ms after the voice").matcher(dl);
             assertTrue(dl, lm.find());
+            assertTrue("how long, part by part: " + dl, dl.contains(" ms after the voice (the pause ") && dl.contains("TALK sound out "));
             System.out.println("through the watch as a headset: the answer began " + lm.group(1) + " ms after the voice, "
                     + answer / 2 + " samples at 24 kHz played on the call's channel, spoken over — stopped; the watch's microphone "
                     + String.format(java.util.Locale.ROOT, "%.1f", heard.get() / 16000.0) + " s");
