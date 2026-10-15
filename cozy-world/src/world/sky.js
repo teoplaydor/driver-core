@@ -51,8 +51,14 @@ function cloudAtlas(scale = 1) {
       const r = (flat ? 6 : 9) + (1 - h / Math.max(1, maxH)) * (flat ? 6 : 12) + rand() * 6;
       puffs.push([CELL_W * t, base + Math.max(r * 0.6, h), r]);
     }
+    // без «островков»: шар тела должен опираться на шар ниже, иначе над облаком висят отдельные шарики
+    puffs.sort((a, b) => a[1] - b[1]);
+    const kept = [];
+    for (const p of puffs) {
+      if (p[1] - p[2] <= base + 2 || kept.some((q) => q[1] < p[1] && Math.hypot(q[0] - p[0], q[1] - p[1]) < (q[2] + p[2]) * 0.8)) kept.push(p);
+    }
     D.fill(0);
-    for (const [cx, cy, r] of puffs) {
+    for (const [cx, cy, r] of kept) {
       const x0 = Math.max(0, Math.floor((cx - r) * scale)), x1 = Math.min(cw - 1, Math.ceil((cx + r) * scale));
       const y0 = Math.max(0, Math.floor((cy - r) * scale)), y1 = Math.min(ch - 1, Math.ceil((cy + r) * scale));
       const ir2 = 1 / (r * r);
@@ -87,7 +93,7 @@ function cloudAtlas(scale = 1) {
       }
     }
     let top = 0;
-    for (const p of puffs) top = Math.max(top, p[1] + p[2]);
+    for (const p of kept) top = Math.max(top, p[1] + p[2]);
     const sx = (Lx / lstep) * 4 * scale, sy = (Ly / lstep) * 4 * scale;
     for (let y = 0; y < ch; y++) {
       for (let x = 0; x < cw; x++) {
