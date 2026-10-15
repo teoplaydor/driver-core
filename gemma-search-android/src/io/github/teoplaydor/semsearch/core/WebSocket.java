@@ -42,6 +42,9 @@ public final class WebSocket implements Closeable {
     private final Listener listener;
     private final SecureRandom random = new SecureRandom();
     private volatile boolean closed;
+    /** close() called: nothing more is sent but its close frame (from a thread of its own). */
+    private volatile boolean closing;
+    private final Object state = new Object();
     private final Thread reader;
 
     private WebSocket(Socket socket, InputStream in, Listener listener) throws IOException {
@@ -153,7 +156,12 @@ public final class WebSocket implements Closeable {
     }
 
     private synchronized void frame(int opcode, byte[] payload) throws IOException {
-        if (closed) throw new IOException("WebSocket закрыт");
+        if (closed || closing) throw new IOException("WebSocket закрыт");
+        write(opcode, payload);
+    }
+
+    /** One frame out, masked (the client's), as it is. */
+    private synchronized void write(int opcode, byte[] payload) throws IOException {
         int n = payload.length;
         byte[] head = new byte[14];
         int h = 0;
@@ -208,7 +216,7 @@ public final class WebSocket implements Closeable {
                 if (op == 0x8) {
                     code = p.length >= 2 ? ((p[0] & 0xff) << 8) | (p[1] & 0xff) : 1005;
                     reason = p.length > 2 ? new String(p, 2, p.length - 2, StandardCharsets.UTF_8) : "";
-                    if (!closed) {
+                    if (!closed && !closing) {
                         try {
                             frame(0x8, p.length >= 2 ? new byte[]{p[0], p[1]} : new byte[0]);
                         } catch (IOException ignored) {
@@ -241,7 +249,7 @@ public final class WebSocket implements Closeable {
         } catch (RuntimeException e) {
             reason = "ошибка в обработке: " + e;
         }
-        boolean was = closed;
+        boolean was = closed || closing;
         closed = true;
         try {
             socket.close();
@@ -267,22 +275,30 @@ public final class WebSocket implements Closeable {
     }
 
     public boolean isOpen() {
-        return !closed;
+        return !closed && !closing;
     }
 
-    /** A normal close (1000); the reading thread ends when the peer answers, or the socket is shut a second later. */
+    /**
+     * A normal close (1000), never blocking the caller — it may be the main thread, where Android forbids the network:
+     * the close frame goes from a thread of its own; the reading thread ends when the peer answers, or the socket is shut
+     * a second later.
+     */
     @Override
     public void close() {
-        if (closed) return;
-        try {
-            frame(0x8, new byte[]{0x03, (byte) 0xE8});
-        } catch (IOException ignored) {
-            // gone already
+        // not the writing lock: a send stuck on a slow network must not hold up the caller
+        synchronized (state) {
+            if (closed || closing) return;
+            closing = true;
         }
-        closed = true;
         new Thread(new Runnable() {
             @Override
             public void run() {
+                try {
+                    write(0x8, new byte[]{0x03, (byte) 0xE8});
+                } catch (IOException ignored) {
+                    // gone already
+                }
+                closed = true;
                 try {
                     reader.join(1000);
                     socket.close();

@@ -1,6 +1,6 @@
 {
   "name": "semsearch-wrist-vela",
-  "version": "1.12.0",
+  "version": "1.13.0",
   "private": true,
   "description": "«Пульт кистью» for Xiaomi Vela watches (Xiaomi Watch S5): wrist turns and voice notes to the phone over Bluetooth LE",
   "scripts": {

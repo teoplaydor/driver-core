@@ -57,8 +57,11 @@ public final class WristGesture {
     public static final int VERSION = 1, VERSION_TURNS = 2, VERSION_MP3 = 3;
     /** EV_TALK_SEG's format: a WAV file (IMA ADPCM), an MP3 file. */
     public static final int TALK_WAV = 0, TALK_MP3 = 1;
-    /** VOICE_PLAYED's outcome: played; the player would not; not whole (a write lost); the file not written. */
-    public static final int PLAYED = 0, NOT_PLAYED = 1, NOT_WHOLE = 2, NOT_WRITTEN = 3;
+    /**
+     * VOICE_PLAYED's outcome: played; the player would not; not whole (a write lost); the file not written; the player
+     * said nothing at all (no start, no end).
+     */
+    public static final int PLAYED = 0, NOT_PLAYED = 1, NOT_WHOLE = 2, NOT_WRITTEN = 3, SILENT = 4;
     public static final int KIND_HELLO = 0, KIND_ACCEL = 1, KIND_TURN = 2, KIND_SWING = 3, KIND_ROLL = 4, KIND_VOICE = 5,
             KIND_RAW = 6, KIND_DIAG = 7;
     /** VOICE packets; VOICE_PLAYED — a piece of a spoken answer played out on the watch ({@link #voicePlayed}). */

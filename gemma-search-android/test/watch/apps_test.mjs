@@ -230,6 +230,7 @@ async function vela() {
     '@system.audio': `const A = { _src: '', get src() { return A._src }, set src(v) { if (!W.audioOn) A._src = v },
         play() { W.audioPlays = (W.audioPlays || 0) + 1; W.audioOn = true; W.audioSrc = A.src; W.audioLoop = A.loop
           W.played = (W.played || []).concat([[A.src, Date.now()]])
+          if (W.silentAudio && !A.loop) return  // a player that says nothing: no start, no end
           setImmediate(() => A.onplay && A.onplay())
           if (!A.loop) { const src = A.src; setTimeout(() => { if (A.src === src) { W.audioOn = false; A.onended && A.onended() } }, 300) } },
         pause() { W.audioOn = false; A.onpause && A.onpause() },
@@ -855,14 +856,37 @@ async function vela() {
   await advance(1000); await flush(); await advance(100); await flush()
   const pl4 = W.writes.slice(w15).filter((w) => w[1] === SAMPLES && w[2].startsWith('53')).map((w) => w[2])
   ok(pl4.join() === '53' + idh + '0400', 'vela (talk): …told played (' + pl4.join() + ')')
-  // the player would not: told so (1)
+  // the player would not: once more from the cache folder, then told so (1)
   const w16 = W.writes.length
   sendPiece(5, m4, false, 1)
   await flush(); await flush()
-  W.audio.onerror()
-  await flush()
+  W.audioOn = false
+  W.audio.onerror({ code: 1002, message: 'unsupported' })
+  await flush(); await flush()
+  ok(W.files['internal://files/talk1.mp3'] && W.files['internal://cache/talk1.mp3'] && W.audio.src === 'internal://cache/talk1.mp3',
+    'vela (talk): the player would not — tried again from internal://cache')
+  W.audioOn = false
+  W.audio.onerror({ code: 1002 })
+  await flush(); await advance(100); await flush()
   const pl5 = W.writes.slice(w16).filter((w) => w[1] === SAMPLES && w[2].startsWith('53')).map((w) => w[2])
-  ok(pl5.join() === '53' + idh + '0501', 'vela (talk): the player would not — told not played (' + pl5.join() + ')')
+  ok(pl5.join() === '53' + idh + '0501', 'vela (talk): …would not either — told not played (' + pl5.join() + ')')
+  // a player that says nothing (no start, no end): told so (4), not «played»
+  W.silentAudio = true
+  const w17 = W.writes.length
+  sendPiece(6, m4, false, 1)
+  await flush(); await flush()
+  await advance(900 + 3000 + 100); await flush()
+  W.silentAudio = false
+  const pl6 = W.writes.slice(w17).filter((w) => w[1] === SAMPLES && w[2].startsWith('53')).map((w) => w[2])
+  ok(pl6.join() === '53' + idh + '0604', 'vela (talk): the player said nothing — told so, not played (' + pl6.join() + ')')
+  // what happened to the pieces: in the phone's log even without debugging (its lines go after the packets that matter)
+  for (let i = 0; i < 10; i++) { await advance(100); await flush() }
+  const talkDiag = W.writes.slice(w15).filter((w) => w[1] === SAMPLES && w[2].startsWith('70'))
+    .map((w) => Buffer.from(w[2].slice(2), 'hex').toString('utf8')).join(' | ')
+  ok(!p11.debug && /ответ: кусок 4: \d+ Б MP3, 900 мс → internal:\/\/files\/talk0\.mp3/.test(talkDiag) && /кусок 4: звук пошёл через/.test(talkDiag)
+    && /кусок 4: доиграл за/.test(talkDiag) && /кусок 6: конца нет за \d+ мс, и начала не было/.test(talkDiag) && /кусок 5: плеер не играет internal:\/\/files\/talk1\.mp3 — \{"code":1002,"message":"unsupported"\}/.test(talkDiag),
+    'vela (talk): each piece\'s steps to the phone\'s log without debugging — ' + talkDiag)
+  W.audioOn = false
   say11([12, ...Buffer.from('Готово, напомню завтра в девять.')])
   ok(p11.note === 'Готово, напомню завтра в девять.', 'vela (talk): the answer\'s line shown — «' + p11.note + '»')
   say11([13])

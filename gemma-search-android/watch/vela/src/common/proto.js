@@ -55,11 +55,15 @@ export const VERSION_MP3 = 3
 /** TALK_SEG's format of a piece: a WAV file (IMA ADPCM), an MP3 file. */
 export const TALK_WAV = 0
 export const TALK_MP3 = 1
-/** VOICE played's outcome: played; the player would not; not whole (a write lost); its file not written. */
+/**
+ * VOICE played's outcome: played; the player would not; not whole (a write lost); its file not written; the player
+ * said nothing at all (neither a start nor an end).
+ */
 export const PLAYED = 0
 export const NOT_PLAYED = 1
 export const NOT_WHOLE = 2
 export const NOT_WRITTEN = 3
+export const SILENT = 4
 
 function put16(b, o, v) {
   v = v & 0xffff

@@ -83,6 +83,7 @@ fs.writeFileSync(path.join(out, 'fixed.hex'), [
   hex(P.voicePlayed(7, 5, P.NOT_WHOLE)),
   hex(P.voicePlayed(7, 6, P.NOT_WRITTEN)),
   hex(P.hello(0x0badcafe, 25, 1000, 'vela', P.VERSION_MP3)),
+  hex(P.voicePlayed(7, 8, P.SILENT)),
 ].join('\n') + '\n')
 
 

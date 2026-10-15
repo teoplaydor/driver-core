@@ -330,7 +330,13 @@ public class GeminiLiveTest {
             s2 = said2.toString();
         }
         ok("audio".equals(e5) && "turn".equals(e6) && s2.endsWith("Всё хорошо, спасибо!"), "what was said over it answered — «" + s2 + "»");
+        // closed from any thread without touching the network there (Android forbids it on the main thread): at once,
+        // the close frame sent from a thread of its own
+        long c0 = System.nanoTime();
         g.close();
+        long took = (System.nanoTime() - c0) / 1000000;
+        String e7 = ev.poll(5, TimeUnit.SECONDS);
+        ok(took < 20 && !g.ready() && e7 != null && e7.startsWith("closed 1000"), "close(): back at once (" + took + " ms), closed after (" + e7 + ")");
 
         // the live models, both pages, best first
         List<String> models = GeminiLive.liveModels(host, "test-key");

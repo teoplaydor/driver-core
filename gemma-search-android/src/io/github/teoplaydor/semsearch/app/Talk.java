@@ -877,7 +877,8 @@ final class Talk {
             }
         }
         String why = outcome == WristGesture.NOT_WHOLE ? "not whole on the watch (a notification lost)"
-                : outcome == WristGesture.NOT_WRITTEN ? "the watch could not write its file" : "the watch's player would not play it";
+                : outcome == WristGesture.NOT_WRITTEN ? "the watch could not write its file"
+                : outcome == WristGesture.SILENT ? "the watch's player said nothing (no start, no end)" : "the watch's player would not play it";
         if (!ok) log("piece " + s + " not played on the watch: " + why);
         if (phone) {
             log("the watch does not play the answers (" + why + ") — on the phone from now on");

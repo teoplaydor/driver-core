@@ -93,7 +93,8 @@ public class WristJsTest {
                 && Arrays.equals(fixed.get(11), WristGesture.voicePlayed(7, 3, true)) && Arrays.equals(fixed.get(12), WristGesture.voicePlayed(7, 4, false))
                 && Arrays.equals(fixed.get(13), WristGesture.voicePlayed(7, 5, WristGesture.NOT_WHOLE))
                 && Arrays.equals(fixed.get(14), WristGesture.voicePlayed(7, 6, WristGesture.NOT_WRITTEN))
-                && Arrays.equals(fixed.get(15), WristGesture.hello(WristGesture.VERSION_MP3, 0x0badcafe, 25, 1000, "vela")),
+                && Arrays.equals(fixed.get(15), WristGesture.hello(WristGesture.VERSION_MP3, 0x0badcafe, 25, 1000, "vela"))
+                && Arrays.equals(fixed.get(16), WristGesture.voicePlayed(7, 8, WristGesture.SILENT)),
                 "a conversation: the live voice's start, «played» with its outcomes, HELLO version 3 (MP3 pieces) — the same bytes as the phone's");
         ok(Arrays.equals(fixed.get(5), WristGesture.voiceStart(7, WristGesture.CODEC_RECORDED, 16000, 0))
                 && Arrays.equals(fixed.get(6), WristGesture.voiceData(7, 70000, new byte[]{1, 2, 3, (byte) 250, (byte) 255}, 0, 5))

@@ -12,7 +12,7 @@ import {
   SERVICE, SAMPLES, EVENTS, EV_NEXT, EV_PREVIOUS, EV_LEARNED, EV_IGNORED, EV_PAUSE, EV_STREAM, EV_CONFIG, EV_VOICE_FROM,
   EV_VOICE_DONE, VOICE_SAVED, VOICE_SILENT, VOICE_KEPT, VOICE_ANSWER, SOURCE_COMPASS, RAW_MAX, advertises, createPacker,
   parseEvent, createTalk, createVoice, rawPacket, diagPacket, diagPackets, EV_TALK_AUDIO, EV_TALK_SEG, EV_TALK_TEXT, EV_TALK_END,
-  voicePlayed, CODEC_ADPCM, CODEC_LIVE, VERSION_MP3, TALK_MP3, PLAYED, NOT_PLAYED, NOT_WHOLE, NOT_WRITTEN
+  voicePlayed, CODEC_ADPCM, CODEC_LIVE, VERSION_MP3, TALK_MP3, PLAYED, NOT_PLAYED, NOT_WHOLE, NOT_WRITTEN, SILENT
 } from './proto.js'
 
 /** The silence that keeps the app running in the background, and how soon it is started again when stopped. */
@@ -136,6 +136,17 @@ export function createLink(sys) {
    * A callback the watch's system calls (Bluetooth, the sensor, the recorder, the player): an error in it shown, kept and
    * logged like one in a method (see oops) — never let out into the system, which would end the app.
    */
+  /** What a system callback said (an error object, a code, data) as a short line for the log. */
+  function describe(x) {
+    if (x === undefined || x === null) return 'без подробностей'
+    if (typeof x !== 'object') return String(x)
+    try {
+      const s = JSON.stringify(x)
+      if (s && s !== '{}') return s.length > 120 ? s.slice(0, 120) + '…' : s
+    } catch (e) {}
+    return x.message ? String(x.message) : String(x)
+  }
+
   function safe(where, fn) {
     return function () {
       try {
@@ -251,9 +262,21 @@ export function createLink(sys) {
         this.bg = ''
         return
       }
+      this.hookAudio()
+      this.play()
+    },
+
+    /**
+     * The player's events, once (whether or not the silence keeps the app running): the background's silence, the
+     * bells, the answer's pieces — a piece's start, its end, the player's error are heard even with «В фоне» off.
+     */
+    hookAudio() {
+      if (!audio || this.audioHooked) return
+      this.audioHooked = true
       const self = this
       const again = function (why) {
         self.audioPlaying = false
+        if (!self.alive) return
         if (!self.alive || self.aliveTimer) return
         if (why) self.bg = why
         self.aliveTimer = setTimeout(() => {
@@ -264,6 +287,11 @@ export function createLink(sys) {
         }, ALIVE_RETRY_MS)
       }
       audio.onplay = safe('звук play', function () {
+        const tp = self.talkPlaying
+        if (tp && !tp.started) {
+          tp.started = true
+          self.talkLog('кусок ' + tp.seg + ': звук пошёл через ' + (Date.now() - tp.t0) + ' мс')
+        }
         if (self.chiming || self.talkPlaying) return
         if (!self.audioPlaying) self.logLine('фон: тишина играет')
         self.audioPlaying = true
@@ -285,19 +313,21 @@ export function createLink(sys) {
           return
         }
         if (self.talkPlaying) {
-          self.talkEnded(self.talkPlaying, true)
+          const tp = self.talkPlaying
+          self.talkLog('кусок ' + tp.seg + ': доиграл за ' + (Date.now() - tp.t0) + ' мс (длина ' + tp.ms + ' мс)')
+          self.talkEnded(tp, PLAYED)
           return
         }
         if (Date.now() < (self.quietSwitchUntil || 0)) return
         again('')
       })
-      audio.onerror = safe('звук error', function () {
+      audio.onerror = safe('звук error', function (err) {
         if (self.chiming) {
           self.chimed()
           return
         }
         if (self.talkPlaying) {
-          self.talkEnded(self.talkPlaying, false)
+          self.talkFailed(self.talkPlaying, describe(err))
           return
         }
         self.logLine('фон: ошибка звука')
@@ -309,7 +339,6 @@ export function createLink(sys) {
         }
         again('фон: ошибка звука — пробую снова')
       })
-      this.play()
     },
 
     /**
@@ -1545,7 +1574,7 @@ export function createLink(sys) {
       const t = this.talkIn
       this.talkIn = null
       if (!t || t.seg !== e.seg || t.bad || t.len !== e.total) {
-        this.logLine('ответ: кусок ' + e.seg + ' не целый (' + (t ? t.len : 0) + ' из ' + e.total + ')', true)
+        this.talkLog('кусок ' + e.seg + ' не целый (' + (t ? t.len : 0) + ' из ' + e.total + ' Б)')
         this.send(voicePlayed(this.noteId, e.seg, NOT_WHOLE))
         return
       }
@@ -1559,15 +1588,17 @@ export function createLink(sys) {
       const self = this
       const seg = e.seg
       const ms = e.ms
+      const kind = e.format === TALK_MP3 ? 'MP3' : 'WAV'
+      this.talkLog('кусок ' + seg + ': ' + buf.length + ' Б ' + kind + ', ' + ms + ' мс → ' + uri)
       file.writeArrayBuffer({
         uri,
         buffer: buf,
         success: safe('ответ: файл', function () {
-          self.talkQueue.push({ seg, uri, ms })
+          self.talkQueue.push({ seg, uri, ms, buf, kind })
           self.playTalk()
         }),
         fail: safe('ответ: файл', function (data, code) {
-          self.logLine('ответ: файл не записан (' + code + ')', true)
+          self.talkLog('кусок ' + seg + ': файл не записан (' + code + ' ' + describe(data) + ')')
           self.send(voicePlayed(self.noteId, seg, NOT_WRITTEN))
         })
       })
@@ -1582,29 +1613,75 @@ export function createLink(sys) {
         return
       }
       this.talkPlaying = next
+      next.t0 = Date.now()
+      next.started = false
       this.phase('ответ: кусок ' + next.seg)
+      this.hookAudio()
       const self = this
-      // a piece that never says it ended is taken for played a little after its length
-      this.talkTimer = setTimeout(() => self.talkEnded(next, true), next.ms + TALK_SLACK_MS)
+      // a piece that never says it ended: played, if the player said it started; else the player said nothing at all
+      this.talkTimer = setTimeout(() => {
+        self.talkLog('кусок ' + next.seg + ': конца нет за ' + (Date.now() - next.t0) + ' мс' + (next.started ? ' — считаю сыгранным' : ', и начала не было'))
+        self.talkEnded(next, next.started ? PLAYED : SILENT)
+      }, next.ms + TALK_SLACK_MS)
       try {
         this.halt()
         this.audioPlaying = false
         audio.src = next.uri
         audio.loop = false
         audio.play()
+        this.talkLog('кусок ' + next.seg + ': играю ' + next.uri)
       } catch (e) {
-        this.talkEnded(next, false)
+        this.talkFailed(next, describe(e))
       }
     },
 
-    /** A piece played (or not): the phone told, the next one played. */
-    talkEnded(piece, ok) {
+    /**
+     * The player would not play a piece: once more from the cache folder (where the watch's own recordings are played
+     * from), then told so.
+     */
+    talkFailed(piece, why) {
+      if (!piece || this.talkPlaying !== piece) return
+      this.talkLog('кусок ' + piece.seg + ': плеер не играет ' + piece.uri + ' — ' + why)
+      if (piece.buf && piece.uri.indexOf('internal://files/') === 0) {
+        const self = this
+        const uri = piece.uri.replace('internal://files/', 'internal://cache/')
+        this.talkPlaying = null
+        if (this.talkTimer) clearTimeout(this.talkTimer)
+        this.talkTimer = 0
+        file.writeArrayBuffer({
+          uri,
+          buffer: piece.buf,
+          success: safe('ответ: файл', function () {
+            self.talkQueue.unshift({ seg: piece.seg, uri, ms: piece.ms, kind: piece.kind })
+            self.playTalk()
+          }),
+          fail: safe('ответ: файл', function (data, code) {
+            self.talkLog('кусок ' + piece.seg + ': и в ' + uri + ' не записан (' + code + ')')
+            self.send(voicePlayed(self.noteId, piece.seg, NOT_PLAYED))
+            self.playTalk()
+          })
+        })
+        return
+      }
+      this.talkEnded(piece, NOT_PLAYED)
+    },
+
+    /** What happens to the answer's pieces, always to the phone's log (a few lines a piece), not only while debugging. */
+    talkLog(text) {
+      const room = (this.mtu ? Math.min(this.mtu, 512) : 23) - 3
+      for (const p of diagPackets('ответ: ' + text, room, 6)) this.diagOut.push(p)
+      while (this.diagOut.length > 40) this.diagOut.shift()
+      this.forceLines = true // sent with debugging off too
+      this.pump()
+    },
+
+    /** A piece played (or not — the outcome, PLAYED…): the phone told, the next one played. */
+    talkEnded(piece, outcome) {
       if (!piece || this.talkPlaying !== piece) return
       this.talkPlaying = null
       if (this.talkTimer) clearTimeout(this.talkTimer)
       this.talkTimer = 0
-      if (!ok) this.logLine('ответ: кусок ' + piece.seg + ' не сыгран', true)
-      this.send(voicePlayed(this.noteId, piece.seg, ok ? PLAYED : NOT_PLAYED))
+      this.send(voicePlayed(this.noteId, piece.seg, outcome))
       this.playTalk()
     },
 
