@@ -7,6 +7,7 @@ import { buildTerrain } from './terrain.js';
 import { Sky } from './sky.js';
 import { Atmosphere } from './atmosphere.js';
 import { Water } from './water.js';
+import { setRenderLite } from '../render/chunks.js';
 import { buildVegetation, HERO_MESHES } from './vegetation.js';
 import { GrassField } from './grass.js';
 import { Decor } from './decor.js';
@@ -19,6 +20,7 @@ export class World {
   // opts.post - кадр идёт через постобработку (тогда на high вода рисуется отдельным проходом с отражениями)
   constructor(renderer, quality, opts = {}) {
     initTerrain();
+    setRenderLite(!!quality.renderLite); // до создания материалов и компиляции шейдеров
     this.renderer = renderer;
     this.quality = quality;
     this.scene = new THREE.Scene();
@@ -66,7 +68,7 @@ export class World {
     this.structures = buildStructures(this);
     this.scene.add(this.structures.group);
 
-    this.weather = new Weather(quality.trees);
+    this.weather = new Weather(quality.trees, { motes: !quality.renderLite });
     this.scene.add(this.weather.group);
   }
 

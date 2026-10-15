@@ -22,7 +22,7 @@ const check = (name, ok, extra = '') => { results.push(ok); console.log(ok ? 'ok
 await page.goto(`${BASE}?q=low&dpr=1`, { waitUntil: 'load' });
 await page.waitForFunction(() => window.__cozy?.game, null, { timeout: 90000 });
 await page.waitForFunction(() => window.__cozy.frames >= 3, null, { timeout: 90000 });
-await page.screenshot({ path: 'tests/out/touch-menu.png' });
+await page.screenshot({ path: 'tests/out/touch-menu.png', timeout: 180000 });
 check('режим тач определён', await page.evaluate(() => window.__cozy.game.isTouch));
 
 // вход через кнопку "Играть" (как у пользователя), комната не нужна - сервер есть, но берём одиночную
@@ -66,7 +66,7 @@ await touch('touchEnd', []);
 await page.waitForFunction(() => !window.__cozy.game.player.onGround || window.__cozy.game.player.vel.y > 0, null, { timeout: 20000 }).catch(() => {});
 check('кнопка прыжка срабатывает', await page.evaluate(() => !window.__cozy.game.player.onGround || window.__cozy.game.player.vel.y > 0));
 
-await page.screenshot({ path: 'tests/out/touch-play.png' });
+await page.screenshot({ path: 'tests/out/touch-play.png', timeout: 180000 });
 check('нет ошибок', errors.length === 0, errors.slice(0, 3).join(' | '));
 await browser.close();
 const bad = results.filter((r) => !r).length;

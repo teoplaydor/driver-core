@@ -5,7 +5,8 @@
 // Рендер (WS4): post (постобработка: HDR-буфер, bloom, цвет; false - прямой рендер с тонмаппингом), ao (затенение по
 // глубине) + aoSamples, bloomLevels/bloomStart (мипов bloom и делитель разрешения первого), aa ('smaa' | 'fxaa' | null),
 // shadowCascades (2 - ближний чёткий каскад shadowNear/shadowNearRange + дальний), waterDeferred (вода с экранными
-// отражениями и преломлением), waterSegments (волны вершинами), skyDetail (октавы облаков, число облаков).
+// отражениями и преломлением), waterSegments (волны вершинами), skyDetail (октавы облаков, число облаков),
+// renderLite (короткие шейдеры: туман только по расстоянию, без пылинок и пыльцы).
 
 export const QUALITY = {
   high: {
@@ -23,7 +24,7 @@ export const QUALITY = {
     dpr: 1, shadow: 0, shadowRange: 40, grassChunks: 2, grassPerChunk: 380, trees: 0.55,
     grassRadius: 24, grassChunk: 24, grassBlades: [5, 3, 3], grassDensity: 2.0, grassLod: 6, grassFade: 10, treeNear: 32, treeDetail: 0.5, decorRadius: 26, decorDensity: 0.35,
     terrainLite: true,
-    post: false, ao: false, aa: null, shadowCascades: 1, waterDeferred: false, waterSegments: 1, skyDetail: 0.5,
+    post: false, ao: false, aa: null, shadowCascades: 1, waterDeferred: false, waterSegments: 1, skyDetail: 0.5, renderLite: true,
   },
 };
 

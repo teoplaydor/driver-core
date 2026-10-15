@@ -85,6 +85,10 @@ const FOG_PARS_FRAGMENT = /* glsl */`
 
 	float cozyFogFactor( float legacyDensity ) {
 		vec3 ray = vFogWorld - cameraPosition;
+		#ifdef COZY_LITE
+		float dl = ( cozyFogA.x > 0.0 ? cozyFogA.x : legacyDensity ) * length( ray );
+		return 1.0 - exp( - dl * dl );
+		#endif
 		float dist = length( ray );
 		float dens = cozyFogA.x > 0.0 ? cozyFogA.x : legacyDensity;
 		float dd = dens * dist;
@@ -105,6 +109,9 @@ const FOG_PARS_FRAGMENT = /* glsl */`
 
 	// цвет дымки: к солнцу теплее и светлее (рассеяние вперёд)
 	vec3 cozyFogTint() {
+		#ifdef COZY_LITE
+		return fogColor;
+		#endif
 		vec3 dir = normalize( vFogWorld - cameraPosition );
 		float s = max( dot( dir, cozyFogC.xyz ), 0.0 );
 		return fogColor + cozyFogB.rgb * ( cozyFogB.a * ( s * s * s * s * 0.45 + pow( s, 24.0 ) * 0.9 ) );
@@ -202,7 +209,7 @@ const DIR_LOOP = /* glsl */`
 
 // В начало освещения: мокрость (темнее и глаже) - по мировой позиции, нужна дымка (USE_FOG).
 const WET_BEGIN = /* glsl */`
-#ifdef USE_FOG
+#if defined( USE_FOG ) && !defined( COZY_LITE )
 	{
 		float cozyRainW = smoothstep( ${f(ZONES.rain.r)}, ${f(ZONES.rain.r * 0.45)}, distance( vFogWorld.xz, vec2( ${f(ZONES.rain.x)}, ${f(ZONES.rain.z)} ) ) ) * cozyWet.x;
 		material.diffuseColor *= 1.0 - 0.28 * cozyRainW;
@@ -220,7 +227,7 @@ const HEMI_END = /* glsl */`
 
 // отблеск неба: на гладком и мокром заметен, на шершавом - едва (свёртку делает RE_IndirectSpecular)
 const SKY_SHEEN = /* glsl */`
-#if defined( RE_IndirectSpecular )
+#if defined( RE_IndirectSpecular ) && !defined( COZY_LITE )
 	radiance += cozySky.rgb * ( cozySky.a + cozyWetK * 1.4 );
 #endif
 `;
@@ -267,5 +274,18 @@ export function applyRenderChunks() {
 }
 
 applyRenderChunks();
+
+// Лёгкий режим (low): туман только по расстоянию, без мокрых поверхностей и отблеска неба - шейдеры короче
+// и дешевле на слабых устройствах. Вызывать до первой компиляции шейдеров.
+let lite = false;
+export function setRenderLite(on) {
+  if (on === lite) return;
+  lite = on;
+  const SC = THREE.ShaderChunk;
+  const mark = '#ifndef COZY_LITE\n#define COZY_LITE\n#endif\n';
+  for (const k of ['fog_pars_fragment', 'lights_pars_begin']) {
+    SC[k] = on ? mark + SC[k] : SC[k].replace(mark, '');
+  }
+}
 
 export const cascadesSupported = () => THREE.ShaderChunk.lights_fragment_begin.includes('cozyCascadeShadow');

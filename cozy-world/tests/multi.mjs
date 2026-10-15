@@ -61,7 +61,7 @@ try {
 
   await g(B, () => { window.__cozy.game.player.wantThird = false; });
   await B.page.waitForTimeout(1200);
-  await B.page.screenshot({ path: 'tests/out/multi-B-view.png' });
+  await B.page.screenshot({ path: 'tests/out/multi-B-view.png', timeout: 180000 }); // программный рендер под нагрузкой медленный
 
   // предметы: Alice берёт мяч, Bob видит нового хозяина; бросок и покой синхронизируются
   await g(A, () => { const G = window.__cozy.game; G.props.grab(G.props.byId.get('ball1')); });

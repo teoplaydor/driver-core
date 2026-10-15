@@ -293,7 +293,8 @@ function baseUniforms(box) {
 }
 
 export class Weather {
-  constructor(quality = 1) {
+  // quality - доля частиц; motes - пылинки и пыльца (на слабых устройствах выключены)
+  constructor(quality = 1, { motes = true } = {}) {
     this.group = new THREE.Group();
     this.group.name = 'weather';
     const n = (v) => Math.max(8, Math.round(v * quality));
@@ -332,12 +333,12 @@ export class Weather {
       this.leaves = add('leaves', new THREE.Mesh(g, material(LEAF_VERT, LEAF_FRAG, u)), u);
     }
     // пылинки в лучах (каньон)
-    {
+    if (motes) {
       const u = { ...baseUniforms(24), uSize: { value: 0.018 }, uMotion: { value: new THREE.Vector3(-0.05, 0.35, 0.4) }, uForward: { value: 5 }, uSoft: { value: 0.6 } };
       this.dust = add('dust', new THREE.Points(points(n(800)), material(POINT_VERT, POINT_FRAG, u, { blending: THREE.AdditiveBlending })), u);
     }
     // пыльца (луг)
-    {
+    if (motes) {
       const u = { ...baseUniforms(22), uSize: { value: 0.014 }, uMotion: { value: new THREE.Vector3(-0.08, 0.5, 0.5) }, uForward: { value: 3 }, uSoft: { value: 0.4 } };
       this.pollen = add('pollen', new THREE.Points(points(n(420)), material(POINT_VERT, POINT_FRAG, u, { blending: THREE.AdditiveBlending })), u);
     }
@@ -371,8 +372,8 @@ export class Weather {
     if (this.splash && near(this.splash, atm.rain)) this.splash.u.uColor.value.copy(atm.fogColor).lerp(atm.hemiSky, 0.5).multiplyScalar(1.3);
     if (near(this.snow, atm.snow)) this.snow.u.uColor.value.copy(atm.hemiSky).lerp(atm.sunColor, 0.4).multiplyScalar(0.55 + atm.sunIntensity * 0.15 + atm.hemiIntensity * 0.2);
     if (near(this.leaves, atm.leaves)) this.leaves.u.uColor.value.copy(atm.sunColor).multiplyScalar(0.55 + atm.sunIntensity * 0.12);
-    if (near(this.dust, atm.dust * 0.9)) this.dust.u.uColor.value.copy(atm.sunColor).multiplyScalar(0.55);
-    if (near(this.pollen, atm.pollen * 0.8)) this.pollen.u.uColor.value.setRGB(1, 0.95, 0.7).multiplyScalar(0.5);
+    if (this.dust && near(this.dust, atm.dust * 0.9)) this.dust.u.uColor.value.copy(atm.sunColor).multiplyScalar(0.55);
+    if (this.pollen && near(this.pollen, atm.pollen * 0.8)) this.pollen.u.uColor.value.setRGB(1, 0.95, 0.7).multiplyScalar(0.5);
     // светлячки - только у костра
     const dx = camera.position.x - CAMPFIRE.x, dz = camera.position.z - CAMPFIRE.z;
     const fly = out * (1 - Math.min(1, Math.max(0, (Math.hypot(dx, dz) - 40) / 20)));
