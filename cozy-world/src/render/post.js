@@ -1,6 +1,6 @@
 // Постобработка (high/medium; на low мир рисуется напрямую).
 // Сцена рендерится в HDR-буфер (half float) с текстурой глубины, затем:
-//   [high] вода с отражениями (water.js, по копии кадра) -> AO по глубине основного прохода (полразрешения,
+//   [high] (вода с отражениями берёт копию непрозрачного кадра посреди прохода, см. attachWater) -> AO по глубине (полразрешения,
 //   билатеральное размытие) -> руки от 1-го лица в свой буфер -> bloom (цепочка мипов) -> сведение:
 //   AO, руки, bloom, экспозиция, насыщенность, тонмаппинг, тёплые света/холодные тени, lift/gamma/gain,
 //   виньетка, дизеринг -> SMAA/FXAA.
@@ -77,10 +77,12 @@ void main() {
   vec3 dx = abs(pr.z - P.z) < abs(P.z - pl.z) ? pr - P : P - pl;
   vec3 dy = abs(pt.z - P.z) < abs(P.z - pb.z) ? pt - P : P - pb;
   vec3 N = normalize(cross(dx, dy));
-  float rPx = min(uScale * uRadius / -z, uMaxPx);
+  // радиус растёт с расстоянием: вдали видно крупное затенение (под навесом, у стволов), а не только щели
+  float rad = uRadius * min(1.0 + -z * 0.07, 4.5);
+  float rPx = min(uScale * rad / -z, uMaxPx);
   if (rPx < 1.0) { gl_FragColor = vec4(1.0, -z, 0.0, 1.0); return; }
   float noise = fract(52.9829189 * fract(dot(gl_FragCoord.xy, vec2(0.06711056, 0.00583715))));
-  float r2 = uRadius * uRadius;
+  float r2 = rad * rad;
   float sum = 0.0;
   for (int i = 0; i < SAMPLES; i++) {
     float a = (float(i) + 0.5) / float(SAMPLES);
@@ -333,7 +335,7 @@ export class PostFX {
     this.opts = opts;
     this.quad = new Quad();
     this.w = 1; this.h = 1;
-    this.handsOn = false;
+    this._clear = new THREE.Color();
     this.time = 0;
 
     const depthTex = opts.ao || opts.water ? new THREE.DepthTexture(1, 1, THREE.UnsignedIntType) : null;
@@ -452,6 +454,22 @@ export class PostFX {
     if (this.fxaaMat) this.fxaaMat.uniforms.resolution.value.set(1 / w, 1 / h);
   }
 
+  // Вода (water.js, deferred) перед своей отрисовкой просит копию кадра: цвет + глубина. Сцена в этот момент
+  // рисуется в rtScene, все непрозрачные уже на месте; копируем и возвращаем цель обратно.
+  attachWater(water) {
+    this.water = water;
+    if (!water.deferred || !this.copyMat) return;
+    water.onCopy = (r, camera) => {
+      const target = r.getRenderTarget();
+      if (target !== this.rtScene) return false; // рендер в обход постобработки
+      this.quad.draw(r, this.copyMat, this.rtCopy);
+      r.setRenderTarget(target);
+      water.setCopy(this.rtCopy.texture, this.w, this.h, camera);
+      this._copied = true;
+      return true;
+    };
+  }
+
   _proj(camera) {
     const e = camera.projectionMatrix.elements;
     this.projU.value.set(1 / e[0], 1 / e[5], camera.near, camera.far);
@@ -463,6 +481,8 @@ export class PostFX {
     const r = this.renderer, q = this.quad;
     this.time += dt;
     let passes = 0;
+    if (water && water !== this.water) this.attachWater(water);
+    this._copied = false;
     const prevAuto = r.autoClear;
     r.autoClear = false;
     this._proj(camera);
@@ -472,13 +492,7 @@ export class PostFX {
     r.clear(true, true, false);
     r.render(scene, camera);
     passes++;
-
-    // 2. вода с отражениями и преломлением (по копии кадра), пишет глубину - AO видит её поверхность
-    if (water && this.copyMat && water.deferredVisible(camera)) {
-      q.draw(r, this.copyMat, this.rtCopy);
-      water.renderDeferred(r, camera, this.rtCopy.texture, this.w, this.h, this.rtScene);
-      passes += 2;
-    }
+    if (this._copied) passes++;
 
     // 3. AO (полразрешения) + размытие
     const ao = !!this.aoMat && grade.ao > 0.01;
@@ -500,10 +514,13 @@ export class PostFX {
     let handsInBuffer = false;
     if (hands) {
       if (this.rtHands) {
+        r.getClearColor(this._clear);
+        const alpha = r.getClearAlpha();
         r.setRenderTarget(this.rtHands);
         r.setClearColor(0x000000, 0);
         r.clear(true, true, false);
         r.render(hands.scene, hands.camera);
+        r.setClearColor(this._clear, alpha);
         handsInBuffer = true;
       } else {
         r.setRenderTarget(this.rtScene);

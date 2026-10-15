@@ -38,8 +38,7 @@ export class World {
     this.terrain = buildTerrain({ lite: !!quality.terrainLite });
     this.scene.add(this.terrain);
     this.water = new Water({ deferred: !!(quality.waterDeferred && opts.post), segments: quality.waterSegments ?? 64 });
-    if (this.water.forwardObject) this.scene.add(this.water.forwardObject);
-    else this.water.scene.fog = this.scene.fog;
+    this.scene.add(this.water.mesh);
 
     const shadows = quality.shadow > 0;
     this.vegetation = buildVegetation({
@@ -88,7 +87,6 @@ export class World {
       } else {
         r.compile(this.scene, cam);
       }
-      if (this.water.scene) r.compile(this.water.scene, cam);
     }
   }
 

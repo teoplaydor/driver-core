@@ -2,8 +2,9 @@
 // пена у берега и прозрачность у кромки берутся из запечённой карты глубин.
 // Нормаль - сумма бегущих волн и шума: френель-отражение неба, солнечные блики (ярче порога bloom),
 // круги вокруг игроков, стоящих в воде. Лёгкие волны вершинами.
-// На high (deferred) вода рисуется отдельным проходом после мира по копии кадра (render/post.js):
-// преломление дна, поглощение по толщине слоя вдоль луча, экранные отражения берега и облаков.
+// На high (deferred) вода - первая из прозрачных: перед ней постобработка копирует готовый непрозрачный кадр
+// с глубиной (render/post.js), и вода по копии рисует преломление дна, поглощение по толщине слоя вдоль луча
+// и экранные отражения берега и облаков. Частицы и ореолы фонарей рисуются уже поверх неё.
 
 import * as THREE from 'three';
 import { heightAt, LAKE, WATER_Y } from './terrain-data.js';
@@ -87,6 +88,7 @@ uniform vec4 uBenders[${MAX_BENDERS}];
 uniform sampler2D tCopy;
 uniform vec2 uRes;
 uniform mat4 uProjM;
+uniform float uCopyOK; // 0 - копии кадра нет (рендер без постобработки): простой вариант
 #endif
 varying vec3 vWPos;
 varying float vViewZ;
@@ -157,6 +159,7 @@ void main() {
   vec3 col;
   float alpha = 1.0;
 #ifdef DEFERRED
+  if (uCopyOK > 0.5) {
   vec2 suv = gl_FragCoord.xy / uRes;
   float sceneZ = texture2D(tCopy, suv).a;
   float thick = max(sceneZ - dist, 0.0);
@@ -213,13 +216,15 @@ void main() {
   // мягкая кромка: где слой тонкий - пена и плавный переход в дно
   foam = max(foam, (1.0 - smoothstep(0.0, 0.22 + fn * 0.15, thick)) * 0.8);
   col = mix(col, uFoam * light * uHemi * 1.15, clamp(foam, 0.0, 1.0) * 0.85);
-#else
+  } else
+#endif
+  {
   alpha = smoothstep(0.0, 0.07, dep / ${f(MAX_DEPTH)} * 4.0);
   vec3 base = mix(body, refl, fres);
   col = base + spec * (1.0 - foam);
   col = mix(col, uFoam * light * uHemi * 1.15, clamp(foam, 0.0, 1.0) * 0.8);
   alpha = clamp(max(alpha * mix(0.78, 0.96, smoothstep(0.1, 1.5, dep)), foam * 0.9) + fres * 0.2, 0.0, 1.0);
-#endif
+  }
   gl_FragColor = vec4(col, alpha);
   #include <tonemapping_fragment>
   #include <colorspace_fragment>
@@ -227,7 +232,7 @@ void main() {
 }`;
 
 export class Water {
-  // deferred: вода рисуется постобработкой (high); segments - деление плоскости для волн вершинами
+  // deferred: вода берёт копию кадра у постобработки (high); segments - деление плоскости для волн вершинами
   constructor({ deferred = false, segments = 64 } = {}) {
     this.deferred = deferred;
     const uniforms = THREE.UniformsUtils.merge([
@@ -247,6 +252,7 @@ export class Water {
         tCopy: { value: null },
         uRes: { value: new THREE.Vector2(1, 1) },
         uProjM: { value: new THREE.Matrix4() },
+        uCopyOK: { value: 0 },
       },
     ]);
     uniforms.uTime = NATURE.uTime;
@@ -254,28 +260,32 @@ export class Water {
     const defines = {};
     if (deferred) defines.DEFERRED = '';
     if (segments > 1) defines.WAVE_VERTS = '';
+    // прозрачная (рисуется после непрозрачного), но пишет глубину: частицы за поверхностью скрыты, AO её видит
     this.material = new THREE.ShaderMaterial({
-      uniforms, defines, vertexShader: VERT, fragmentShader: FRAG, fog: true,
-      transparent: !deferred, depthWrite: deferred,
+      uniforms, defines, vertexShader: VERT, fragmentShader: FRAG, fog: true, transparent: true, depthWrite: deferred,
     });
     const geo = new THREE.PlaneGeometry(SIZE, SIZE, segments, segments);
     geo.rotateX(-Math.PI / 2);
     this.mesh = new THREE.Mesh(geo, this.material);
     this.mesh.position.set(LAKE.x, WATER_Y, LAKE.z);
-    this.mesh.renderOrder = 1;
+    // первой среди прозрачных (облака -9, частицы 0)
+    this.mesh.renderOrder = deferred ? -100 : 1;
     this.mesh.name = 'water';
-    this.mesh.geometry.computeBoundingSphere();
-    this.mesh.updateMatrixWorld(true);
-    // для deferred - своя сцена с тем же туманом (туман назначает World)
-    this.scene = deferred ? new THREE.Scene() : null;
-    if (this.scene) this.scene.add(this.mesh);
-    this._sphere = new THREE.Sphere();
-    this._frustum = new THREE.Frustum();
-    this._m = new THREE.Matrix4();
+    // копию кадра делает постобработка (PostFX.attachWater) прямо перед отрисовкой воды
+    this.onCopy = null;
+    this.mesh.onBeforeRender = (renderer, scene, camera) => {
+      const u = this.material.uniforms;
+      u.uCopyOK.value = this.onCopy && this.onCopy(renderer, camera) ? 1 : 0;
+    };
   }
 
-  // object для добавления в мир (forward) или null
-  get forwardObject() { return this.deferred ? null : this.mesh; }
+  // Копия кадра готова: текстура (rgb - цвет, a - глубина вдоль взгляда, м), размер, камера.
+  setCopy(tex, w, h, camera) {
+    const u = this.material.uniforms;
+    u.tCopy.value = tex;
+    u.uRes.value.set(w, h);
+    u.uProjM.value.copy(camera.projectionMatrix);
+  }
 
   update(atm) {
     const u = this.material.uniforms;
@@ -286,25 +296,5 @@ export class Water {
     u.uSunDir.value.copy(atm.sunDir);
     u.uSunK.value = atm.sunIntensity / 3.2;
     u.uHemi.value.copy(atm.hemiSky).lerp(atm.sunColor, 0.4).multiplyScalar(Math.min(1.25, 0.35 + atm.hemiIntensity * 0.5));
-  }
-
-  // Вода в кадре и не слишком далеко (иначе копию кадра не делаем).
-  deferredVisible(camera) {
-    if (!this.deferred) return false;
-    this._sphere.copy(this.mesh.geometry.boundingSphere).applyMatrix4(this.mesh.matrixWorld);
-    if (this._sphere.distanceToPoint(camera.position) > 230) return false;
-    camera.updateMatrixWorld();
-    this._m.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
-    this._frustum.setFromProjectionMatrix(this._m);
-    return this._frustum.intersectsSphere(this._sphere);
-  }
-
-  renderDeferred(renderer, camera, copyTex, w, h, target) {
-    const u = this.material.uniforms;
-    u.tCopy.value = copyTex;
-    u.uRes.value.set(w, h);
-    u.uProjM.value.copy(camera.projectionMatrix);
-    renderer.setRenderTarget(target);
-    renderer.render(this.scene, camera);
   }
 }

@@ -2,7 +2,7 @@
 // Режимы: 'menu' (экран входа, камера смотрит на персонажа) и 'play'.
 
 import * as THREE from 'three';
-import { QUALITY, detectQuality, isTouchDevice } from './config.js';
+import { QUALITY, detectQuality, isTouchDevice, isSoftwareGL } from './config.js';
 import { World } from './world/world.js';
 import { heightAt } from './world/terrain-data.js';
 import { Player } from './player/player.js';
@@ -48,7 +48,7 @@ export class Game {
     }) : null;
     // адаптивное разрешение: при долгих кадрах снижаем pixelRatio ступенями до 0.6x, при запасе - возвращаем
     this.resScale = 1;
-    this.adaptive = !params.has('dpr');
+    this.adaptive = !params.has('dpr') && !isSoftwareGL(); // на программном GL всё медленно - подстраивать нечего
     this._slowT = 0; this._fastT = 0; this._ftAvg = 16;
 
     this.camera = new THREE.PerspectiveCamera(78, 1, 0.05, 520);
@@ -449,8 +449,8 @@ export class Game {
   // Без постобработки (low) - прямой рендер с тонмаппингом, руки поверх с очисткой глубины.
   renderView(dt = 0) {
     const r = this.renderer, p = this.player;
-    const fp = p.cameraMode ? p.cameraMode === 'fp' : !p.wantThird;
-    const handsOn = this.state === 'play' && fp && !p.thirdPerson && !p.wantThird && !this.debugCam;
+    const fp = p.cameraMode ? p.cameraMode === 'fp' : !p.wantThird; // C1
+    const handsOn = this.state === 'play' && fp && !p.thirdPerson && !this.debugCam;
     if (this.post) {
       this.post.render(this.world.scene, this.camera, {
         hands: handsOn ? this.hands : null, water: this.world.water, grade: this.world.atmosphere.grade, dt,
@@ -470,7 +470,7 @@ export class Game {
 
   // WS4: адаптивное разрешение. rawDt - реальное время кадра (не зажатое).
   _adapt(rawDt) {
-    if (!this.adaptive || !(rawDt > 0) || rawDt > 0.25 || document.hidden) return;
+    if (!this.adaptive || !(rawDt > 0) || rawDt > 0.5 || document.hidden) return;
     this._ftAvg += (rawDt * 1000 - this._ftAvg) * 0.08;
     this._slowT = this._ftAvg > 22 ? this._slowT + rawDt : 0;
     this._fastT = this._ftAvg < 14 ? this._fastT + rawDt : 0;

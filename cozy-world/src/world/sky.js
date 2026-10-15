@@ -151,7 +151,7 @@ export class Sky {
         void main() {
           vDir = position;
           gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
-          gl_Position.z = gl_Position.w; // дальняя плоскость: виден только там, где нет геометрии
+          gl_Position.z = gl_Position.w * 0.999999; // у дальней плоскости: виден только там, где нет геометрии
         }`,
       fragmentShader: /* glsl */`
         uniform vec3 uTop, uMid, uFog, uSunColor, uSunDir;
