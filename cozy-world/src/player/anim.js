@@ -126,6 +126,7 @@ export class Animator {
     this.qClav = [new THREE.Quaternion(), new THREE.Quaternion()];
     this.chestM = new THREE.Matrix4();
     this.browY0 = [bones[B.browL].position.y, bones[B.browR].position.y];
+    this.lid0 = [bones[B.lidL].position.clone(), bones[B.lidR].position.clone()];
   }
 
   play(name) {
@@ -775,6 +776,11 @@ export class Animator {
     this.gaze.x += (gx - this.gaze.x) * Math.min(1, dt * 25);
     this.gaze.y += (gy - this.gaze.y) * Math.min(1, dt * 25);
     for (const k of [B.eyeL, B.eyeR]) b[k].rotation.set(this.gaze.y, this.gaze.x, 0);
+    // глаза — тёмные овалы на коже (на кости века): взгляд чуть сдвигает их по лицу
+    for (const [k, i] of [[B.lidL, 0], [B.lidR, 1]]) {
+      const p0 = this.lid0[i];
+      b[k].position.set(p0.x - this.gaze.x * 0.013, p0.y + this.gaze.y * 0.01, p0.z);
+    }
     // рот
     const talk = st.talk || 0;
     this.talkPh += dt * (8 + 4 * Math.sin(t * 1.3));

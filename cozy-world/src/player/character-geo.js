@@ -604,7 +604,7 @@ function buildHair(ctx) {
         + 0.07 * Math.exp(-((d.y - 0.55) ** 2) / 0.022) * Math.max(0, -d.z) ** 1.5 * (1 + 0.6 * d.x);
       case 2: return 0.006;
       // венчик сходит на нет к вискам (без «шнурка» через лоб)
-      case 3: return (0.016 + 0.005 * Math.sin(az * 9) * Math.sin(el * 7)) * sstep(0.27, 0.42, Math.abs(((az + Math.PI) % TAU) - Math.PI) / Math.PI);
+      case 3: return (0.016 + 0.005 * Math.sin(az * 9) * Math.sin(el * 7)) * sstep(0.35, 0.46, Math.abs(((az + Math.PI) % TAU) - Math.PI) / Math.PI);
       // короткая: виски и затылок коротко (почти «под машинку»), объём сверху и чуть приподнятая чёлка
       default: return 0.005 + 0.019 * sstep(0.3, 0.72, d.y) + 0.0025 * Math.sin(az * 46 + el * 8) * sstep(0.2, 0.6, d.y)
         + 0.01 * Math.exp(-((d.y - 0.6) ** 2) / 0.03) * Math.max(0, -d.z);
@@ -618,7 +618,7 @@ function buildHair(ctx) {
     if (style === 3) { // лысина с венчиком: от висков над ушами и низко по затылку (лоб и темя голые)
       lo = 0.1 - 0.38 * sstep(0.52, 0.85, f);
       hi = 0.24 - 0.08 * sstep(0.55, 0.85, f) + 0.015 * Math.sin(az * 11);
-      hi = lo + (hi - lo) * sstep(0.27, 0.42, f);
+      hi = lo + (hi - lo) * sstep(0.35, 0.46, f); // начинается у уха, а не от висков — не читается как повязка
     } else {
       lo = hairEdge(az > Math.PI ? az - TAU : az, style);
       hi = 1;
@@ -630,7 +630,7 @@ function buildHair(ctx) {
     let t = thick(dir, az, el);
     let rim = sstep(0, 1 / NV, v) * (0.6 + 0.4 * sstep(0.06, 0.3, v));
     if (style === 3 || capped) rim *= sstep(1, 1 - 1.5 / NV, v);
-    if (capped) t *= 0.8;
+    if (capped) t = Math.min(t * 0.8, 0.009); // под шляпой волосы прижаты: чуб не протыкает кепку/каску
     return headPoint(dir.x, dir.y, dir.z, 0.0028 + t * rim, out);
   }, NU, NV, { wrap: true }, (x, y, z, out, tv) => {
     _d.set(x, y, z).sub(HEAD_C).normalize();

@@ -32,7 +32,7 @@ export function headRadius(dx, dy, dz) {
   // макушка уже (яйцо), но купол круглый: сужение — через полуоси эллипсоида, а не вычитанием |dx|,
   // которое давало на темени «луковичный» конус
   const up = sstep(0, 0.8, dy);
-  const rx = 0.288 - 0.03 * up, rz = 0.27 - 0.01 * up;
+  const rx = 0.288 - 0.016 * up, rz = 0.27 - 0.006 * up;
   const ry = dy > 0 ? 0.272 : 0.26;
   let r = 1 / Math.sqrt((dx / rx) ** 2 + (dy / ry) ** 2 + (dz / rz) ** 2);
   const horiz = Math.sqrt(Math.max(0, 1 - dy * dy));
