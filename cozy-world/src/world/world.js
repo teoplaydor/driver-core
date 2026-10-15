@@ -31,7 +31,7 @@ export class World {
     this.sky = new Sky();
     this.scene.add(this.sky.dome, this.sky.clouds);
 
-    this.terrain = buildTerrain();
+    this.terrain = buildTerrain({ lite: !!quality.terrainLite });
     this.scene.add(this.terrain);
     this.water = buildWater(this.uTime);
     this.scene.add(this.water);
@@ -69,6 +69,12 @@ export class World {
   prefill(focus) {
     this.grass.prefill(focus.x, focus.z);
     this.decor.prefill(focus.x, focus.z);
+    if (!this._compiled) {
+      // шейдеры собираем сразу на загрузке, а не в первом кадре: иначе первый кадр "висит" секунды
+      // (на телефонах и в программном рендере), пока уже идёт подключение к комнате
+      this._compiled = true;
+      this.renderer.compile(this.scene, new THREE.PerspectiveCamera());
+    }
   }
 
   // C4: листва между камерой и целью растворяется дизерингом (для вида сверху).
@@ -86,7 +92,7 @@ export class World {
     for (let i = 0; i < MAX_BENDERS; i++) {
       const p = points && points[i];
       if (p) arr[i].set(p.x, p.y, p.z, 0.8);
-      else arr[i].set(0, -1e4, 0, 0.8);
+      else arr[i].set(0, -1e4, 0, 0); // w = 0 - конец списка (шейдер выходит из цикла)
     }
   }
 

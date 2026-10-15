@@ -122,6 +122,7 @@ vec2 push = vec2(0.0);
 float gFlat = 0.0;
 for (int i = 0; i < ${MAX_BENDERS}; i++) {
   vec4 b = uBenders[i];
+  if (b.w <= 0.0) break; // точки идут подряд, дальше пусто
   vec2 dd = wp - b.xz;
   float dist = length(dd);
   float fb = (1.0 - smoothstep(b.w * 0.3, b.w, dist)) * (1.0 - step(1.6, abs(iPos.y - b.y)));

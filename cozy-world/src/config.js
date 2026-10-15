@@ -1,7 +1,7 @@
 // Настройки качества и общие константы клиента.
 // Природа (WS2): grassRadius/grassChunk (размер чанка, м)/grassBlades ([травинок вблизи, сегментов, травинок вдали])/grassDensity (пучков на м² вблизи)/grassLod (граница подробных травинок)/
 // grassFade (откуда трава начинает редеть), treeNear (радиус подробных деревьев), treeDetail (детализация
-// ближних моделей), decorRadius/decorDensity (цветы, папоротники, камешки...).
+// ближних моделей), decorRadius/decorDensity (цветы, папоротники, камешки...), terrainLite (упрощённый шейдер земли).
 
 export const QUALITY = {
   high: {
@@ -14,7 +14,8 @@ export const QUALITY = {
   },
   low: {
     dpr: 1, shadow: 0, shadowRange: 40, grassChunks: 2, grassPerChunk: 380, trees: 0.55,
-    grassRadius: 28, grassChunk: 24, grassBlades: [5, 3, 3], grassDensity: 2.6, grassLod: 6, grassFade: 12, treeNear: 32, treeDetail: 0.5, decorRadius: 28, decorDensity: 0.35,
+    grassRadius: 24, grassChunk: 24, grassBlades: [5, 3, 3], grassDensity: 2.2, grassLod: 6, grassFade: 10, treeNear: 32, treeDetail: 0.5, decorRadius: 26, decorDensity: 0.35,
+    terrainLite: true,
   },
 };
 

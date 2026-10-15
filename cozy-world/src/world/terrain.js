@@ -91,7 +91,8 @@ const f = (v) => Number(v).toFixed(4);
 const v3 = (c) => `vec3(${f(c.r)}, ${f(c.g)}, ${f(c.b)})`;
 const L = (hex) => v3(C(hex));
 
-function patchTerrainMaterial(mat, pathTex) {
+// lite: упрощённый вариант для слабых устройств (без ложного рельефа, второго слоя камешков и штрихов травы)
+function patchTerrainMaterial(mat, pathTex, lite) {
   mat.onBeforeCompile = (shader) => {
     shader.uniforms.uPathTex = { value: pathTex };
     shader.uniforms.uCamPos = NATURE.uCamPos;
@@ -107,7 +108,8 @@ vWN = normalize(mat3(modelMatrix) * objectNormal);
 vMask = aMask;`);
 
     shader.fragmentShader = shader.fragmentShader
-      .replace('#include <common>', `#include <common>
+      .replace('#include <common>', `${lite ? '#define TERRAIN_LITE' : ''}
+#include <common>
 uniform sampler2D uPathTex;
 uniform vec3 uCamPos;
 varying vec3 vWPos;
@@ -139,7 +141,9 @@ vec3 tPerturb(vec3 sx, vec3 sy, vec3 surfNorm, vec2 dHdxy) {
       .replace('#include <color_fragment>', `#include <color_fragment>
 vec2 tp = vWPos.xz;
 // все производные - до ветвлений
+#ifndef TERRAIN_LITE
 vec3 tSx = dFdx(-vViewPosition), tSy = dFdy(-vViewPosition);
+#endif
 float tViewD = length(vViewPosition);
 float tFw1 = 1.0 - smoothstep(14.0, 32.0, tViewD);
 float tFw2 = 1.0 - smoothstep(6.0, 14.0, tViewD);
@@ -167,8 +171,12 @@ if (tCanyon > 0.01) {
   vec3 cc = mix(sA, sB, smoothstep(0.35, 0.65, st1));
   cc = mix(cc, sC, smoothstep(0.7, 0.9, st2) * 0.45);
   cc *= 0.92 + 0.16 * n3;
+  #ifdef TERRAIN_LITE
+  float streak = n2, crack = 0.0;
+  #else
   float streak = nzValue(vec2(dot(tp, vec2(0.71, 0.7)) * 2.2 + n2, vWPos.y * 0.12));
   float crack = smoothstep(0.62, 0.66, nzValue(vec2(dot(tp, vec2(-0.7, 0.71)) * 3.1, vWPos.y * 0.5 + n1 * 2.0)));
+  #endif
   cc *= 1.0 - steep * (smoothstep(0.5, 0.85, streak) * 0.32 + crack * 0.4);
   cc = mix(cc, sTop, smoothstep(0.9, 0.98, tN.y) * 0.45);
   float k = tCanyon * clamp(steep * 1.2 + 0.25, 0.0, 1.0);
@@ -228,8 +236,12 @@ if (walkM > 0.001) {
   // камешек: светлый верх, тёмная кромка-тень снизу (без резкого bump - вдали он рисует "дырки")
   vec3 pbc = mix(${L('#b3aa9a')}, ${L('#ebe3d4')}, pb.z) * (0.8 + 0.25 * pb.y);
   ground = mix(ground, pbc, pb.x * 0.85);
+  #ifdef TERRAIN_LITE
+  vec3 pb2 = vec3(0.0);
+  #else
   vec3 pb2 = tPebble(tp + 7.3, 8.0, 0.14 * (1.0 - plazaM * 0.7), tFw2);
   ground = mix(ground, mix(${L('#9a8f80')}, ${L('#d9cdb8')}, pb2.z), pb2.x * 0.45);
+  #endif
   // зимой тропа - утоптанный снег
   vec3 packed = mix(${L('#c9d6e2')}, ${L('#b3c3d3')}, n2);
   ground = mix(ground, packed, smoothstep(0.45, 0.6, tSnow));
@@ -245,20 +257,24 @@ if (walkM > 0.001) {
 tRough = mix(tRough, 0.06, tPuddle);
 tH *= 1.0 - tPuddle;
 // травяной "ковёр": штрихи по ветру и светлый налёт кончиков вдали, где трава уже не рисуется
+#ifndef TERRAIN_LITE
 {
   float grassy = clamp(diffuseColor.g * 1.6 - diffuseColor.r * 1.2 - diffuseColor.b * 0.4, 0.0, 1.0) * (1.0 - walkM) * (1.0 - smoothstep(0.4, 0.6, tSnow));
   float streak = nzValue(vec2(dot(tp, vec2(0.86, 0.5)) * 9.0, dot(tp, vec2(-0.5, 0.86)) * 2.2));
   diffuseColor.rgb *= 1.0 + (streak - 0.5) * 0.18 * grassy;
   float farK = smoothstep(22.0, 60.0, tViewD) * grassy;
   diffuseColor.rgb = mix(diffuseColor.rgb, diffuseColor.rgb * vec3(1.12, 1.1, 0.86), farK * 0.6);
-}`)
+}
+#endif`)
       .replace('#include <normal_fragment_maps>', `#include <normal_fragment_maps>
+#ifndef TERRAIN_LITE
 {
   // ложный рельеф: высота из шума -> возмущение нормали через производные
   float fadeB = 1.0 - smoothstep(25.0, 70.0, length(vViewPosition));
   vec2 dH = vec2(dFdx(tH), dFdy(tH)) * tBumpK * 0.06 * fadeB;
   normal = tPerturb(tSx, tSy, normal, dH);
-}`)
+}
+#endif`)
       .replace('#include <roughnessmap_fragment>', `#include <roughnessmap_fragment>
 roughnessFactor = min(roughnessFactor, tRough);`)
       .replace('#include <emissivemap_fragment>', `#include <emissivemap_fragment>
@@ -271,10 +287,10 @@ roughnessFactor = min(roughnessFactor, tRough);`)
 #endif
 totalEmissiveRadiance += vec3(tSpark) * 1.6;`);
   };
-  mat.customProgramCacheKey = () => 'terrain-v2';
+  mat.customProgramCacheKey = () => (lite ? 'terrain-v2-lite' : 'terrain-v2');
 }
 
-export function buildTerrain() {
+export function buildTerrain({ lite = false } = {}) {
   const H = getHeightGrid();
   const positions = new Float32Array(N * N * 3);
   const colors = new Float32Array(N * N * 3);
@@ -317,8 +333,11 @@ export function buildTerrain() {
   geo.computeVertexNormals();
   geo.computeBoundingSphere();
 
-  const mat = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 1, metalness: 0 });
-  patchTerrainMaterial(mat, buildPathTexture());
+  // на слабых устройствах - Lambert: заметно дешевле PBR при почти том же виде (шероховатость всё равно 1)
+  const mat = lite
+    ? new THREE.MeshLambertMaterial({ vertexColors: true })
+    : new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 1, metalness: 0 });
+  patchTerrainMaterial(mat, buildPathTexture(), lite);
   const mesh = new THREE.Mesh(geo, mat);
   mesh.receiveShadow = true;
   mesh.name = 'terrain';

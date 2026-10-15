@@ -16,7 +16,7 @@ export const NATURE = {
   uOccOn: { value: 0 },
   uOccR: { value: 2.2 },
   // C6: точки, приминающие траву (xyz + радиус)
-  uBenders: { value: Array.from({ length: MAX_BENDERS }, () => new THREE.Vector4(0, -1e4, 0, 0.8)) },
+  uBenders: { value: Array.from({ length: MAX_BENDERS }, () => new THREE.Vector4(0, -1e4, 0, 0)) },
   // граница ближнего/дальнего LOD деревьев (xz центра + радиус)
   uLod: { value: new THREE.Vector3(0, 0, 70) },
 };
@@ -44,10 +44,11 @@ export const GLSL_WIND = /* glsl */`
 uniform float uTime;
 uniform vec2 uWindDir;
 // 0..1 - сила порыва в точке
+// (аналитическая волна из синусов: дешевле шума, а для ветра выглядит так же)
 float windGust(vec2 wp) {
   vec2 q = wp * 0.045 - uWindDir * uTime * 0.42;
-  float g = nzValue(q) * 0.65 + nzValue(q * 2.3 + 7.1) * 0.35;
-  return smoothstep(0.28, 0.85, g);
+  float g = sin(q.x * 3.1 + sin(q.y * 2.3) * 1.3) * 0.32 + sin(q.y * 4.7 - q.x * 1.9 + 1.7) * 0.2 + sin((q.x + q.y) * 7.3) * 0.08 + 0.5;
+  return smoothstep(0.3, 0.85, g);
 }
 `;
 
