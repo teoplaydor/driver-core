@@ -70,8 +70,12 @@ function posterTex(kind) {
     }
     g.restore();
     g.textAlign = 'center'; g.textBaseline = 'middle'; g.fillStyle = '#ffffff';
-    g.font = '800 46px "Baloo 2", "Trebuchet MS", system-ui, sans-serif';
-    g.fillText(['БИТВА', 'ЧЕМПИОН', 'КУБОК', 'РАУНД'][kind], w / 2, h * 0.84);
+    const cap = ['БИТВА', 'ЧЕМПИОН', 'КУБОК', 'РАУНД'][kind];
+    let fs = 46;
+    g.font = `800 ${fs}px "Baloo 2", "Trebuchet MS", system-ui, sans-serif`;
+    const tw = g.measureText(cap).width;
+    if (tw > w * 0.8) { fs = Math.floor((fs * w * 0.8) / tw); g.font = `800 ${fs}px "Baloo 2", "Trebuchet MS", system-ui, sans-serif`; }
+    g.fillText(cap, w / 2, h * 0.84);
   });
 }
 
