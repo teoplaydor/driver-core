@@ -32,6 +32,7 @@ export class TopCamera {
     this.indoor = false; // под большой крышей (арена) — ставит top-view.js
     this.fov = 50;
     this._snap = true;
+    this.justSnapped = false; // в этом кадре камера встала на место без сглаживания (вход в режим, телепорт)
     this._cand = [];
     this._seg = { fx: 0, fy: 0, fz: 0 };
   }
@@ -56,6 +57,7 @@ export class TopCamera {
     if (ll > TOP.leadMax) { lx *= TOP.leadMax / ll; lz *= TOP.leadMax / ll; }
     const tx = p.x, ty = p.y + TOP.focusY, tz = p.z;
     if (this._snap || Math.hypot(tx - this.fx, tz - this.fz) > 25) {
+      this._snap = true;
       this.fx = tx; this.fy = ty; this.fz = tz; this.lx = lx; this.lz = lz;
       this.curDist = this.dist;
       this.room = roomish ? 1 : 0;
@@ -102,6 +104,7 @@ export class TopCamera {
       this.pitch = damp(this.pitch, wantP, wantP > this.pitch ? 10 : 2.4, dt);
       this.effDist = damp(this.effDist, wantD, wantD < this.effDist ? 12 : 2.4, dt);
     }
+    this.justSnapped = this._snap;
     this._snap = false;
 
     const cp = Math.cos(this.pitch), sp = Math.sin(this.pitch);

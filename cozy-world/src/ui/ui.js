@@ -37,6 +37,7 @@ export class UI {
     this.fadeEl = $('fade');
     this.tlabel = $('tlabel');
     this._tlKey = '';
+    this._tlBelow = false;
     this._hintKey = '';
     this._toastT = 0;
     this.onPlay = null;
@@ -198,20 +199,59 @@ export class UI {
 
   setCrosshairHot(v) { this.crosshair.classList.toggle('hot', v); }
 
-  // WS6: подпись над целью в виде сверху (x, y — точка над целью в CSS-пикселях); text = null — скрыть.
-  setTargetLabel(text, key, x, y) {
+  // WS6: подпись над целью в виде сверху (x, y — точка над целью в CSS-пикселях; below — под целью,
+  // хвостик вверх); text = null — скрыть.
+  setTargetLabel(text, key, x, y, below = false) {
     const el = this.tlabel;
     if (!el) return;
     if (!text) { if (!el.hidden) el.hidden = true; return; }
-    const k = `${key}|${text}`;
-    if (k !== this._tlKey) {
-      this._tlKey = k;
-      const kb = document.createElement('kbd');
-      kb.textContent = key;
-      el.replaceChildren(kb, document.createTextNode(text));
-    }
-    el.style.transform = `translate(${x.toFixed(1)}px, ${y.toFixed(1)}px) translate(-50%, -100%)`;
+    this._tlText(text, key);
+    if (below !== this._tlBelow) { this._tlBelow = below; el.classList.toggle('below', below); }
+    el.style.transform = `translate(${x.toFixed(1)}px, ${y.toFixed(1)}px) translate(-50%, ${below ? '0' : '-100%'})`;
     if (el.hidden) el.hidden = false;
+  }
+
+  _tlText(text, key) {
+    const k = `${key}|${text}`;
+    if (k === this._tlKey) return;
+    this._tlKey = k;
+    this._tlSize = null;
+    const kb = document.createElement('kbd');
+    kb.textContent = key;
+    this.tlabel.replaceChildren(kb, document.createTextNode(text));
+  }
+
+  // Размер подписи цели (для раскладки над/под целью); меряем один раз на текст.
+  targetLabelSize(text) {
+    const el = this.tlabel;
+    if (!el || el.hidden || this._tlKey.slice(this._tlKey.indexOf('|') + 1) !== text) return null;
+    if (!this._tlSize) this._tlSize = { w: el.offsetWidth || 160, h: el.offsetHeight || 34 };
+    return this._tlSize;
+  }
+
+  // WS6: ники других игроков в виде сверху — HTML-подписи над головами (list[i]: { name, speaking, x, y, a }).
+  setNameTags(list, n) {
+    const pool = this._ntags || (this._ntags = []);
+    for (let i = 0; i < n; i++) {
+      const it = list[i];
+      let e = pool[i];
+      if (!e) {
+        const el = document.createElement('div');
+        el.className = 'ntag';
+        this.hud.appendChild(el);
+        e = pool[i] = { el, name: '', speaking: null, a: -1, shown: true };
+      }
+      if (e.name !== it.name || e.speaking !== it.speaking) {
+        e.name = it.name; e.speaking = it.speaking;
+        e.el.textContent = it.name;
+        e.el.classList.toggle('speaking', it.speaking);
+      }
+      e.el.style.transform = `translate(${it.x.toFixed(1)}px, ${it.y.toFixed(1)}px) translate(-50%, -100%)`;
+      const a = Math.round(it.a * 20) / 20;
+      if (a !== e.a) { e.a = a; e.el.style.opacity = String(a); }
+      if (!e.shown) { e.shown = true; e.el.hidden = false; }
+    }
+    for (let i = n; i < pool.length; i++) if (pool[i].shown) { pool[i].shown = false; pool[i].el.hidden = true; }
   }
 
   // WS6: режим камеры (C1) — кнопка 📷 подсвечена в виде сверху.
@@ -220,7 +260,7 @@ export class UI {
       b.classList.toggle('on', mode === 'top');
       b.setAttribute('aria-label', mode === 'top' ? 'Камера: от первого лица' : 'Камера: вид сверху');
     }
-    if (mode !== 'top') this.setTargetLabel(null);
+    if (mode !== 'top') { this.setTargetLabel(null); this.setNameTags(null, 0); }
   }
   setRoom(code) { $('roomcode').textContent = code; }
   setCount(n) { $('count').textContent = `${n} в сети`; }

@@ -3,7 +3,8 @@
 //    подсветка мягким светящимся кольцом на земле (HDR — подхватывает bloom) и подпись над целью;
 //  • тап / клик по миру: по предмету, двери, игроку — подойти (простое рулевое управление) и взаимодействовать,
 //    по земле — идти в точку с маркером; джойстик / WASD отменяют автодвижение;
-//  • листва между камерой и игроком растворяется (C4), крыши над игроком плавно скрываются (C5).
+//  • листва между камерой и игроком растворяется (C4), крыши над игроком плавно скрываются (C5);
+//  • ники других игроков — чёткими HTML-подписями над головами (спрайт с 11 м мелковат).
 // Props.pick() / nearestPortal() в виде сверху берут цель отсюда (targetProp / targetPortal).
 
 import * as THREE from 'three';
@@ -135,6 +136,7 @@ export class TopView {
     this.ringK = 0; // проявление 0..1
     this.ringPos = new THREE.Vector3();
     this.ringR = 0.5;
+    this._below = false; // подпись цели под кольцом (над ним стоит свой персонаж)
     this.markMat = ringMaterial('#8fe3ff', 2.4);
     this.markMat.uniforms.uFill.value = 0.2;
     this.mark = ringMesh(this.markMat);
@@ -162,10 +164,11 @@ export class TopView {
     this.aimK = 0;
     game.world.scene.add(this.ring, this.mark, this.pin, this.aim);
 
-    // крыши (C5): ищем при первом входе в режим
+    // крыши (C5): ищем при каждом входе в режим (новые постройки подхватываются, известные — из кэша)
     this.roofs = null;
     this.indoor = false;
     this._shadowOnly = new THREE.MeshBasicMaterial({ colorWrite: false, depthWrite: false });
+    this._names = []; // подписи ников (переиспользуемые объекты)
     this._box = new THREE.Box3();
     // проверка «крыша между камерой и игроком» по настоящей геометрии (рамка конуса крыши шире самой крыши)
     this._rc = new THREE.Raycaster();
@@ -219,6 +222,30 @@ export class TopView {
     this._drawTarget(dt);
     this._drawMarker(dt);
     this._drawAim(dt);
+    this._drawNames();
+  }
+
+  // Ники других игроков: спрайт-вывеску прячем, вместо неё — HTML-подпись постоянного размера над головой
+  // (вызывается после remotes.update — он каждый кадр заново включает спрайт).
+  _drawNames() {
+    const g = this.game, pl = g.player.pos, list = this._names;
+    const W = window.innerWidth, H = window.innerHeight;
+    let n = 0;
+    for (const r of g.remotes.map.values()) {
+      const av = r.avatar, p = av.root.position;
+      av.tag.visible = false;
+      if (g.debugCam) continue;
+      const d = Math.hypot(p.x - pl.x, p.z - pl.z);
+      if (d > 34) continue;
+      _v.set(p.x, p.y + av.top + 0.3, p.z).project(g.camera);
+      if (_v.z > 1 || _v.x < -1.1 || _v.x > 1.1 || _v.y < -1.1 || _v.y > 1.15) continue;
+      const it = list[n] || (list[n] = { id: '', name: '', speaking: false, x: 0, y: 0, a: 1 });
+      it.id = r.id; it.name = r.name; it.speaking = !!av.speaking;
+      it.x = (_v.x * 0.5 + 0.5) * W; it.y = (-_v.y * 0.5 + 0.5) * H;
+      it.a = clamp(1 - (d - 26) / 8, 0, 1);
+      n++;
+    }
+    g.ui.setNameTags?.(list, n);
   }
 
   // Пока держат ↗ / Q с предметом в руках — стрелка на земле: куда и как далеко полетит.
@@ -245,7 +272,7 @@ export class TopView {
     const g = this.game;
     this.active = on;
     if (on) {
-      if (!this.roofs) this._scanRoofs();
+      this._scanRoofs();
     } else {
       this.cancelWalk(true);
       this.target = null;
@@ -256,6 +283,7 @@ export class TopView {
       for (const r of this.roofs || []) this._roofAlpha(r, 1);
       this.indoor = false;
       g.player.topCam.indoor = false;
+      g.ui.setNameTags?.(null, 0);
     }
   }
 
@@ -335,8 +363,9 @@ export class TopView {
       const p = obj.pos;
       t.x = p.x; t.z = p.z;
       t.y = g.world.collisions.supportY(p.x, p.z, p.y + 0.2);
-      t.top = p.y + 0.6; t.r = 0.6;
-      t.label = obj.label || 'Использовать';
+      t.top = p.y + 0.6; t.r = clamp((obj.hit ?? 0.6) * 0.9, 0.45, 1.1);
+      const reg = g.world.interactables;
+      t.label = (reg?.label ? reg.label(obj) : typeof obj.label === 'function' ? obj.label() : obj.label) || 'Использовать';
     }
     return t;
   }
@@ -364,12 +393,29 @@ export class TopView {
       this.ringMat.uniforms.uAlpha.value = this.ringK;
       this.ringMat.uniforms.uTime.value = this.time;
     }
-    // подпись над целью (HTML: чёткий текст и шрифт интерфейса)
+    // подпись над целью (HTML: чёткий текст и шрифт интерфейса); если над целью стоит свой персонаж
+    // (он дальше от камеры — на экране выше), подпись уходит под кольцо, чтобы его не закрывать
     if (show && this.ringK > 0.3) {
+      const W = window.innerWidth, H = window.innerHeight;
       _v.set(t.x, t.top, t.z).project(g.camera);
       if (_v.z < 1) {
-        const x = (_v.x * 0.5 + 0.5) * window.innerWidth, y = (-_v.y * 0.5 + 0.5) * window.innerHeight;
-        g.ui.setTargetLabel?.(t.label, g.isTouch ? '✋' : 'E', x, y);
+        let x = (_v.x * 0.5 + 0.5) * W, y = (-_v.y * 0.5 + 0.5) * H;
+        const size = g.ui.targetLabelSize?.(t.label) || { w: 160, h: 34 };
+        const pl = g.player.pos;
+        _v.set(pl.x, pl.y + 1.35, pl.z).project(g.camera);
+        const hx = (_v.x * 0.5 + 0.5) * W, hy = (-_v.y * 0.5 + 0.5) * H;
+        _v.set(pl.x, pl.y + 0.1, pl.z).project(g.camera);
+        const fy = (-_v.y * 0.5 + 0.5) * H;
+        // рамка подписи (якорь — низ по центру, +хвостик) против рамки персонажа на экране; запас m — чтобы
+        // подпись не прыгала туда-сюда на границе
+        const m = this._below ? 14 : 0;
+        const below = this._below = Math.abs(hx - x) < size.w / 2 + 16 + m && hy - 8 - m < y && fy + 4 + m > y - size.h - 10;
+        if (below) {
+          _v.set(t.x, t.y, t.z).project(g.camera);
+          x = (_v.x * 0.5 + 0.5) * W;
+          y = (-_v.y * 0.5 + 0.5) * H + this.ringR * 22 + 12;
+        }
+        g.ui.setTargetLabel?.(t.label, g.isTouch ? '✋' : 'E', x, y, below);
         return;
       }
     }
@@ -427,7 +473,7 @@ export class TopView {
       const p = r.avatar.root.position;
       test('player', r, p.x, p.y + 0.75, p.z, 0.62);
     }
-    for (const it of this._interactables()) if (it.pos && (it.enabled?.() ?? true)) test('it', it, it.pos.x, it.pos.y, it.pos.z, Math.max(0.4, Math.min(1.2, (it.radius || 1) * 0.5)));
+    for (const it of this._interactables()) if (it.pos && (it.enabled?.() ?? true)) test('it', it, it.pos.x, it.pos.y, it.pos.z, Math.max(0.4, it.hit ?? Math.min(1.2, (it.radius || 1) * 0.5)));
     return best || near;
   }
 
@@ -619,32 +665,47 @@ export class TopView {
   // ---------- крыши (C5) ----------
 
   _scanRoofs() {
+    const known = new Map((this.roofs || []).map((r) => [r.mesh, r]));
     const list = this.roofs = [];
+    const fresh = [];
     this.game.world.scene.traverse((o) => {
       if (!o.isMesh || !o.userData.roof) return;
-      const a = o.userData.roofArea;
-      this._box.setFromObject(o);
-      list.push({
-        mesh: o, base: o.material, fade: null, k: 1,
-        shadow: Array.isArray(o.material) ? o.material.map(() => this._shadowOnly) : this._shadowOnly,
-        area: a || { x0: this._box.min.x, x1: this._box.max.x, z0: this._box.min.z, z1: this._box.max.z },
-        min: this._box.min.clone(), max: this._box.max.clone(),
-      });
+      let r = known.get(o);
+      if (!r) {
+        const a = o.userData.roofArea;
+        o.updateWorldMatrix(true, false);
+        this._box.setFromObject(o);
+        r = {
+          mesh: o, base: o.material, fade: null, k: 1,
+          shadow: Array.isArray(o.material) ? o.material.map(() => this._shadowOnly) : this._shadowOnly,
+          area: a || { x0: this._box.min.x, x1: this._box.max.x, z0: this._box.min.z, z1: this._box.max.z },
+          min: this._box.min.clone(), max: this._box.max.clone(),
+        };
+        // плавное растворение — полупрозрачной копией материала (с теми же патчами шейдера)
+        const mk = (m) => {
+          const c = m.clone();
+          c.onBeforeCompile = m.onBeforeCompile;
+          c.customProgramCacheKey = m.customProgramCacheKey;
+          c.transparent = true;
+          c.depthWrite = false;
+          return c;
+        };
+        r.fade = Array.isArray(r.base) ? r.base.map(mk) : mk(r.base);
+        fresh.push(r);
+      }
+      list.push(r);
     });
-    // материалы для плавного растворения (alphaHash — тот же дизеринг, что у листвы) собираем заранее
-    if (!list.length) return;
+    if (!fresh.length) return;
+    // прогрев шейдеров копий, чтобы первое растворение не подвисало
     const tmp = new THREE.Group();
-    for (const r of list) {
-      const mk = (m) => { const c = m.clone(); c.alphaHash = true; c.transparent = false; return c; };
-      r.fade = Array.isArray(r.base) ? r.base.map(mk) : mk(r.base);
-      tmp.add(new THREE.Mesh(r.mesh.geometry, r.fade));
-    }
+    for (const r of fresh) tmp.add(new THREE.Mesh(r.mesh.geometry, r.fade));
     const g = this.game;
     try { g.renderer.compileAsync?.(tmp, g.camera, g.world.scene)?.catch?.(() => {}); } catch { /* не критично */ }
   }
 
   _roofs(dt) {
     const g = this.game, pl = g.player, p = pl.pos, cam = g.camera.position;
+    const snap = pl.topCam.justSnapped; // вход в режим, телепорт — без растворения
     let indoor = isInterior(p.x);
     for (const r of this.roofs || []) {
       const a = r.area, m = 0.25;
@@ -653,8 +714,9 @@ export class TopView {
       const between = !under && this._segRoof(cam, p, r);
       const hide = under || between;
       if (under && (a.x1 - a.x0) * (a.z1 - a.z0) > 120) indoor = true;
-      const k = damp(r.k, hide ? 0 : 1, hide ? 9 : 5, dt);
-      this._roofAlpha(r, Math.abs(k - (hide ? 0 : 1)) < 0.01 ? (hide ? 0 : 1) : k);
+      let k = snap ? (hide ? 0 : 1) : damp(r.k, hide ? 0 : 1, hide ? 11 : 6, dt);
+      if (k < 0.03) k = 0; else if (k > 0.985) k = 1;
+      this._roofAlpha(r, k);
     }
     this.indoor = indoor;
     pl.topCam.indoor = indoor && !isInterior(p.x);
@@ -693,7 +755,8 @@ export class TopView {
     return true;
   }
 
-  // Прозрачность крыши: 1 — обычный материал, 0 — только тень (внутри остаётся тень от крыши), между — дизеринг.
+  // Прозрачность крыши: 1 — обычный материал, 0 — только тень (внутри остаётся тень от крыши), между —
+  // полупрозрачная копия (тень при этом остаётся полной).
   _roofAlpha(r, k) {
     r.k = k;
     const mesh = r.mesh;
@@ -703,6 +766,8 @@ export class TopView {
       return;
     }
     if (mesh.material !== r.fade) mesh.material = r.fade;
-    if (Array.isArray(r.fade)) for (const f of r.fade) f.opacity = k; else r.fade.opacity = k;
+    const base = Array.isArray(r.base) ? r.base : null;
+    if (Array.isArray(r.fade)) r.fade.forEach((f, i) => { f.opacity = k * (base[i].opacity ?? 1); });
+    else r.fade.opacity = k * (r.base.opacity ?? 1);
   }
 }
