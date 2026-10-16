@@ -199,6 +199,8 @@ if (tall) {
     return { inCam: inside(c.x, c.y, c.z), hug, seen, cam: c.toArray().map((v) => +v.toFixed(1)) };
   });
   check('у фасада многоэтажки камера не в доме и не у стены, персонаж виден', !st.inCam && !st.hug && st.seen, JSON.stringify(st));
+  await place(10, 4, 0, 0); // обратно к хабу: в дождевой зоне у дома программный рендер слишком медленный
+  await frames(6);
 }
 
 // обратно в 1-е лицо: руки, без растворения листвы, курсор захватывается
