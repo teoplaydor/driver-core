@@ -233,6 +233,7 @@ export class TouchControls {
     const R = 58;
     const J = this.joy;
     J.addEventListener('pointerdown', (e) => {
+      if (e.isPrimary) this._stale(); // WS6: первый палец — прежние касания закончились, даже если их отпускание потерялось
       if (this.joyId !== null) return;
       this.joyId = e.pointerId;
       J.setPointerCapture(e.pointerId);
@@ -241,6 +242,12 @@ export class TouchControls {
       this._moveJoy(e, R);
     });
     J.addEventListener('pointermove', (e) => { if (e.pointerId === this.joyId) this._moveJoy(e, R); });
+    // касания, отпускание которых не дошло (системный жест, потерянный pointerup): иначе джойстик «залипнет»,
+    // а тапы будут считаться вторым пальцем щипка
+    this._stale = () => {
+      this.ptrs?.clear();
+      if (this.joyId !== null) endJoy({ pointerId: this.joyId });
+    };
     const endJoy = (e) => {
       if (e.pointerId !== this.joyId) return;
       this.joyId = null;
@@ -263,6 +270,7 @@ export class TouchControls {
       return { d: Math.hypot(b.x - a.x, b.y - a.y), a: Math.atan2(b.y - a.y, b.x - a.x) };
     };
     P.addEventListener('pointerdown', (e) => {
+      if (e.isPrimary) this._stale();
       if (ptrs.size >= 2) return;
       try { P.setPointerCapture(e.pointerId); } catch { /* указатель уже отпущен */ }
       ptrs.set(e.pointerId, { x: e.clientX, y: e.clientY });

@@ -239,17 +239,20 @@ export class UI {
         const el = document.createElement('div');
         el.className = 'ntag';
         $('wlabels').appendChild(el);
-        e = pool[i] = { el, name: '', speaking: null, a: -1, shown: true };
+        e = pool[i] = { el, name: '', speaking: null, a: -1, shown: true, w: 0 };
       }
       if (e.name !== it.name || e.speaking !== it.speaking) {
         e.name = it.name; e.speaking = it.speaking;
         e.el.textContent = it.name;
         e.el.classList.toggle('speaking', it.speaking);
+        e.w = 0;
       }
-      e.el.style.transform = `translate(${it.x.toFixed(1)}px, ${it.y.toFixed(1)}px) translate(-50%, -100%)`;
+      if (!e.shown) { e.shown = true; e.el.hidden = false; }
+      if (!e.w) e.w = e.el.offsetWidth; // ширину меряем один раз на текст: ник у края экрана не обрезается
+      const x = Math.min(Math.max(it.x, e.w / 2 + 4), window.innerWidth - e.w / 2 - 4);
+      e.el.style.transform = `translate(${x.toFixed(1)}px, ${it.y.toFixed(1)}px) translate(-50%, -100%)`;
       const a = Math.round(it.a * 20) / 20;
       if (a !== e.a) { e.a = a; e.el.style.opacity = String(a); }
-      if (!e.shown) { e.shown = true; e.el.hidden = false; }
     }
     for (let i = n; i < pool.length; i++) if (pool[i].shown) { pool[i].shown = false; pool[i].el.hidden = true; }
   }
