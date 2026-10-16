@@ -118,7 +118,7 @@ button:active { transform: translateY(2px); box-shadow: none; }
 .status { min-height: 20px; margin: 8px 0 0; font-size: 14px; text-align: center; opacity: 0.8; }
 
 /* ---------- HUD ---------- */
-#hud { position: fixed; inset: 0; pointer-events: none; }
+#hud { position: fixed; inset: 0; pointer-events: none; z-index: 2; } /* WS6: над тач-слоем — «Ссылка» и чат нажимаются и в виде сверху */
 #hud > * { position: absolute; }
 #crosshair {
   left: 50%; top: 50%;
@@ -169,6 +169,50 @@ kbd {
   text-shadow: 0 2px 0 rgba(30, 20, 40, 0.6), 0 0 8px rgba(30, 20, 40, 0.45);
 }
 #hints div { display: flex; align-items: center; gap: 10px; }
+/* WS6: слой подписей в мире (вид сверху) — под тач-кнопками и HUD */
+#wlabels { position: fixed; inset: 0; pointer-events: none; overflow: hidden; }
+#wlabels > * { position: absolute; }
+/* WS6: подпись над целью в виде сверху (позицию ставит ui.setTargetLabel каждый кадр) */
+#tlabel {
+  left: 0; top: 0;
+  display: flex; align-items: center; gap: 7px;
+  padding: 3px 13px 3px 4px; margin-top: -10px;
+  background: rgba(255, 244, 223, 0.94);
+  border: 3px solid #fff; border-radius: 999px;
+  box-shadow: 0 3px 0 rgba(120, 80, 40, 0.18), 0 6px 16px rgba(40, 25, 10, 0.25);
+  font-size: 16px; font-weight: 800; line-height: 1.2; color: var(--ink);
+  white-space: nowrap;
+  will-change: transform;
+  animation: tlabel-in 0.18s ease-out;
+}
+#tlabel::after {
+  content: ''; position: absolute; left: 50%; bottom: -9px; margin-left: -7px;
+  border: 7px solid transparent; border-top-color: #fff; border-bottom: 0;
+}
+#tlabel kbd {
+  min-width: 26px; height: 26px; padding: 0 5px; line-height: 22px;
+  border: 0; border-radius: 999px;
+  background: var(--orange); color: #fff; font-size: 14px;
+  box-shadow: inset 0 -2px 0 rgba(120, 50, 0, 0.25);
+}
+#tlabel.below { margin-top: 10px; }
+#tlabel.below::after { bottom: auto; top: -9px; border-top: 0; border-bottom: 7px solid #fff; }
+@keyframes tlabel-in { from { opacity: 0; } to { opacity: 1; } }
+/* WS6: ники других игроков в виде сверху (позиции ставит ui.setNameTags) */
+.ntag {
+  left: 0; top: 0;
+  padding: 0 10px; border-radius: 999px;
+  background: rgba(24, 18, 30, 0.58);
+  color: #fff; font-size: 14px; font-weight: 700; line-height: 22px;
+  white-space: nowrap; max-width: 40vw; overflow: hidden; text-overflow: ellipsis;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.35);
+  will-change: transform, opacity;
+}
+.ntag.speaking::before {
+  content: ''; display: inline-block; width: 8px; height: 8px; margin: 0 6px 1px -2px;
+  border-radius: 50%; background: #5ee06a; box-shadow: 0 0 6px #5ee06a; vertical-align: middle;
+}
+body.cam-top #crosshair { display: none; }
 #chatlog {
   left: calc(14px + var(--safe-l)); bottom: calc(68px + var(--safe-b));
   width: min(420px, 62vw);
@@ -220,9 +264,10 @@ kbd {
 #fade.on { opacity: 1; }
 
 /* ---------- тач ---------- */
-#touch { position: fixed; inset: 0; pointer-events: none; touch-action: none; }
+#touch { position: fixed; inset: 0; pointer-events: none; touch-action: none; z-index: 1; }
 #touch > * { pointer-events: auto; position: absolute; touch-action: none; }
 #lookpad { right: 0; top: 0; width: 62%; height: 100%; }
+body.cam-top #lookpad { width: 100%; } /* WS6: вид сверху — тап и поворот по всему экрану (джойстик и кнопки выше) */
 #joy {
   left: calc(24px + var(--safe-l)); bottom: calc(26px + var(--safe-b));
   width: 132px; height: 132px; border-radius: 50%;
@@ -233,7 +278,9 @@ kbd {
   position: absolute; left: 50%; top: 50%; width: 58px; height: 58px; margin: -29px 0 0 -29px;
   border-radius: 50%; background: rgba(255, 255, 255, 0.85);
   box-shadow: 0 3px 0 rgba(60, 40, 30, 0.25);
+  transition: background-color 0.15s;
 }
+#knob.run { background: rgba(255, 190, 90, 0.95); } /* WS6: джойстик до упора — бег */
 .tbtns { right: 0; bottom: 0; width: 0; height: 0; pointer-events: none !important; }
 .tbtns button, .tmini button {
   pointer-events: auto; position: absolute;
@@ -286,4 +333,9 @@ body.touch #mic, body.touch #help { display: none; }
   .big { font-size: 22px; padding: 7px 14px; }
   .b-jump { width: 72px; height: 72px; }
   #chatlog { bottom: calc(160px + var(--safe-b)); }
+}
+/* WS6: на тач-экране подсказки левее кнопок (раньше в альбомной ориентации лежали прямо на них) */
+body.touch #hints { right: calc(200px + var(--safe-r)); bottom: calc(24px + var(--safe-b)); font-size: 18px; }
+@media (max-width: 700px) {
+  body.touch #hints { right: calc(14px + var(--safe-r)); bottom: calc(240px + var(--safe-b)); }
 }

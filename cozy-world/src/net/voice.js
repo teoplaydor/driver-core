@@ -183,7 +183,7 @@ export class Voice {
     const ctx = this.ctx;
     if (!ctx) return;
     const t = ctx.currentTime;
-    const cam = this.game.camera.position;
+    const cam = (this.game.ear || this.game.camera).position; // WS6: в виде сверху — от головы персонажа
     for (const p of this.peers.values()) {
       if (!p.gain) continue;
       const r = this.game.remotes.get(p.id);

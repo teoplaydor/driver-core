@@ -28,7 +28,7 @@ const RANGES = {
 const SMALL = new Set(['cup', 'mug', 'teapot', 'book', 'chess', 'frisbee']);
 const SWING_HIT_AT = 0.27; // с начала замаха до удара, с
 const THROW_AT = 0.28; // с начала броска одной рукой до вылета предмета
-const NAMES = {
+export const NAMES = { // WS6: подписи целей в виде сверху (top-view.js)
   ball: 'мяч', crate: 'ящик', mug: 'кружку', cup: 'чашку', teapot: 'чайник', bat: 'биту', umbrella: 'зонт', lantern: 'фонарь',
   guitar: 'гитару', boombox: 'бумбокс', frisbee: 'фрисби', book: 'книгу', teddy: 'мишку', chess: 'фигуру',
 };
@@ -343,13 +343,15 @@ export class Props {
 
   _ray() {
     const g = this.game, p = g.player;
-    const cp = Math.cos(p.pitch);
-    _fwd.set(-Math.sin(p.yaw) * cp, Math.sin(p.pitch), -Math.cos(p.yaw) * cp);
+    const pitch = p.cameraMode === 'top' ? 0.1 : p.pitch; // WS6: сверху бросаем по направлению персонажа, чуть вверх
+    const cp = Math.cos(pitch);
+    _fwd.set(-Math.sin(p.yaw) * cp, Math.sin(pitch), -Math.cos(p.yaw) * cp);
     const origin = p.thirdPerson ? _v.set(p.pos.x, p.pos.y + 0.95, p.pos.z) : g.camera.position;
     return { origin, dir: _fwd };
   }
 
   pick() {
+    if (this.game.player.cameraMode === 'top' && this.game.topView) return this.game.topView.targetProp(); // WS6: ближайшая цель вокруг
     const { origin, dir } = this._ray();
     let best = null, bestT = REACH;
     for (const p of this.list) {
@@ -371,6 +373,7 @@ export class Props {
   }
 
   nearestPortal() {
+    if (this.game.player.cameraMode === 'top' && this.game.topView) return this.game.topView.targetPortal(); // WS6
     const pl = this.game.player.pos;
     let best = null, bd = 1e9;
     for (const po of this.world.structures.portals) {
@@ -1007,6 +1010,7 @@ export class Props {
   _hints() {
     const g = this.game, ui = g.ui, touch = g.isTouch;
     const E = touch ? '✋' : 'E', Q = touch ? '↗' : 'Q';
+    const top = g.player.cameraMode === 'top'; // WS6: в виде сверху цель подписана над ней самой (top-view.js)
     const hints = [];
     const h = this.holding;
     this.target = h ? null : this.pick();
@@ -1019,10 +1023,10 @@ export class Props {
             : h.kind === 'umbrella' ? (h.state ? 'Сложить зонт' : 'Раскрыть зонт')
               : h.kind === 'lantern' ? (h.state ? 'Погасить фонарь' : 'Зажечь фонарь')
                 : h.state ? 'Выключить музыку' : 'Включить музыку';
-        hints.push({ key: touch ? E : 'E / ЛКМ', text: label }, { key: Q, text: 'Положить · держи — бросок' });
+        hints.push({ key: touch || top ? E : 'E / ЛКМ', text: label }, { key: Q, text: 'Положить · держи — бросок' });
       } else hints.push({ key: E, text: 'Поставить' }, { key: Q, text: 'Бросить (держи — сильнее)' });
-    } else if (this.target) hints.push({ key: E, text: `Взять ${NAMES[this.target.kind]}` });
-    else if (this.portal) hints.push({ key: E, text: this.portal.label });
+    } else if (this.target && !top) hints.push({ key: E, text: `Взять ${NAMES[this.target.kind]}` });
+    else if (this.portal && !top) hints.push({ key: E, text: this.portal.label });
     ui.setHints(hints);
     ui.setCrosshairHot(!!this.target || !!this.portal);
   }

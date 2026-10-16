@@ -16,9 +16,10 @@ import { Props } from './world/props.js';
 import { AudioEngine } from './audio/engine.js';
 import { Voice } from './net/voice.js';
 import { DemoBots } from './demo-bots.js';
-import { clamp, TAU } from './util/math.js';
+import { clamp, smoothstep, TAU } from './util/math.js';
 import { SPAWN } from '../shared/layout.js';
 import { PostFX, postSupported } from './render/post.js';
+import { TopView } from './player/top-view.js';
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const randomRoom = () => Math.random().toString(36).slice(2, 7);
@@ -90,6 +91,10 @@ export class Game {
     };
     this.onRtc = (m) => this.voice.onSignal(m);
     this.props = new Props(this);
+    // WS6: вид сверху (C1) — по умолчанию на телефоне; ?cam=fp|tp|top — принудительно
+    this.topView = new TopView(this);
+    const cam = params.get('cam');
+    this.setCameraMode(['fp', 'tp', 'top'].includes(cam) ? cam : this.isTouch ? 'top' : 'fp', false);
 
     this.net = null;
     this.online = false;
@@ -111,7 +116,8 @@ export class Game {
     this.ui.onCopy = () => this.copyLink();
     this.ui.onResume = () => this.input.requestLock();
     this.input.onLockChange = (locked) => {
-      if (this.state === 'play' && !this.isTouch && !this.ui.chatOpen) this.ui.setPause(!locked);
+      // WS6: в виде сверху курсор свободен — без паузы
+      if (this.state === 'play' && !this.isTouch && !this.ui.chatOpen && (locked || this.player.cameraMode !== 'top')) this.ui.setPause(!locked);
     };
 
     window.addEventListener('resize', () => this.resize());
@@ -283,6 +289,8 @@ export class Game {
     this.state = 'play';
     this.player.spawn(SPAWN.x, SPAWN.z, SPAWN.yaw);
     this.player.pitch = 0;
+    this.player.topCam.yaw = SPAWN.yaw; // WS6: вид сверху — из-за спины
+    this.player.topCam.snap();
     this.input.enabled = true;
     this.ui.showMenu(false);
     this.ui.showHud(true);
@@ -301,6 +309,42 @@ export class Game {
     else this.ui.chat('', 'Одиночный режим: сервер недоступен.', true);
     this.input.requestLock();
     this.onStart?.();
+  }
+
+  // WS6 (C1): смена режима камеры с плавным перелётом. Телефон: сверху ↔ 1-е лицо; ПК: 1-е → 3-е → сверху.
+  cycleCamera() {
+    const m = this.player.cameraMode;
+    const next = this.isTouch ? (m === 'top' ? 'fp' : 'top') : { fp: 'tp', tp: 'top', top: 'fp' }[m] || 'fp';
+    this.setCameraMode(next);
+    const topHelp = this.isTouch ? ' · тап — идти, два пальца — зум и поворот' : ' · ЛКМ — идти, ПКМ — поворот, колесо — зум';
+    this.ui.toast({ fp: 'Камера: от первого лица', tp: 'Камера: от третьего лица', top: `Камера: вид сверху${topHelp}` }[next], next === 'top' ? 3200 : 1500);
+  }
+
+  setCameraMode(mode, blend = true) {
+    const p = this.player;
+    if (blend && this.state === 'play' && mode !== p.cameraMode) {
+      this._camBlend = { t: 0, pos: this.camera.position.clone(), quat: this.camera.quaternion.clone(), fov: this.camera.fov };
+    }
+    p.setCameraMode(mode);
+    this.input.setMode(mode);
+    document.body.classList.toggle('cam-top', mode === 'top');
+    this.ui.setCameraMode?.(mode);
+  }
+
+  // Перелёт камеры между режимами (после applyCamera: камера уже в новой позе).
+  _blendCamera(dt) {
+    const b = this._camBlend;
+    if (!b) return;
+    b.t += dt;
+    const k = smoothstep(0, 0.55, b.t);
+    if (k >= 1) { this._camBlend = null; return; }
+    const cam = this.camera;
+    cam.position.lerpVectors(b.pos, cam.position, k);
+    const q = this._bq || (this._bq = new THREE.Quaternion());
+    q.copy(cam.quaternion);
+    cam.quaternion.copy(b.quat).slerp(q, k);
+    cam.fov = b.fov + (cam.fov - b.fov) * k;
+    cam.updateProjectionMatrix();
   }
 
   sendChat(text) {
@@ -340,6 +384,26 @@ export class Game {
 
   // ---------- кадр ----------
 
+  // WS6: слушатель звука и голоса (C1). Сверху камера в 11 м от персонажа — громкость считаем от его головы,
+  // а лево/право — как на экране (поворот камеры).
+  _updateEar() {
+    const p = this.player;
+    if (p.cameraMode !== 'top' || this.state !== 'play') return (this.ear = this.camera);
+    const e = this._ear || (this._ear = new THREE.Object3D());
+    e.position.set(p.pos.x, p.pos.y + 1.1, p.pos.z);
+    e.rotation.set(0, p.topCam.yaw, 0);
+    e.updateMatrixWorld();
+    return (this.ear = e);
+  }
+
+  // WS6: в виде сверху свой персонаж — главный в кадре: детализация как вблизи (камера в 11 м, а не в 3)
+  _avatarLodCamera() {
+    if (this.player.cameraMode !== 'top') return this.camera;
+    const c = this._lodCam || (this._lodCam = { position: new THREE.Vector3() });
+    c.position.copy(this.player.pos).y += 2;
+    return c;
+  }
+
   menuUpdate(dt) {
     this.menuT += dt;
     const cam = this.camera;
@@ -361,7 +425,7 @@ export class Game {
       ui.openChat();
       input.releaseAll();
     }
-    if (input.consume('view')) player.wantThird = !player.wantThird;
+    if (input.consume('view')) this.cycleCamera(); // WS6
     if (input.consume('emote')) {
       this.avatar.act('wave');
       this.hands.act('wave'); // WS1: в 1-м лице машем рукой в кадре
@@ -369,7 +433,7 @@ export class Game {
     }
     if (input.consume('mic')) this.onToggleMic?.();
     if (input.consume('mute')) ui.toast(this.audio.toggleMute() ? 'Звук выключен' : 'Звук включён');
-    if (input.consume('use')) { this.reachT = 0.28; this.onUse?.(); }
+    if (input.consume('use')) { this.reachT = 0.28; if (!this.topView.use()) this.onUse?.(); } // WS6: объекты мира в виде сверху
     const thr = input.takeThrow();
     if (thr !== undefined) this.onDrop?.(thr);
     if (input.consume('push')) this.onPush?.();
@@ -377,12 +441,17 @@ export class Game {
       if (player.wantThird) player.thirdDist = clamp(player.thirdDist + input.wheel * 0.4, 1.8, 6);
       input.wheel = 0;
     }
+    const zoom = input.takeZoom(); // WS6: щипок / колесо в виде сверху
+    if (zoom !== 1 && player.cameraMode === 'top') player.topCam.zoom(zoom);
 
+    this.topView.update(dt); // WS6: тапы, автодвижение, цель рядом
     player.update(dt, input);
     player.applyCamera(this.camera, dt);
+    this._blendCamera(dt);
     this.props.update(dt);
 
-    const third = player.thirdPerson || player.wantThird; // руки прячем сразу, не дожидаясь отъезда камеры
+    // руки прячем сразу, не дожидаясь отъезда камеры; при перелёте в 1-е лицо тело видно почти до конца
+    const third = player.thirdPerson || player.wantThird || (!!this._camBlend && this._camBlend.t < 0.45);
     const av = this.avatar;
     av.root.position.copy(player.pos);
     av.root.rotation.y = player.yaw;
@@ -392,7 +461,7 @@ export class Game {
     const talk = this.speakingLocal ? 0.7 : 0;
     av.update(dt, {
       speed: player.speed, grounded: player.onGround, vy: player.vel.y, pitch: player.pitch, holding: !!this.holding, holdKind, talk,
-    }, this.camera);
+    }, this._avatarLodCamera());
 
     this.reachT = Math.max(0, this.reachT - dt);
     if (!third) {
@@ -405,8 +474,9 @@ export class Game {
     this.bots?.update(dt);
     this.remotes.update(dt, this.camera);
     this.props.lateUpdate?.(dt); // WS3: предметы в руках крепятся к якорям после анимации аватаров
+    this.topView.lateUpdate(dt); // WS6: подсветка цели, маркер, крыши (C5), растворение листвы (C4)
     this.voice.update(dt);
-    this.audio.update(this.world.atmosphere, this.camera, player.pos);
+    this.audio.update(this.world.atmosphere, this._updateEar(), player.pos); // WS6: в виде сверху слушаем ушами персонажа
     this.sendState();
     ui.setCount(1 + this.remotes.size);
     ui.setPlayers([{ name: this.nick, me: true, speaking: this.speakingLocal }, ...this.remotes.list()], input.tab);
@@ -454,7 +524,7 @@ export class Game {
   renderView(dt = 0) {
     const r = this.renderer, p = this.player;
     const fp = p.cameraMode ? p.cameraMode === 'fp' : !p.wantThird; // C1
-    const handsOn = this.state === 'play' && fp && !p.thirdPerson && !this.debugCam;
+    const handsOn = this.state === 'play' && fp && !p.thirdPerson && !this.debugCam && !this._camBlend; // WS6: не во время перелёта
     if (this.post) {
       const o = this._postOpts || (this._postOpts = { hands: null, water: this.world.water, grade: this.world.atmosphere.grade, dt: 0 });
       o.hands = handsOn ? this.hands : null;

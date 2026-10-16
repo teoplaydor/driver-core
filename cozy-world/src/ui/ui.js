@@ -35,6 +35,9 @@ export class UI {
     this.pauseEl = $('pause');
     this.micEl = $('mic');
     this.fadeEl = $('fade');
+    this.tlabel = $('tlabel');
+    this._tlKey = '';
+    this._tlBelow = false;
     this._hintKey = '';
     this._toastT = 0;
     this.onPlay = null;
@@ -195,6 +198,73 @@ export class UI {
   }
 
   setCrosshairHot(v) { this.crosshair.classList.toggle('hot', v); }
+
+  // WS6: подпись над целью в виде сверху (x, y — точка над целью в CSS-пикселях; below — под целью,
+  // хвостик вверх); text = null — скрыть.
+  setTargetLabel(text, key, x, y, below = false) {
+    const el = this.tlabel;
+    if (!el) return;
+    if (!text) { if (!el.hidden) el.hidden = true; return; }
+    this._tlText(text, key);
+    if (below !== this._tlBelow) { this._tlBelow = below; el.classList.toggle('below', below); }
+    el.style.transform = `translate(${x.toFixed(1)}px, ${y.toFixed(1)}px) translate(-50%, ${below ? '0' : '-100%'})`;
+    if (el.hidden) el.hidden = false;
+  }
+
+  _tlText(text, key) {
+    const k = `${key}|${text}`;
+    if (k === this._tlKey) return;
+    this._tlKey = k;
+    this._tlSize = null;
+    const kb = document.createElement('kbd');
+    kb.textContent = key;
+    this.tlabel.replaceChildren(kb, document.createTextNode(text));
+  }
+
+  // Размер подписи цели (для раскладки над/под целью); меряем один раз на текст.
+  targetLabelSize(text) {
+    const el = this.tlabel;
+    if (!el || el.hidden || this._tlKey.slice(this._tlKey.indexOf('|') + 1) !== text) return null;
+    if (!this._tlSize) this._tlSize = { w: el.offsetWidth || 160, h: el.offsetHeight || 34 };
+    return this._tlSize;
+  }
+
+  // WS6: ники других игроков в виде сверху — HTML-подписи над головами (list[i]: { name, speaking, x, y, a }).
+  setNameTags(list, n) {
+    const pool = this._ntags || (this._ntags = []);
+    for (let i = 0; i < n; i++) {
+      const it = list[i];
+      let e = pool[i];
+      if (!e) {
+        const el = document.createElement('div');
+        el.className = 'ntag';
+        $('wlabels').appendChild(el);
+        e = pool[i] = { el, name: '', speaking: null, a: -1, shown: true, w: 0 };
+      }
+      if (e.name !== it.name || e.speaking !== it.speaking) {
+        e.name = it.name; e.speaking = it.speaking;
+        e.el.textContent = it.name;
+        e.el.classList.toggle('speaking', it.speaking);
+        e.w = 0;
+      }
+      if (!e.shown) { e.shown = true; e.el.hidden = false; }
+      if (!e.w) e.w = e.el.offsetWidth; // ширину меряем один раз на текст: ник у края экрана не обрезается
+      const x = Math.min(Math.max(it.x, e.w / 2 + 4), window.innerWidth - e.w / 2 - 4);
+      e.el.style.transform = `translate(${x.toFixed(1)}px, ${it.y.toFixed(1)}px) translate(-50%, -100%)`;
+      const a = Math.round(it.a * 20) / 20;
+      if (a !== e.a) { e.a = a; e.el.style.opacity = String(a); }
+    }
+    for (let i = n; i < pool.length; i++) if (pool[i].shown) { pool[i].shown = false; pool[i].el.hidden = true; }
+  }
+
+  // WS6: режим камеры (C1) — кнопка 📷 подсвечена в виде сверху.
+  setCameraMode(mode) {
+    for (const b of document.querySelectorAll('.tmini [data-act="view"]')) {
+      b.classList.toggle('on', mode === 'top');
+      b.setAttribute('aria-label', mode === 'top' ? 'Камера: от первого лица' : 'Камера: вид сверху');
+    }
+    if (mode !== 'top') { this.setTargetLabel(null); this.setNameTags(null, 0); }
+  }
   setRoom(code) { $('roomcode').textContent = code; }
   setCount(n) { $('count').textContent = `${n} в сети`; }
 
@@ -207,7 +277,7 @@ export class UI {
 
   showHelp(isTouch) {
     if (isTouch) { this.help.hidden = true; return; }
-    const rows = [['WASD', 'ходить'], ['Shift', 'бежать'], ['Пробел', 'прыжок'], ['E', 'взять / использовать'], ['Q', 'бросить (держи — сильнее)'], ['X', 'помахать'], ['V', 'микрофон'], ['T', 'чат'], ['C', 'вид от 3-го лица'], ['M', 'звук вкл/выкл'], ['Tab', 'кто в комнате']];
+    const rows = [['WASD', 'ходить'], ['Shift', 'бежать'], ['Пробел', 'прыжок'], ['E', 'взять / использовать'], ['Q', 'бросить (держи — сильнее)'], ['X', 'помахать'], ['V', 'микрофон'], ['T', 'чат'], ['C', 'камера: 1-е лицо → 3-е → сверху'], ['M', 'звук вкл/выкл'], ['Tab', 'кто в комнате']];
     this.help.hidden = false;
     this.help.style.opacity = '1';
     this.help.innerHTML = rows.map(([k, t]) => `<div><kbd>${k}</kbd>${t}</div>`).join('');
