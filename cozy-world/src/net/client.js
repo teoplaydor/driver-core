@@ -89,7 +89,7 @@ export class Net {
       case 'use': this.handlers.use?.(m); break; // WS3: действия предметами, их состояние, удар битой
       case 'pst': this.handlers.pst?.(m); break;
       case 'hit': this.handlers.hit?.(m); break;
-      default:
+      default: this.handlers.mod?.(m); // модули активностей (server/modules): по префиксу типа разбирает game
     }
   }
 
