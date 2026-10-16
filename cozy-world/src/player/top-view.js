@@ -68,6 +68,44 @@ function ringMaterial(color, intensity) {
   });
 }
 
+// Стрелка броска на земле: бегущие вперёд шевроны, длина — сила броска (пока держат ↗ / Q).
+function aimMaterial() {
+  return new THREE.ShaderMaterial({
+    uniforms: { uColor: { value: new THREE.Color('#ffd28a').multiplyScalar(2.2) }, uTime: { value: 0 }, uAlpha: { value: 0 }, uLen: { value: 2 } },
+    vertexShader: /* glsl */`
+      varying vec2 vUv;
+      void main() {
+        vUv = uv;
+        vec4 mv = modelViewMatrix * vec4(position, 1.0);
+        mv.xyz *= max(0.05, 1.0 - 0.5 / max(length(mv.xyz), 0.6));
+        gl_Position = projectionMatrix * mv;
+      }`,
+    fragmentShader: /* glsl */`
+      uniform vec3 uColor;
+      uniform float uTime, uAlpha, uLen;
+      varying vec2 vUv;
+      void main() {
+        float x = abs(vUv.x - 0.5) * 2.0; // 0 по оси, 1 у края
+        float y = vUv.y * uLen; // метры от начала
+        // шевроны: «>» вдоль оси через каждые 0.55 м, бегут вперёд
+        float c = fract((y + x * 0.32) / 0.55 - uTime * 1.6);
+        float e = fwidth(c) * 1.5;
+        float chev = smoothstep(0.0, e + 0.02, c) * (1.0 - smoothstep(0.24, 0.24 + e + 0.02, c));
+        float edge = 1.0 - smoothstep(0.7, 1.0, x);
+        float ends = smoothstep(0.0, 0.35, y) * (1.0 - smoothstep(uLen - 0.5, uLen, y));
+        // наконечник: треугольник в последних 0.45 м
+        float tip = step(uLen - 0.45, y) * (1.0 - smoothstep(0.0, 0.08, x - (uLen - y) / 0.45));
+        float al = max(chev * edge * ends * 0.9, tip) * uAlpha;
+        if (al < 0.004) discard;
+        gl_FragColor = vec4(uColor, al);
+        #include <tonemapping_fragment>
+        #include <colorspace_fragment>
+      }`,
+    transparent: true,
+    depthWrite: false,
+  });
+}
+
 function ringMesh(mat) {
   const g = new THREE.PlaneGeometry(2, 2);
   g.rotateX(-Math.PI / 2);
@@ -112,13 +150,28 @@ export class TopView {
     this.pin = new THREE.Mesh(pinGeo, this.pinMat);
     this.pin.renderOrder = 8;
     this.pin.visible = false;
-    game.world.scene.add(this.ring, this.mark, this.pin);
+    // стрелка броска: квад 1×1, вытягивается по длине; начало — у ног персонажа
+    const aimGeo = new THREE.PlaneGeometry(1, 1);
+    aimGeo.rotateX(-Math.PI / 2);
+    aimGeo.translate(0, 0, -0.5);
+    this.aimMat = aimMaterial();
+    this.aim = new THREE.Mesh(aimGeo, this.aimMat);
+    this.aim.renderOrder = 8;
+    this.aim.frustumCulled = false;
+    this.aim.visible = false;
+    this.aimK = 0;
+    game.world.scene.add(this.ring, this.mark, this.pin, this.aim);
 
     // крыши (C5): ищем при первом входе в режим
     this.roofs = null;
     this.indoor = false;
     this._shadowOnly = new THREE.MeshBasicMaterial({ colorWrite: false, depthWrite: false });
     this._box = new THREE.Box3();
+    // проверка «крыша между камерой и игроком» по настоящей геометрии (рамка конуса крыши шире самой крыши)
+    this._rc = new THREE.Raycaster();
+    this._rcMesh = new THREE.Mesh(new THREE.BufferGeometry(), new THREE.MeshBasicMaterial({ side: THREE.DoubleSide }));
+    this._rcMesh.matrixAutoUpdate = false;
+    this._hits = [];
   }
 
   get on() { return this.game.state === 'play' && this.game.player.cameraMode === 'top'; }
@@ -165,6 +218,27 @@ export class TopView {
     this._roofs(dt);
     this._drawTarget(dt);
     this._drawMarker(dt);
+    this._drawAim(dt);
+  }
+
+  // Пока держат ↗ / Q с предметом в руках — стрелка на земле: куда и как далеко полетит.
+  _drawAim(dt) {
+    const g = this.game, pl = g.player, input = g.input, h = g.props.holding;
+    const held = h && input.qDownAt > 0 && !g.props.pending ? (performance.now() - input.qDownAt) / 1000 : 0;
+    const power = held > 0.3 ? Math.min(1, 0.25 + held * 0.75) : 0;
+    this.aimK = damp(this.aimK, power > 0 ? 1 : 0, power > 0 ? 12 : 8, dt);
+    const vis = this.aimK > 0.01 && !g.debugCam;
+    this.aim.visible = vis;
+    if (!vis) return;
+    if (power > 0) this._aimLen = 1.4 + power * (h.k.glide ? 7 : 4.6);
+    const len = this._aimLen || 2;
+    const y = g.world.collisions.supportY(pl.pos.x, pl.pos.z, pl.pos.y + 0.3);
+    this.aim.position.set(pl.pos.x - Math.sin(pl.yaw) * 0.45, y + 0.04, pl.pos.z - Math.cos(pl.yaw) * 0.45);
+    this.aim.rotation.y = pl.yaw;
+    this.aim.scale.set(0.62, 1, len);
+    this.aimMat.uniforms.uLen.value = len;
+    this.aimMat.uniforms.uAlpha.value = this.aimK;
+    this.aimMat.uniforms.uTime.value = this.time;
   }
 
   _setActive(on) {
@@ -175,7 +249,7 @@ export class TopView {
     } else {
       this.cancelWalk(true);
       this.target = null;
-      this.ring.visible = this.mark.visible = this.pin.visible = false;
+      this.ring.visible = this.mark.visible = this.pin.visible = this.aim.visible = false;
       this.ringK = this.markK = 0;
       g.ui.setTargetLabel?.(null);
       g.world.setOcclusion?.(null, null, false);
@@ -576,7 +650,7 @@ export class TopView {
       const a = r.area, m = 0.25;
       const under = p.x > a.x0 - m && p.x < a.x1 + m && p.z > a.z0 - m && p.z < a.z1 + m && p.y + 0.6 < r.max.y;
       // крыша между камерой и игроком (стоим за беседкой) — тоже прячем
-      const between = !under && this._segBox(cam, p, r);
+      const between = !under && this._segRoof(cam, p, r);
       const hide = under || between;
       if (under && (a.x1 - a.x0) * (a.z1 - a.z0) > 120) indoor = true;
       const k = damp(r.k, hide ? 0 : 1, hide ? 9 : 5, dt);
@@ -586,7 +660,21 @@ export class TopView {
     pl.topCam.indoor = indoor && !isInterior(p.x);
   }
 
-  // Отрезок камера -> голова игрока пересекает коробку крыши?
+  // Отрезок камера -> голова игрока пересекает крышу? Сначала рамка, потом треугольники.
+  _segRoof(c, p, r) {
+    if (!this._segBox(c, p, r)) return false;
+    const rc = this._rc, m = this._rcMesh;
+    rc.ray.origin.set(p.x, p.y + 1.1, p.z);
+    rc.ray.direction.subVectors(c, rc.ray.origin);
+    rc.far = rc.ray.direction.length();
+    rc.ray.direction.normalize();
+    m.geometry = r.mesh.geometry;
+    m.matrixWorld.copy(r.mesh.matrixWorld);
+    this._hits.length = 0;
+    m.raycast(rc, this._hits);
+    return this._hits.length > 0;
+  }
+
   _segBox(c, p, r) {
     const ax = p.x, ay = p.y + 1.1, az = p.z;
     const dx = c.x - ax, dy = c.y - ay, dz = c.z - az;

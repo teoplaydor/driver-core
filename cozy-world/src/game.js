@@ -384,6 +384,18 @@ export class Game {
 
   // ---------- кадр ----------
 
+  // WS6: слушатель звука и голоса (C1). Сверху камера в 11 м от персонажа — громкость считаем от его головы,
+  // а лево/право — как на экране (поворот камеры).
+  _updateEar() {
+    const p = this.player;
+    if (p.cameraMode !== 'top' || this.state !== 'play') return (this.ear = this.camera);
+    const e = this._ear || (this._ear = new THREE.Object3D());
+    e.position.set(p.pos.x, p.pos.y + 1.1, p.pos.z);
+    e.rotation.set(0, p.topCam.yaw, 0);
+    e.updateMatrixWorld();
+    return (this.ear = e);
+  }
+
   // WS6: в виде сверху свой персонаж — главный в кадре: детализация как вблизи (камера в 11 м, а не в 3)
   _avatarLodCamera() {
     if (this.player.cameraMode !== 'top') return this.camera;
@@ -464,7 +476,7 @@ export class Game {
     this.props.lateUpdate?.(dt); // WS3: предметы в руках крепятся к якорям после анимации аватаров
     this.topView.lateUpdate(dt); // WS6: подсветка цели, маркер, крыши (C5), растворение листвы (C4)
     this.voice.update(dt);
-    this.audio.update(this.world.atmosphere, this.camera, player.pos);
+    this.audio.update(this.world.atmosphere, this._updateEar(), player.pos); // WS6: в виде сверху слушаем ушами персонажа
     this.sendState();
     ui.setCount(1 + this.remotes.size);
     ui.setPlayers([{ name: this.nick, me: true, speaking: this.speakingLocal }, ...this.remotes.list()], input.tab);

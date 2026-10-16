@@ -118,7 +118,7 @@ button:active { transform: translateY(2px); box-shadow: none; }
 .status { min-height: 20px; margin: 8px 0 0; font-size: 14px; text-align: center; opacity: 0.8; }
 
 /* ---------- HUD ---------- */
-#hud { position: fixed; inset: 0; pointer-events: none; }
+#hud { position: fixed; inset: 0; pointer-events: none; z-index: 2; } /* WS6: над тач-слоем — «Ссылка» и чат нажимаются и в виде сверху */
 #hud > * { position: absolute; }
 #crosshair {
   left: 50%; top: 50%;
@@ -245,7 +245,7 @@ body.cam-top #crosshair { display: none; }
 #fade.on { opacity: 1; }
 
 /* ---------- тач ---------- */
-#touch { position: fixed; inset: 0; pointer-events: none; touch-action: none; }
+#touch { position: fixed; inset: 0; pointer-events: none; touch-action: none; z-index: 1; }
 #touch > * { pointer-events: auto; position: absolute; touch-action: none; }
 #lookpad { right: 0; top: 0; width: 62%; height: 100%; }
 body.cam-top #lookpad { width: 100%; } /* WS6: вид сверху — тап и поворот по всему экрану (джойстик и кнопки выше) */
@@ -259,7 +259,9 @@ body.cam-top #lookpad { width: 100%; } /* WS6: вид сверху — тап и
   position: absolute; left: 50%; top: 50%; width: 58px; height: 58px; margin: -29px 0 0 -29px;
   border-radius: 50%; background: rgba(255, 255, 255, 0.85);
   box-shadow: 0 3px 0 rgba(60, 40, 30, 0.25);
+  transition: background-color 0.15s;
 }
+#knob.run { background: rgba(255, 190, 90, 0.95); } /* WS6: джойстик до упора — бег */
 .tbtns { right: 0; bottom: 0; width: 0; height: 0; pointer-events: none !important; }
 .tbtns button, .tmini button {
   pointer-events: auto; position: absolute;

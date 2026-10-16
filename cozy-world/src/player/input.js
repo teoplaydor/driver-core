@@ -175,14 +175,14 @@ export class Input {
       const l = this.lmb;
       if (e.button === 0 && l) {
         this.lmb = null;
-        if (this.enabled && this.mode === 'top' && l.moved <= 6 && performance.now() - l.t < 450) this.taps.push({ x: e.clientX, y: e.clientY });
+        if (this.enabled && this.mode === 'top' && l.moved <= 6 && e.timeStamp - l.t < 450) this.taps.push({ x: e.clientX, y: e.clientY });
       }
     });
     this.canvas.addEventListener('mousedown', (e) => {
       if (!this.enabled || this.isTouch) return;
       if (this.mode === 'top') {
         if (e.button === 2) this.rotDrag = true;
-        if (e.button === 0) this.lmb = { t: performance.now(), moved: 0 };
+        if (e.button === 0) this.lmb = { t: e.timeStamp, moved: 0 };
         return;
       }
       if (!this.locked) {
@@ -238,6 +238,7 @@ export class TouchControls {
       this.input.touchAxis.x = 0;
       this.input.touchAxis.y = 0;
       this.input.touchMag = 0;
+      this.knob.classList.remove('run');
       this.knob.style.transform = 'translate(0px, 0px)';
     };
     J.addEventListener('pointerup', endJoy);
@@ -257,7 +258,7 @@ export class TouchControls {
       try { P.setPointerCapture(e.pointerId); } catch { /* указатель уже отпущен */ }
       ptrs.set(e.pointerId, { x: e.clientX, y: e.clientY });
       if (ptrs.size === 1) {
-        this.tapAt = performance.now();
+        this.tapAt = e.timeStamp; // время события, а не обработчика: на медленном кадре тап не превращается в «долгое касание»
         this.tapPos = { x: e.clientX, y: e.clientY };
         this.moved = 0;
         this.multi = false;
@@ -294,8 +295,10 @@ export class TouchControls {
       if (ptrs.size === 1) { this.gesture = null; return; }
       if (ptrs.size) return;
       // короткий тап по экрану: в виде сверху — идти туда / к предмету, иначе «использовать»
-      if (!this.multi && performance.now() - this.tapAt < 300 && this.moved < 12) {
-        if (this.input.mode === 'top') { if (this.input.enabled) this.input.taps.push({ ...this.tapPos }); } else this.input.press('use');
+      // (в виде сверху долгое касание без сдвига ничего другого не значит — тапом считаем и его)
+      const top = this.input.mode === 'top';
+      if (!this.multi && e.timeStamp - this.tapAt < (top ? 650 : 300) && this.moved < 12) {
+        if (top) { if (this.input.enabled) this.input.taps.push({ ...this.tapPos }); } else this.input.press('use');
       }
     };
     P.addEventListener('pointerup', endLook);
@@ -341,5 +344,6 @@ export class TouchControls {
     this.input.touchAxis.x = nx * k;
     this.input.touchAxis.y = -ny * k;
     this.input.touchMag = Math.min(1, m * k);
+    this.knob.classList.toggle('run', this.input.mode === 'top' && this.input.touchMag > 0.86); // бег в виде сверху
   }
 }
