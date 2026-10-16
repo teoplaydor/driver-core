@@ -762,6 +762,10 @@ export class TopView {
         // большой зал (арена): скрытая крыша не оставляет тени — внутри светло, как во дворе;
         // навес (беседка) оставляет — видно, что над головой крыша
         r.hall = (r.area.x1 - r.area.x0) * (r.area.z1 - r.area.z0) > 120;
+        // закрытый дом (под крышей — сплошной объём коллизий до самой крыши: избушка, амбар, многоэтажка):
+        // внутрь не зайти, а без крыши видна пустая коробка — такую крышу не прячем (персонажа за домом
+        // всё равно закрыли бы стены)
+        r.closed = this._closed(r);
         // плавное растворение — полупрозрачной копией материала (с теми же патчами шейдера)
         const mk = (m) => {
           const c = m.clone();
@@ -784,6 +788,15 @@ export class TopView {
     try { g.renderer.compileAsync?.(tmp, g.camera, g.world.scene)?.catch?.(() => {}); } catch { /* не критично */ }
   }
 
+  _closed(r) {
+    const a = r.area, area = (a.x1 - a.x0) * (a.z1 - a.z0);
+    for (const b of this.game.world.collisions.boxes) {
+      if (!b.solid || b.x < a.x0 || b.x > a.x1 || b.z < a.z0 || b.z > a.z1) continue;
+      if (b.y1 > r.min.y - 0.5 && 4 * b.hx * b.hz > area * 0.4) return true;
+    }
+    return false;
+  }
+
   _roofs(dt) {
     const g = this.game, pl = g.player, p = pl.pos, cam = g.camera.position;
     const snap = pl.topCam.justSnapped; // вход в режим, телепорт — без растворения
@@ -792,6 +805,7 @@ export class TopView {
     const cx = cam.x - p.x, cz = cam.z - p.z, cl = Math.hypot(cx, cz) || 1;
     const nx = p.x + (cx / cl) * Math.min(2.2, cl), nz = p.z + (cz / cl) * Math.min(2.2, cl);
     for (const r of this.roofs || []) {
+      if (r.closed) { if (r.k !== 1) this._roofAlpha(r, 1); continue; }
       const a = r.area, m = 0.25;
       const under = p.x > a.x0 - m && p.x < a.x1 + m && p.z > a.z0 - m && p.z < a.z1 + m && p.y + 0.6 < r.max.y;
       // крыша между камерой и игроком (стоим за беседкой) или над землёй перед ним (камера над самой крышей) — тоже прячем

@@ -116,7 +116,9 @@ export class Player {
       const sens = 0.0022 * input.sensitivity;
       if (top) {
         // вид сверху: перетаскивание по горизонтали и поворот двумя пальцами крутят камеру, а не персонажа
-        this.topCam.yaw -= look.x * sens * 1.6 + (input.takeTwist?.() || 0);
+        const turn = look.x * sens * 1.6 + (input.takeTwist?.() || 0);
+        this.topCam.yaw -= turn;
+        if (turn !== 0) this.topCam.userT = 0.6; // крутят сами — камера не отворачивается от стен
       } else {
         this.yaw -= look.x * sens;
         this.pitch = clamp(this.pitch - look.y * sens, -1.4, 1.4);
@@ -128,8 +130,10 @@ export class Player {
     const wet = !isInterior(this.pos.x) && heightAt(this.pos.x, this.pos.z) < WATER_Y + 0.25;
     let tx, tz;
     if (top) {
-      // вверх по экрану = от камеры; персонаж плавно разворачивается по ходу движения
-      const cyaw = this.topCam.yaw;
+      // вверх по экрану = от камеры; персонаж плавно разворачивается по ходу движения. Пока джойстик нажат,
+      // автоповорот камеры (отвернулась от высокой стены) направление не меняет — иначе персонаж свернёт сам
+      if (mag <= 0.02) this.topCam.autoYaw = 0;
+      const cyaw = this.topCam.yaw - this.topCam.autoYaw;
       let dx = 0, dz = 0, run = false;
       if (mag > 0.02) {
         const s = Math.sin(cyaw), c = Math.cos(cyaw);
