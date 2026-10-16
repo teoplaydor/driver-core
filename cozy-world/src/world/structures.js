@@ -99,13 +99,6 @@ function labelTexture(text, { w = 256, h = 64, bg = '#c89a62', fg = '#4a2d18', f
 
 const WOOD = '#a8764a', WOOD_D = '#6f4a2e', STONE = '#9c9a93', ROOF_RED = '#b5523b';
 
-// WS6 (временно, контракт C5 — при слиянии берётся разметка WS5b): меш закрывает помещение сверху.
-function roof(mesh, x0, x1, z0, z1) {
-  mesh.userData.roof = true;
-  mesh.userData.roofArea = { x0, x1, z0, z1 };
-  return mesh;
-}
-
 // ---------- основной сборщик ----------
 
 export function buildStructures(world) {
@@ -240,11 +233,10 @@ function gazebo(g, col) {
     put(root, B(w, 0.12, d), WOOD, x + dx, top + 0.95, z + dz);
   }
   // крыша-пирамида
-  const cone = put(root, new THREE.ConeGeometry(7.2, 2.4, 4, 1, false), ROOF_RED, x, top + 3.4 + 1.2, z, { ry: Math.PI / 4, extra: { side: THREE.DoubleSide } });
-  cone.castShadow = true;
-  roof(cone, x - 4.45, x + 4.45, z - 4.45, z + 4.45);
-  roof(put(root, B(8.9, 0.22, 8.9), WOOD_D, x, top + 3.4 + 0.1, z), x - 4.45, x + 4.45, z - 4.45, z + 4.45);
-  roof(put(root, CYL(0.06, 0.12, 0.7, 8), '#e8d6b0', x, top + 3.4 + 2.55, z), x - 4.45, x + 4.45, z - 4.45, z + 4.45);
+  const roof = put(root, new THREE.ConeGeometry(7.2, 2.4, 4, 1, false), ROOF_RED, x, top + 3.4 + 1.2, z, { ry: Math.PI / 4, extra: { side: THREE.DoubleSide } });
+  roof.castShadow = true;
+  put(root, B(8.9, 0.22, 8.9), WOOD_D, x, top + 3.4 + 0.1, z);
+  put(root, CYL(0.06, 0.12, 0.7, 8), '#e8d6b0', x, top + 3.4 + 2.55, z);
 
   // стол и шахматная доска
   put(root, CYL(0.18, 0.28, TABLE.top - top, 10), WOOD_D, x, top + (TABLE.top - top) / 2, z);
@@ -500,7 +492,7 @@ function apartmentInterior(g, col, portals, anim, uTime, apt) {
   const hw = w / 2, hd = d / 2;
   // пол, потолок, стены
   put(root, B(w + 1, 0.2, d + 1), '#b08256', ox, -0.1, 0, { cast: false });
-  roof(put(root, B(w + 1, 0.2, d + 1), '#efe3cf', ox, h + 0.1, 0, { cast: false }), ox - hw - 0.5, ox + hw + 0.5, -hd - 0.5, hd + 0.5);
+  put(root, B(w + 1, 0.2, d + 1), '#efe3cf', ox, h + 0.1, 0, { cast: false });
   const wall = '#efdfc4';
   col.addBox(ox, 0, hw + 0.4, hd + 0.4, 0, -1, 0.0, false);
   solid(root, col, ox, 0, hd + 0.25, w + 1, h, 0.5, wall); // юг: дверь-выход
@@ -600,10 +592,10 @@ function arena(g, col) {
   solid(root, col, cx + W / 2 - T / 2, y, cz - door / 2 - seg / 2, T, H, seg, white);
   solid(root, col, cx + W / 2 - T / 2, y, cz + door / 2 + seg / 2, T, H, seg, white);
   solid(root, col, cx + W / 2 - T / 2, y + H - 2, cz, T, 2, door, white);
-  roof(put(root, B(W, 0.5, D), white, cx, y + H + 0.25, cz), cx - W / 2, cx + W / 2, cz - D / 2, cz + D / 2);
+  put(root, B(W, 0.5, D), white, cx, y + H + 0.25, cz);
   // потолочные светильники и акцентные полосы
   const panel = M('#ffffff', { emissive: '#fff6e0', emissiveIntensity: 1.2 });
-  for (const px of [-6, 6]) for (const pz of [-6, 6]) roof(put(root, B(4, 0.1, 4), panel, cx + px, y + H - 0.05, cz + pz, { cast: false }), cx - W / 2, cx + W / 2, cz - D / 2, cz + D / 2);
+  for (const px of [-6, 6]) for (const pz of [-6, 6]) put(root, B(4, 0.1, 4), panel, cx + px, y + H - 0.05, cz + pz, { cast: false });
   put(root, B(W - 2, 0.08, 0.3), M('#ff8a3c'), cx, y + 0.32, cz - D / 2 + 1.2, { cast: false });
   put(root, B(0.3, 0.08, D - 2), M('#5aa0ff'), cx - W / 2 + 1.2, y + 0.32, cz, { cast: false });
   // вывеска над входом

@@ -5,6 +5,7 @@
 
 import { chromium } from 'playwright-core';
 import fs from 'node:fs';
+import { markLegacyRoofs } from './_roofs.mjs';
 
 const BASE = process.env.BASE_URL || 'http://127.0.0.1:5173/';
 fs.mkdirSync('tests/out', { recursive: true });
@@ -28,6 +29,7 @@ const place = (x, z, yaw = 0, cyaw = yaw) => ev(([x, z, yaw, cyaw]) => {
 
 await page.goto(`${BASE}?q=low&dpr=1&autostart=1&nick=ПК`, { waitUntil: 'load' });
 await page.waitForFunction(() => window.__cozy?.game?.state === 'play' && window.__cozy.frames >= 6, null, { timeout: 120000 });
+await markLegacyRoofs(page); // крыши по C5 (до слияния с WS5b — разметка только в тесте)
 // следим, рисуются ли руки (на low — отдельный render сцены рук), и за растворением листвы
 await ev(() => {
   const G = window.__cozy.game, r = G.renderer, orig = r.render.bind(r);

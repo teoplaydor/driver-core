@@ -6,6 +6,7 @@
 
 import { chromium } from 'playwright-core';
 import fs from 'node:fs';
+import { markLegacyRoofs } from './_roofs.mjs';
 
 const BASE = process.env.BASE_URL || 'http://127.0.0.1:5173/';
 fs.mkdirSync('tests/out', { recursive: true });
@@ -35,6 +36,7 @@ await page.fill('#nick', 'Мобильный');
 await page.click('#play');
 await page.waitForFunction(() => window.__cozy.game.state === 'play', null, { timeout: 60000 });
 await page.waitForFunction(() => window.__cozy.frames >= 8, null, { timeout: 60000 });
+await markLegacyRoofs(page); // крыши по C5 (до слияния с WS5b — разметка только в тесте)
 check('тач-интерфейс виден', await ev(() => !document.getElementById('touch').hidden));
 check('по умолчанию вид сверху (C1)', await ev(() => window.__cozy.game.player.cameraMode === 'top'));
 check('камера над персонажем, смотрит вниз ~55°', await ev(() => {
