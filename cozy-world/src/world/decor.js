@@ -800,7 +800,7 @@ export class Decor {
         const y = heightAt(x, z);
         const ln = lilyNoise.fbm(x * 0.09, z * 0.09, 2);
         const r1 = rand();
-        if (segDist(x, z, this.pier) < 2.6) continue;
+        if (segDist(x, z, this.pier) < 2.6 || this._blocked(x, z)) continue; // WS5b: и вне кругов excludeNature (лодка у пирса)
         if (inLake(x, z) && y > WATER_Y - 0.5 && y < WATER_Y + 0.15) {
           if (ln < -0.05 || r1 > 0.55) continue;
           add('reeds', x, y - 0.05, z, 0.8 + rand() * 0.5);
@@ -813,7 +813,7 @@ export class Decor {
         const y = heightAt(x, z);
         if (!(y < WATER_Y - 0.45 && y > WATER_Y - 2.6) || !inLake(x, z)) continue;
         if (lilyNoise.fbm(x * 0.07 + 5, z * 0.07, 2) < -0.02 || r1 > 0.7) continue;
-        if (segDist(x, z, this.pier) < 2.4) continue;
+        if (segDist(x, z, this.pier) < 2.4 || this._blocked(x, z, 0.5)) continue; // WS5b: кувшинки не прорастают сквозь лодку
         add(r2 < 0.22 ? 'lilyFlower' : 'lily', x, WATER_Y + 0.02, z, 0.36 + r3 * 0.3, { sy: 1 });
       }
     }
