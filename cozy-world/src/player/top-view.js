@@ -241,16 +241,29 @@ export class TopView {
     this._drawNames();
   }
 
-  // Ники других игроков: спрайт-вывеску прячем, вместо неё — HTML-подпись постоянного размера над головой
-  // (вызывается после remotes.update — он каждый кадр заново включает спрайт).
+  // Ники других игроков: спрайт-вывеску прячем, вместо неё — HTML-подпись постоянного размера над головой;
+  // пузырь чата — постоянного экранного размера прямо над ней (с 11–20 м иначе не прочитать).
+  // Вызывается после remotes.update: тот каждый кадр заново включает спрайт и ставит размер пузыря.
   _drawNames() {
-    const g = this.game, pl = g.player.pos, list = this._names;
+    const g = this.game, pl = g.player.pos, list = this._names, cam = g.camera;
     const W = window.innerWidth, H = window.innerHeight;
+    const tanF = Math.tan((cam.fov * D2R) / 2);
+    const bubble = (av, lift) => {
+      const b = av.bubble, p = av.root.position;
+      if (!b) return;
+      const ppm = H / (2 * Math.max(1, cam.position.distanceTo(_v.set(p.x, p.y + av.top, p.z))) * tanF); // пикселей на метр
+      const w = Math.min(240, W * 0.55) / ppm;
+      b.sprite.scale.set(w, w / 2, 1);
+      b.sprite.position.set(0, av.top + 0.3 + lift / ppm, 0);
+      this._bubbles = true;
+    };
+    bubble(g.avatar, 0); // свой — сразу над головой (ника нет)
     let n = 0;
     for (const r of g.remotes.map.values()) {
       const av = r.avatar, p = av.root.position;
       av.tag.visible = false;
       if (g.debugCam) continue;
+      bubble(av, 24);
       const d = Math.hypot(p.x - pl.x, p.z - pl.z);
       if (d > 34) continue;
       _v.set(p.x, p.y + av.top + 0.3, p.z).project(g.camera);
@@ -301,6 +314,13 @@ export class TopView {
       g.player.topCam.indoor = false;
       g.ui.setNameTags?.(null, 0);
       g.canvas.style.cursor = '';
+      // пузыри чата — обратно над спрайтом с ником
+      if (this._bubbles) {
+        for (const r of g.remotes.map.values()) r.avatar._placeTag?.();
+        g.avatar.bubble?.sprite.scale.set(2.6, 1.3, 1); // свой пузырь размер сам не обновляет
+        g.avatar._placeTag?.();
+      }
+      this._bubbles = false;
     }
   }
 

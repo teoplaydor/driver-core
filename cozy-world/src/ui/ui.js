@@ -238,7 +238,7 @@ export class UI {
       if (!e) {
         const el = document.createElement('div');
         el.className = 'ntag';
-        this.hud.appendChild(el);
+        $('wlabels').appendChild(el);
         e = pool[i] = { el, name: '', speaking: null, a: -1, shown: true };
       }
       if (e.name !== it.name || e.speaking !== it.speaking) {
