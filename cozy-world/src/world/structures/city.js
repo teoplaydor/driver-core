@@ -439,7 +439,9 @@ export function buildInterior(ctx, apt) {
         k *= 1 - (inside ? 0.45 : 0.4 * (1 - smoothstep(0, 0.12 + bh * 0.25, dd)));
       }
     } else if (ny < -0.5 && wy > h - 0.05) {
+      // потолок: отражённый от пола и стен тёплый свет (иначе над гирляндой тёмно-бурая полоса)
       k *= 0.7 + 0.3 * smoothstep(0, 0.6, ax) * smoothstep(0, 0.6, az);
+      gl += 0.16 * (0.6 + 0.4 * smoothstep(0, 1.2, Math.min(ax, az)));
     } else if (Math.abs(nx) > 0.5 || Math.abs(nz) > 0.5) {
       // стены и бока мебели: у пола и потолка темнее, в углах комнаты темнее
       const other = Math.abs(nx) > 0.5 ? az : ax;
