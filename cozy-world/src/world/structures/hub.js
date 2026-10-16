@@ -91,7 +91,7 @@ function campfire(ctx) {
     out.lerp(hot, smoothstep(0.24, 0.0, r) * 0.75);
   }, SURF.ash, T(0, 0.025, 0), { emis: (x, y, z) => smoothstep(0.24, 0.0, Math.hypot(x, z)) * 1.1 });
   // угольки
-  for (let i = 0; i < kit.seg(8, 14, 18); i++) {
+  for (let i = 0; i < kit.seg(6, 14, 18); i++) {
     const a = rand() * TAU, r = Math.sqrt(rand()) * 0.55;
     const s = 0.035 + rand() * 0.045;
     const hotK = smoothstep(0.6, 0.1, r);
@@ -188,7 +188,7 @@ function benches(ctx) {
       });
       // сучки и пятна мха
       kit.setLayer('detail');
-      const nk = 1 + (i % 2);
+      const nk = kit.q > 0 ? 1 + (i % 2) : 0;
       for (let j = 0; j < nk; j++) {
         const t = (rand() - 0.5) * len * 0.7, an = (0.5 + rand()) * (rand() < 0.5 ? 1 : -1) + Math.PI / 2;
         const m = T(px, gy + 0.266, pz, 0, ry, 0).multiply(T(t, Math.sin(an) * 0.24, Math.cos(an) * 0.24, an - Math.PI / 2, 0, 0));
@@ -378,7 +378,7 @@ function hubProps(ctx) {
     kit.box(W + 0.1, 0.05, 0.06, '#5d3f27', SURF.wood, T(0, 0.04, 0.0), { bevel: 0.01 });
     // поленья: торцами наружу, рядами
     kit.setLayer('detail');
-    const rows = kit.seg(3, 4, 5), cols = kit.seg(8, 10, 12);
+    const rows = kit.seg(2, 4, 5), cols = kit.seg(6, 10, 12);
     for (let r = 0; r < rows; r++) {
       for (let c = 0; c < cols; c++) {
         const rr = 0.065 + rand() * 0.025;
@@ -473,7 +473,7 @@ function cart(ctx, px, pz, ry, seed) {
   }
   // дрова в кузове
   kit.setLayer('detail');
-  for (let j = 0; j < kit.seg(4, 6, 8); j++) {
+  for (let j = 0; j < kit.seg(3, 6, 8); j++) {
     addLog(kit, 0.6 + rand() * 0.15, 0.06 + rand() * 0.02, T((rand() - 0.5) * 0.3, Hb + 0.09 + Math.floor(j / 3) * 0.12, -0.2 + (j % 3) * 0.2, 0, (rand() - 0.5) * 0.3, rand() * TAU), { seed: 800 + j, seg: kit.seg(5, 6, 7), rings: 1 });
   }
   kit.pop();
@@ -566,7 +566,7 @@ function heroTree(ctx) {
     for (let i = 0; i < anchors.length - 1; i++) {
       const pts = sagPoints(anchors[i], anchors[i + 1], 0.45 + rand() * 0.2, kit.seg(5, 7, 9));
       kit.add(tube(pts, 0.008, 3, false), wire, SURF.plain, null, { bake: false });
-      const nb = kit.seg(3, 4, 5);
+      const nb = kit.seg(2, 4, 5);
       for (let k = 1; k <= nb; k++) bulbs.push(pts[Math.round((k / (nb + 1)) * (pts.length - 1))]);
     }
   }
@@ -680,7 +680,7 @@ export function fenceRun(ctx, pts, seed, group = null) {
       const mx = (x + px) / 2, mz = (z + pz) / 2, my = (y + py) / 2 + hh;
       const tilt = Math.atan2(y - py, len);
       addLog(kit, len + 0.12, 0.04 + rand() * 0.01, T(mx, my + (rand() - 0.5) * 0.04, mz, 0, ry, tilt), {
-        seed: seed * 13 + i * 2 + hh * 10, seg: kit.seg(5, 6, 7), rings: 1, bark: '#8a6040', barkDark: '#5a3c24', wood: '#d3a874',
+        seed: seed * 13 + i * 2 + hh * 10, seg: kit.seg(5, 6, 7), rings: 1, bark: '#8a6040', barkDark: '#5a3c24', wood: '#d3a874', caps: kit.q > 0,
       });
     }
     col.addBox((x + px) / 2, (z + pz) / 2, len / 2, 0.06, ry, Math.min(y, py) - 0.3, Math.max(y, py) + 0.85);

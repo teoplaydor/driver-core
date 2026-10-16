@@ -438,7 +438,7 @@ export function logParts(len, r, { seg = 10, rings = 6, seed = 1, flat = 0, tape
 }
 
 // Добавить бревно целиком: кора + спилы с кольцами. xf - положение центра бревна (ось X бревна).
-export function addLog(kit, len, r, xf, { bark = '#7a5232', barkDark = '#4a3020', wood = '#d9a86a', seed = 1, flat = 0, seg, rings, char = 0, bend = 0, layer } = {}) {
+export function addLog(kit, len, r, xf, { bark = '#7a5232', barkDark = '#4a3020', wood = '#d9a86a', seed = 1, flat = 0, seg, rings, char = 0, bend = 0, layer, caps = true } = {}) {
   const parts = logParts(len, r, { seg: seg ?? kit.seg(7, 9, 12), rings: rings ?? kit.seg(2, 4, 6), seed, flat, bend });
   const bc = new THREE.Color(bark), bd = new THREE.Color(barkDark), wc = new THREE.Color(wood), charC = new THREE.Color('#1c1612');
   const flatY = r * (1 - flat);
@@ -455,7 +455,7 @@ export function addLog(kit, len, r, xf, { bark = '#7a5232', barkDark = '#4a3020'
       out.lerp(charC, k * 0.92);
     }
   }, SURF.bark, xf, { uv: (x, y, z) => [x, Math.atan2(z, y) * r], layer, shadow: proxy });
-  for (const cap of [parts.capA, parts.capB]) {
+  for (const cap of caps ? [parts.capA, parts.capB] : []) {
     const end = cap === parts.capB;
     const rim = cap.userData.rim;
     kit.add(cap, (x, y, z, nx, ny, nz, out) => {

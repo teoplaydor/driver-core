@@ -79,7 +79,7 @@ export function buildStructures(world) {
   for (const g of kit.groups.values()) {
     const node = new THREE.Group();
     node.name = `st-${g.name}`;
-    const z = { g, node, solid: null, detail: null, far: null, shadow: null, extra: g.extra, near: g.nearDist === Infinity ? lod.near : g.nearDist, det: g.detailDist === Infinity ? lod.detail : g.detailDist, state: -1 };
+    const z = { g, node, solid: null, detail: null, far: null, shadow: null, roofs: null, extra: g.extra, near: g.nearDist === Infinity ? lod.near : g.nearDist, det: g.detailDist === Infinity ? lod.detail : g.detailDist, state: -1 };
     for (const [layer, b] of g.buckets) {
       if (!b.n) continue;
       if (layer === 'shadow') {
@@ -96,6 +96,10 @@ export function buildStructures(world) {
         const r = g.roofs.find((o) => o.layer === layer);
         mesh.userData.roof = true;
         mesh.userData.roofArea = { ...r.area };
+        // видимостью самого меша управляет вид сверху (C5), дальностью - родительский узел
+        if (!z.roofs) { z.roofs = new THREE.Group(); z.roofs.name = `${g.name}:roofs`; node.add(z.roofs); }
+        z.roofs.add(mesh);
+        continue;
       } else if (layer === 'far') {
         mesh.castShadow = false;
         z.far = mesh;
@@ -127,6 +131,7 @@ export function buildStructures(world) {
         z.state = st;
         if (z.solid) z.solid.visible = st > 0 || !z.far;
         if (z.shadow) z.shadow.visible = st > 0 || !z.far;
+        if (z.roofs) z.roofs.visible = st > 0 || !z.far;
         if (z.detail) z.detail.visible = st > 1;
         if (z.far) z.far.visible = st === 0;
         for (const e of z.extra) {
