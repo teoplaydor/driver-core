@@ -19,6 +19,8 @@ import { DemoBots } from './demo-bots.js';
 import { clamp, smoothstep, TAU } from './util/math.js';
 import { SPAWN } from '../shared/layout.js';
 import { PostFX, postSupported } from './render/post.js';
+import { ACTIVITIES } from './activities/index.js';
+import { LocalRoom } from './net/local.js';
 import { TopView } from './player/top-view.js';
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -99,6 +101,17 @@ export class Game {
     this.net = null;
     this.online = false;
     this.roomCode = '';
+    // Активности (src/activities): создаются сразу — их столы и стенды видны и из меню. Сервер для них — комната
+    // по сети или LocalRoom в одиночном режиме (те же серверные модули в браузере).
+    this.localRoom = null;
+    this.selfId = 'me';
+    this.activities = [];
+    for (const A of ACTIVITIES) {
+      try {
+        const inst = A.create?.(this);
+        if (inst) this.activities.push(Object.assign(inst, { _def: A }));
+      } catch (e) { console.error(`activity ${A.name}:`, e); }
+    }
     this._sendT = 0;
     this._lastState = null;
     this._lastSentAt = 0;
@@ -195,6 +208,39 @@ export class Game {
     this.voice.reset();
     for (const p of w.players) this.voice.connect(p.id);
     this.onWelcome?.(w);
+    this.selfId = w.id;
+    this._modWelcome(w.mods || {});
+  }
+
+  // ---------- активности ----------
+
+  // Сообщение серверному модулю активности: по сети, а без сервера — в LocalRoom.
+  sendMod(msg) {
+    if (this.online && this.net) this.net.send(msg);
+    else this.localRoom?.send(msg);
+  }
+
+  _goLocal() {
+    if (this.localRoom) return;
+    this.selfId = 'me';
+    const p = this.player.pos;
+    this.localRoom = new LocalRoom({ id: 'me', name: this.nick, st: { p: [p.x, p.y, p.z], r: this.player.yaw } }, (m) => this._modMessage(m));
+    this._modWelcome(this.localRoom.welcome());
+  }
+
+  _modWelcome(mods) {
+    for (const a of this.activities) {
+      try { a.welcome?.(mods[a._def.name]); } catch (e) { console.error(`activity ${a._def.name} welcome:`, e); }
+    }
+  }
+
+  _modMessage(m) {
+    for (const a of this.activities) {
+      const pre = a._def.prefix;
+      if (!pre || !m.t.startsWith(pre)) continue;
+      try { a.message?.(m); } catch (e) { console.error(`activity ${a._def.name} message:`, e); }
+      return;
+    }
   }
 
   _bindNet(net) {
@@ -209,6 +255,7 @@ export class Game {
         if (r) this.ui.chat('', `${r.name} вышел(а)`, true);
         this.remotes.remove(m.id);
         this.voice.drop(m.id);
+        for (const a of this.activities) a.leave?.(m.id);
       })
       .on('snap', (m) => {
         for (const e of m.pl || []) this.remotes.push(e);
@@ -230,6 +277,7 @@ export class Game {
       .on('use', (m) => this.onPropUse?.(m)) // WS3: действия предметами, состояние, удар битой
       .on('pst', (m) => this.onPropState?.(m))
       .on('hit', (m) => this.onHit?.(m))
+      .on('mod', (m) => this._modMessage(m)) // модули активностей (server/modules)
       .on('close', () => this.reconnect());
   }
 
@@ -251,6 +299,7 @@ export class Game {
     this.reconnecting = false;
     this.online = false;
     this.remotes.clear();
+    this._goLocal();
     this.ui.toast('Не удалось переподключиться — одиночный режим', 5000);
     this.ui.setRoom('одиночная');
   }
@@ -301,6 +350,7 @@ export class Game {
     document.getElementById('mic').hidden = !this.online; // голос только на сервере
     const demo = !this.online && (window.COZY_SOLO || this.params.has('bots'));
     if (demo) this.bots = new DemoBots(this).start();
+    if (!this.online) this._goLocal();
     this.ui.setRoom(this.online ? this.roomCode : demo ? 'демо' : 'одиночная');
     this.ui.setCount(1 + this.remotes.size);
     $copyVisible(this.online);
@@ -472,6 +522,14 @@ export class Game {
     }
 
     this.bots?.update(dt);
+    if (this.localRoom) {
+      const st = this.localRoom.self.st;
+      st.p[0] = player.pos.x; st.p[1] = player.pos.y; st.p[2] = player.pos.z; st.r = player.yaw;
+    }
+    for (const a of this.activities) {
+      if (!a.update) continue;
+      try { a.update(dt, this.time); } catch (e) { console.error(`activity ${a._def.name} update:`, e); a.update = null; }
+    }
     this.remotes.update(dt, this.camera);
     this.props.lateUpdate?.(dt); // WS3: предметы в руках крепятся к якорям после анимации аватаров
     this.topView.lateUpdate(dt); // WS6: подсветка цели, маркер, крыши (C5), растворение листвы (C4)

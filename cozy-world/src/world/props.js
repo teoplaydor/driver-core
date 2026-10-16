@@ -192,6 +192,7 @@ export class Props {
     this.holding = null;
     this.target = null;
     this.portal = null;
+    this.item = null; // объект мира из реестра (C7), если рядом нет предмета и двери
     this._sendAt = 0;
     this.pending = null; // бросок одной рукой: предмет вылетает на середине замаха
     this.swingT = -1; // таймер до удара битой
@@ -397,7 +398,16 @@ export class Props {
     const t = this.pick();
     if (t) { this.grab(t); return; }
     const portal = this.nearestPortal();
-    if (portal) this.game.teleport(portal.to);
+    if (portal) { this.game.teleport(portal.to); return; }
+    const it = this.nearestItem();
+    if (it) it.use(this.game);
+  }
+
+  // Объект мира из реестра (C7) рядом и спереди; в виде сверху цель выбирает top-view.js.
+  nearestItem() {
+    const g = this.game, reg = this.world.interactables;
+    if (!reg || g.player.cameraMode === 'top') return null;
+    return reg.nearest(g.player.pos, this._ray().dir);
   }
 
   _setHolding(p) {
@@ -1015,6 +1025,7 @@ export class Props {
     const h = this.holding;
     this.target = h ? null : this.pick();
     this.portal = !this.target && !h ? this.nearestPortal() : null;
+    this.item = !this.target && !this.portal && !h ? this.nearestItem() : null;
     if (h && !this.pending) {
       const act = h.k.act;
       if (act) {
@@ -1027,8 +1038,9 @@ export class Props {
       } else hints.push({ key: E, text: 'Поставить' }, { key: Q, text: 'Бросить (держи — сильнее)' });
     } else if (this.target && !top) hints.push({ key: E, text: `Взять ${NAMES[this.target.kind]}` });
     else if (this.portal && !top) hints.push({ key: E, text: this.portal.label });
+    else if (this.item) hints.push({ key: E, text: this.world.interactables.label(this.item) || 'Использовать' });
     ui.setHints(hints);
-    ui.setCrosshairHot(!!this.target || !!this.portal);
+    ui.setCrosshairHot(!!this.target || !!this.portal || !!this.item);
   }
 
   // ---------- сеть ----------
