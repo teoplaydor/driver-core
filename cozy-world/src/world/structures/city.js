@@ -239,6 +239,26 @@ export function buildBlock(ctx) {
       kit.add(new THREE.SphereGeometry(0.09, 7, 5, 0, TAU, 0, Math.PI / 2), '#2f6a5a', SURF.paint, T(lx2, 2.1, -0.08), { shadow: false, bake: false });
       kit.add(new THREE.CircleGeometry(0.08, 8).rotateX(Math.PI / 2), '#fff0c8', glow(5), T(lx2, 2.095, -0.08), { shadow: false, bake: false });
     }
+    // в глубине: меловая доска с меню над стойкой, кофемашина с огоньком, торт под колпаком,
+    // силуэты столика и стульев на фоне тёплой стены
+    const board = signTex('Меню', 300, 186, { bg: '#26302c', fg: '#f4f0e0', border: '#c8a070', sub: 'кофе • пирог' });
+    kit.box(0.82, 0.54, 0.03, '#6a4a30', SURF.wood, T(-0.75, 1.72, -0.04), { sharp: true, shadow: false, bake: false });
+    atlasPlane(kit, board, 0.74, 0.46, T(-0.75, 1.72, -0.056, 0, Math.PI, 0), [0.8, 0, 0.2, PAT.label]);
+    kit.add(new THREE.SphereGeometry(0.012, 5, 4), '#ff4030', glow(4), T(1.0, 1.58, -0.11), { shadow: false, bake: false });
+    kit.add(lathe([[0, 0], [0.16, 0], [0.17, 0.02], [0.03, 0.03], [0.03, 0.05], [0.13, 0.06], [0, 0.06]], 10), '#e8e2d4', SURF.ceramic, T(0.0, 1.45, -0.05), { uv: (x, yy) => [yy, x], shadow: false, bake: false });
+    kit.add(new THREE.CylinderGeometry(0.11, 0.11, 0.1, 10), '#f2d0d8', SURF.fabric, T(0.0, 1.56, -0.05), { shadow: false, bake: false });
+    kit.add(new THREE.CylinderGeometry(0.1, 0.1, 0.02, 10), '#fff4e0', SURF.fabric, T(0.0, 1.62, -0.05), { shadow: false, bake: false });
+    for (let i = 0; i < 5; i++) kit.sphere(0.018, '#d8303a', SURF.gloss, T(Math.cos(i * 1.26) * 0.06, 1.645, -0.05 + Math.sin(i * 1.26) * 0.06), { seg: 5, shadow: false, bake: false });
+    {
+      const sil = '#5a3826';
+      kit.cyl(0.3, 0.3, 0.03, sil, SURF.wood, T(-1.15, 0.78, -0.12), { seg: 10, shadow: false, bake: false });
+      kit.cyl(0.03, 0.03, 0.74, sil, SURF.wood, T(-1.15, 0.41, -0.12), { seg: 5, shadow: false, bake: false });
+      for (const s of [-1, 1]) {
+        kit.box(0.34, 0.03, 0.06, sil, SURF.wood, T(-1.15 + s * 0.5, 0.48, -0.1), { sharp: true, shadow: false, bake: false });
+        kit.box(0.03, 0.42, 0.04, sil, SURF.wood, T(-1.15 + s * 0.66, 0.7, -0.1), { sharp: true, shadow: false, bake: false });
+        kit.box(0.03, 0.46, 0.04, sil, SURF.wood, T(-1.15 + s * 0.36, 0.25, -0.1), { sharp: true, shadow: false, bake: false });
+      }
+    }
     // доска-меню у входа
     kit.push(T(1.6, 0, -0.95, 0, 0.5, 0));
     const menu = signTex('Кофе • Какао', 300, 200, { bg: '#26302c', fg: '#f4f0e0', border: '#c8a070', sub: 'пирог дня' });
