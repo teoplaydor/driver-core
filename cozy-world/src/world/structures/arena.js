@@ -4,8 +4,8 @@
 
 import * as THREE from 'three';
 import { heightAt } from '../terrain-data.js';
-import { mulberry32, smoothstep, TAU } from '../../util/math.js';
-import { SURF, PAT, glow, T, tube, sagPoints, slabGeo, groundAO } from './kit.js';
+import { mulberry32, hash2, smoothstep, TAU } from '../../util/math.js';
+import { SURF, PAT, glow, T, tube, sagPoints, slabGeo, lathe, groundAO } from './kit.js';
 import { atlas } from './material.js';
 import { plankBench } from './hub.js';
 
@@ -40,6 +40,41 @@ function bigSign(text) {
   });
 }
 
+// Плакаты на наружных стенах: яркий фон, крупная фигура и подпись.
+function posterTex(kind) {
+  return atlas().region(256, 360, (g, w, h) => {
+    const bg = ['#3f7fc8', '#e8742a', '#5fae5a', '#e8452e'][kind];
+    g.fillStyle = bg; g.fillRect(0, 0, w, h);
+    g.fillStyle = 'rgba(255,255,255,0.18)';
+    for (let i = -4; i < 8; i++) { g.beginPath(); g.moveTo(i * 50, 0); g.lineTo(i * 50 + 25, 0); g.lineTo(i * 50 + 25 - 160, h); g.lineTo(i * 50 - 160, h); g.fill(); }
+    g.strokeStyle = '#ffffff'; g.lineWidth = 8; g.strokeRect(10, 10, w - 20, h - 20);
+    g.save(); g.translate(w / 2, h * 0.42);
+    g.fillStyle = '#ffffff'; g.strokeStyle = '#2a2c32'; g.lineWidth = 6;
+    if (kind === 0) { // скрещённые биты и мяч
+      for (const s of [-1, 1]) {
+        g.save(); g.rotate(s * 0.6);
+        g.beginPath(); g.moveTo(-9, 80); g.lineTo(9, 80); g.lineTo(16, -70); g.quadraticCurveTo(0, -95, -16, -70); g.closePath(); g.fill(); g.stroke();
+        g.restore();
+      }
+      g.fillStyle = '#f2c84b'; g.beginPath(); g.arc(0, -40, 26, 0, Math.PI * 2); g.fill(); g.stroke();
+    } else if (kind === 1) { // звезда
+      g.beginPath();
+      for (let i = 0; i < 10; i++) { const a = -Math.PI / 2 + (i * Math.PI) / 5, r = i % 2 ? 40 : 92; g.lineTo(Math.cos(a) * r, Math.sin(a) * r); }
+      g.closePath(); g.fill(); g.stroke();
+    } else if (kind === 2) { // кубок
+      g.beginPath(); g.moveTo(-60, -80); g.lineTo(60, -80); g.quadraticCurveTo(60, 10, 0, 20); g.quadraticCurveTo(-60, 10, -60, -80); g.fill(); g.stroke();
+      g.fillRect(-12, 20, 24, 40); g.strokeRect(-12, 20, 24, 40);
+      g.fillRect(-45, 60, 90, 22); g.strokeRect(-45, 60, 90, 22);
+    } else { // молния
+      g.beginPath(); g.moveTo(20, -95); g.lineTo(-45, 10); g.lineTo(-2, 10); g.lineTo(-25, 95); g.lineTo(48, -18); g.lineTo(6, -18); g.closePath(); g.fill(); g.stroke();
+    }
+    g.restore();
+    g.textAlign = 'center'; g.textBaseline = 'middle'; g.fillStyle = '#ffffff';
+    g.font = '800 46px "Baloo 2", "Trebuchet MS", system-ui, sans-serif';
+    g.fillText(['БИТВА', 'ЧЕМПИОН', 'КУБОК', 'РАУНД'][kind], w / 2, h * 0.84);
+  });
+}
+
 function atlasPlane(kit, r, w, h, xf, surf = SURF.label) {
   kit.add(new THREE.PlaneGeometry(w, h), '#ffffff', surf, xf, {
     shadow: false, bake: false,
@@ -67,7 +102,7 @@ export function buildArena(ctx) {
     let k = 1;
     if (ny > 0.5 && ly < 0.4) k *= 0.72 + 0.28 * smoothstep(0, 1.2, Math.min(ax, az));
     else if (Math.abs(nx) > 0.5 || Math.abs(nz) > 0.5) k *= 0.72 + 0.28 * smoothstep(0, 0.9, ly);
-    if (ny < -0.5) return [k * (0.85 + 0.15 * smoothstep(0, 2, Math.min(ax, az))), 0.85];
+    if (ny < -0.5) return [k * (0.85 + 0.15 * smoothstep(0, 2, Math.min(ax, az))), 0.5 + 0.1 * smoothstep(0, 3, Math.min(ax, az))];
     const top = smoothstep(1, H, ly);
     // крыша закрывает солнце: светлые стены в зале держатся на «отражённом» свете
     return [k, 0.42 + 0.2 * top];
@@ -108,6 +143,18 @@ export function buildArena(ctx) {
   wallBox(W / 2 - T0 / 2, DOOR / 2 + seg / 2, T0, H, seg);
   wallBox(W / 2 - T0 / 2, 0, T0, H - DH, DOOR, DH);
   col.addBox(cx, cz, W / 2, D / 2, 0, y - 2, y + 0.31, false);
+  // внутренняя облицовка стен сеткой ~1 м: у брусков стен вершины только по углам (снаружи зала), и
+  // запечённый свет зала на них не ложится - облицовка несёт его в своих вершинах
+  const liner = (w, h, xf) => {
+    const g = new THREE.PlaneGeometry(w, h, Math.max(1, Math.round(w)), Math.max(1, Math.round(h)));
+    kit.add(g, wallC, SURF.paint, xf, { shadow: false, uv: (px, py) => [px, py] });
+  };
+  const LW = inX * 2, LD = inZ * 2;
+  liner(LW, H, T(0, H / 2, -inZ + 0.004));
+  liner(LW, H, T(0, H / 2, inZ - 0.004, 0, Math.PI, 0));
+  liner(LD, H, T(-inX + 0.004, H / 2, 0, 0, Math.PI / 2, 0));
+  for (const s of [-1, 1]) liner(inZ - DOOR / 2, H, T(inX - 0.004, H / 2, s * (DOOR / 2 + (inZ - DOOR / 2) / 2), 0, -Math.PI / 2, 0));
+  liner(DOOR, H - DH, T(inX - 0.004, DH + (H - DH) / 2, 0, 0, -Math.PI / 2, 0));
   // снаружи: пилястры, карниз, высокие окна-ленты (изнутри светятся дневным светом)
   for (let i = 0; i <= 6; i++) {
     const t = -W / 2 + i * (W / 6);
@@ -115,7 +162,11 @@ export function buildArena(ctx) {
     kit.box(0.24, H, 0.5, '#e4e4ea', SURF.paint, T(-W / 2 - 0.1, H / 2, t), { bevel: 0.03, shadow: false });
     if (Math.abs(t) > DOOR / 2 + 0.3) kit.box(0.24, H, 0.5, '#e4e4ea', SURF.paint, T(W / 2 + 0.1, H / 2, t), { bevel: 0.03, shadow: false });
   }
-  kit.box(W + 0.7, 0.32, D + 0.7, '#e4e4ea', SURF.paint, T(0, H - 0.16, 0), { bevel: 0.03, shadow: false });
+  // карниз - кольцом по наружному контуру (сплошная плита легла бы внутри зала ложным потолком)
+  for (const s of [-1, 1]) {
+    kit.box(W + 0.7, 0.32, 0.37, '#e4e4ea', SURF.paint, T(0, H - 0.16, s * (D / 2 + 0.165)), { bevel: 0.03, shadow: false });
+    kit.box(0.37, 0.32, D, '#e4e4ea', SURF.paint, T(s * (W / 2 + 0.165), H - 0.16, 0), { bevel: 0.03, shadow: false });
+  }
   for (let i = 0; i < 6; i++) {
     const t = -W / 2 + (i + 0.5) * (W / 6);
     for (const s of [-1, 1]) {
@@ -144,6 +195,18 @@ export function buildArena(ctx) {
   for (const s of [-1, 1]) kit.box(inX * 2, 0.2, 0.03, '#ff8a3c', SURF.paint, T(0, 2.6, s * (inZ - 0.015)), { sharp: true, shadow: false });
   kit.box(0.03, 0.2, inZ * 2, '#ff8a3c', SURF.paint, T(-inX + 0.015, 2.6, 0), { sharp: true, shadow: false });
 
+  // ---------- знамёна команд на северной и южной стенах ----------
+  for (const s of [-1, 1]) {
+    for (const [bx, c] of [[-6.5, '#d8402e'], [6.5, '#2f6fc0']]) {
+      kit.push(T(bx, 4.85, s * (inZ - 0.03), 0, s > 0 ? Math.PI : 0, 0)); // под окнами-лентами
+      kit.add(slabGeo([[-0.7, 0], [0.7, 0], [0.7, -2.3], [0, -2.7], [-0.7, -2.3]], 0.012, 0), c, SURF.fabric, T(0, 0, 0.01), { shadow: false, uv: (px, py) => [px, py] });
+      kit.add(slabGeo([[-0.7, -0.35], [0.7, -0.35], [0.7, -0.55], [-0.7, -0.55]], 0.012, 0), '#f4f2ec', SURF.fabric, T(0, 0, 0.022), { shadow: false, uv: (px, py) => [px, py] });
+      kit.add(slabGeo([[0, -0.85], [0.35, -1.25], [0, -1.65], [-0.35, -1.25]], 0.012, 0), '#f2c84b', SURF.fabric, T(0, 0, 0.022), { shadow: false, uv: (px, py) => [px, py] });
+      kit.cyl(0.03, 0.03, 1.7, '#c8a040', SURF.metal, T(0, 0.02, 0.05, 0, 0, Math.PI / 2), { seg: 6, shadow: false });
+      for (const e of [-1, 1]) kit.sphere(0.05, '#c8a040', SURF.metal, T(e * 0.88, 0.02, 0.05), { seg: 6, shadow: false });
+      kit.pop();
+    }
+  }
   // ---------- табло на западной стене ----------
   {
     kit.push(T(-inX + 0.05, 5.0, 0, 0, Math.PI / 2, 0));
@@ -215,10 +278,62 @@ export function buildArena(ctx) {
     // коврик у входа
     kit.box(4.0, 0.03, 1.6, '#3a3d42', SURF.fabric, T(W / 2 + 0.9, 0.0, 0), { sharp: true, shadow: false });
   }
+  // ---------- снаружи: плакаты между пилястрами, флагштоки, кадки, лавка и урна у входа ----------
+  {
+    const posters = [posterTex(0), posterTex(1), posterTex(2), posterTex(3)];
+    let pi = 0;
+    const poster = (x, z, ry) => {
+      kit.push(T(x, 0, z, 0, ry, 0));
+      kit.box(1.32, 1.82, 0.04, '#2a2c32', SURF.metal, T(0, 2.1, 0.02), { bevel: 0.01, shadow: false });
+      atlasPlane(kit, posters[pi++ % 4], 1.2, 1.7, T(0, 2.1, 0.045), [0.55, 0, 0.04, PAT.label]);
+      kit.pop();
+    };
+    for (const i of [1, 3, 4]) {
+      const t = -W / 2 + (i + 0.5) * (W / 6);
+      poster(t, D / 2 + 0.03, 0);
+      poster(-t, -D / 2 - 0.03, Math.PI);
+    }
+    for (const i of [1, 4]) poster(-W / 2 - 0.03, -W / 2 + (i + 0.5) * (W / 6), -Math.PI / 2);
+    for (const t of [-10, -6, 6, 10]) poster(W / 2 + 0.03, t, Math.PI / 2);
+    // флагштоки по бокам от входа
+    const flagC = ['#e8452e', '#3f7fc8'];
+    for (const s of [-1, 1]) {
+      const fx = W / 2 + 2.6, fz = s * (DOOR / 2 + 1.9);
+      kit.cyl(0.05, 0.065, 6.4, '#d8dce2', SURF.metal, T(fx, 3.2, fz), { seg: kit.seg(6, 8, 10) });
+      kit.cyl(0.18, 0.22, 0.25, '#8e8e96', SURF.stone, T(fx, 0.12, fz), { seg: kit.seg(6, 8, 10) });
+      kit.sphere(0.08, '#f2c84b', SURF.metal, T(fx, 6.45, fz), { seg: 8 });
+      // полотнище с волной
+      const fg = new THREE.PlaneGeometry(1.5, 0.95, 8, 2);
+      const P = fg.getAttribute('position');
+      for (let k = 0; k < P.count; k++) { const px = P.getX(k) + 0.75; P.setXYZ(k, px, P.getY(k), Math.sin(px * 3.4 + s) * 0.09 * px); }
+      fg.computeVertexNormals();
+      for (const back of [0, 1]) {
+        const g2 = back ? fg.clone() : fg;
+        if (back) { const I = g2.index.array; for (let k = 0; k < I.length; k += 3) { const tt = I[k]; I[k] = I[k + 1]; I[k + 1] = tt; } g2.computeVertexNormals(); }
+        kit.add(g2, flagC[(s + 1) / 2], SURF.fabric, T(fx, 5.75, fz, 0, s * 0.5, 0), { shadow: false, uv: (x, y) => [x, y] });
+      }
+      col.addCircle(cx + fx, cz + fz, 0.2, y, y + 6.4);
+      // кадка с туей у двери
+      const px = W / 2 + 0.7, pz = s * (DOOR / 2 + 0.75);
+      kit.box(0.7, 0.6, 0.7, '#5d6670', SURF.paint, T(px, 0.3, pz), { bevel: 0.04 });
+      kit.box(0.76, 0.06, 0.76, '#48505a', SURF.paint, T(px, 0.62, pz), { bevel: 0.02, shadow: false });
+      kit.add(new THREE.ConeGeometry(0.42, 1.5, kit.seg(6, 8, 10), 3), (x2, y2, z2, nx, ny, nz, out) => out.set('#3f7a34').multiplyScalar(0.8 + 0.35 * hash2(Math.round(x2 * 12), Math.round(y2 * 12), 7)), SURF.fabric, T(px, 1.35, pz));
+      col.addBox(cx + px, cz + pz, 0.38, 0.38, 0, y, y + 0.65);
+    }
+    // лавка и урна у входа
+    kit.pop();
+    plankBench(ctx, cx + W / 2 + 3.6, cz + DOOR / 2 + 4.8, Math.PI / 2, 1880, { color: '#b07a48' });
+    kit.group('arena');
+    kit.push(T(cx, y, cz));
+    kit.add(lathe([[0, 0], [0.2, 0], [0.24, 0.1], [0.24, 0.7], [0.26, 0.72], [0.26, 0.76], [0, 0.76]], kit.seg(8, 10, 14)), '#3f7fc8', SURF.metal, T(W / 2 + 3.6, heightAt(cx + W / 2 + 3.6, cz + DOOR / 2 + 3.6) - y, DOOR / 2 + 3.6), { uv: (x2, yy) => [yy, x2] });
+    col.addCircle(cx + W / 2 + 3.6, cz + DOOR / 2 + 3.6, 0.26, y, y + 0.76);
+  }
 
   // ---------- потолок (C5): плита, фермы, светильники, гирлянды флажков ----------
   kit.roof('arena', { x0: cx - inX, x1: cx + inX, z0: cz - inZ, z1: cz + inZ });
   kit.box(W + 0.4, 0.5, D + 0.4, '#e9eef4', SURF.paint, T(0, H + 0.25, 0), { bevel: 0.04 });
+  // потолок изнутри - сеткой (запечённый свет, как у стен)
+  kit.add(new THREE.PlaneGeometry(LW, LD, Math.round(LW / 1.5), Math.round(LD / 1.5)).rotateX(Math.PI / 2), '#eef2f6', SURF.paint, T(0, H - 0.004, 0), { shadow: false, uv: (px, py, pz) => [px, pz] });
   kit.box(W + 0.6, 0.12, D + 0.6, '#ff8a3c', SURF.paint, T(0, H + 0.52, 0), { bevel: 0.02, shadow: false });
   // фермы поперёк зала
   for (let i = 0; i < 4; i++) {

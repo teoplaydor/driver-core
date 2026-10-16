@@ -3,7 +3,7 @@
 // скворечник) и обустройство троп (фонари, заборчики).
 
 import * as THREE from 'three';
-import { heightAt, samplePath, PATHS } from '../terrain-data.js';
+import { heightAt, samplePath, PATHS, zoneWeights } from '../terrain-data.js';
 import { buildHeroTree } from '../vegetation.js';
 import { mulberry32, hash2, smoothstep, TAU } from '../../util/math.js';
 import { CAMPFIRE } from '../../../shared/layout.js';
@@ -34,6 +34,15 @@ export function stoneColor(base, seed, soot = null) {
       const d = Math.hypot(wx - soot.x, wz - soot.z);
       out.lerp(sootC, smoothstep(soot.r + 0.12, soot.r - 0.12, d) * 0.75);
     }
+  };
+}
+
+// Снежная шапка поверх цвета: верхние грани белые.
+export function snowCap(base) {
+  const sn = new THREE.Color('#f2f6fb');
+  return (x, y, z, nx, ny, nz, out, wx, wy, wz) => {
+    if (typeof base === 'function') base(x, y, z, nx, ny, nz, out, wx, wy, wz); else out.set(base);
+    out.lerp(sn, smoothstep(0.35, 0.65, ny));
   };
 }
 
@@ -367,9 +376,11 @@ function signpost(ctx) {
   const tones = ['#c99a5e', '#d4a66a', '#c08e55', '#cfa064', '#c4945a', '#d0a265'];
   items.forEach((it, i) => {
     const th = Math.atan2(-(it.dz - pz), it.dx - px);
-    const L = it.t.length > 8 ? 1.85 : 1.5, H = 0.3, D = 0.05, tip = 0.22;
-    const front = woodLabel(`${it.t}  →`, 512, 96, { bg: tones[i], arrow: 1 });
-    const back = woodLabel(`←  ${it.t}`, 512, 96, { bg: tones[i], arrow: -1 });
+    // длинная надпись - длиннее доска (и шире участок атласа, чтобы буквы не сжимались)
+    const long = it.t.length > 8;
+    const L = long ? 2.1 : 1.5, H = 0.3, D = 0.05, tip = 0.22, PW = long ? 704 : 512;
+    const front = woodLabel(`${it.t}  →`, PW, 96, { bg: tones[i], arrow: 1 });
+    const back = woodLabel(`←  ${it.t}`, PW, 96, { bg: tones[i], arrow: -1 });
     const y0 = y + 2.78 - i * 0.37;
     // контур стрелки (локально: x - вдоль стрелки от столба, y - вверх)
     const x0 = 0.1, x1 = x0 + L;
@@ -660,7 +671,8 @@ function pathGroup(kit, x, z) {
   return kit.group(`path:${ix},${iz}`, { cx: (ix + 0.5) * CELL, cz: (iz + 0.5) * CELL, r: CELL * 0.72, detailDist: 22 });
 }
 
-export function lantern(ctx, lx, lz, { h = 2.25, seed = 1, base = true } = {}) {
+// snow - зимний вариант: на тумбе, камнях и крыше фонаря лежит снег
+export function lantern(ctx, lx, lz, { h = 2.25, seed = 1, base = true, snow = false } = {}) {
   const { kit, col } = ctx;
   const y = heightAt(lx, lz);
   const rand = mulberry32(seed);
@@ -675,10 +687,12 @@ export function lantern(ctx, lx, lz, { h = 2.25, seed = 1, base = true } = {}) {
       kit.setLayer('detail');
       for (let i = 0; i < 3; i++) {
         const a = (i / 3) * TAU + rand(), r = 0.3 + rand() * 0.08;
-        kit.add(stoneGeo(0.07 + rand() * 0.05, seed * 7 + i, 0, 0.4, 0.7), stoneColor('#8e8b84', seed + i), SURF.mossy, T(Math.cos(a) * r, -0.02, Math.sin(a) * r));
+        const sc = stoneColor('#8e8b84', seed + i);
+        kit.add(stoneGeo(0.07 + rand() * 0.05, seed * 7 + i, 0, 0.4, 0.7), snow ? snowCap(sc) : sc, snow ? SURF.stone : SURF.mossy, T(Math.cos(a) * r, -0.02, Math.sin(a) * r));
       }
       kit.setLayer(layer0);
     }
+    if (snow) kit.box(0.3, 0.05, 0.3, '#f2f6fb', SURF.snow, T(0, 0.255, 0), { bevel: 0.02, shadow: false, bake: false });
   }
   // кованый столб: квадратный с фаской, кольца-воротники, завитки под фонарём
   kit.box(0.065, h - 0.3, 0.065, iron, SURF.iron, T(0, 0.3 + (h - 0.3) / 2, 0), { bevel: 0.012 });
@@ -692,6 +706,7 @@ export function lantern(ctx, lx, lz, { h = 2.25, seed = 1, base = true } = {}) {
   }
   kit.add(new THREE.SphereGeometry(0.06, kit.seg(5, 5, 8), 4), '#ffe2b0', glow(4.2, PAT.plain, true), T(0, hy + 0.16, 0, 0, 0, 0, 1, 1.5, 1), { shadow: false });
   kit.add(new THREE.ConeGeometry(0.21, 0.15, 6, 1), iron, SURF.iron, T(0, hy + 0.43, 0));
+  if (snow) kit.add(new THREE.ConeGeometry(0.2, 0.1, 6, 1), '#f2f6fb', SURF.snow, T(0, hy + 0.47, 0), { shadow: false, bake: false });
   kit.cyl(0.15, 0.15, 0.025, ironL, SURF.iron, T(0, hy + 0.36, 0), { seg: 6, shadow: false });
   // мелочь - только вблизи
   kit.setLayer('detail');
@@ -760,7 +775,7 @@ export function buildPaths(ctx) {
       const lx = pts[i][0] + (-dz / l) * 2.6 * side, lz = pts[i][1] + (dx / l) * 2.6 * side;
       pathGroup(kit, lx, lz);
       kit.setLayer('solid');
-      lantern(ctx, lx, lz, { seed: 1000 + n });
+      lantern(ctx, lx, lz, { seed: 1000 + n, snow: zoneWeights(lx, lz).winter > 0.5 });
     }
   }
   // заборчики вдоль части троп: к дождю (восточная сторона) и к озеру (северная)

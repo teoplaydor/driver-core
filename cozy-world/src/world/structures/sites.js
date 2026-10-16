@@ -121,7 +121,7 @@ export function buildPier(ctx) {
     const bx = -2.0, bz = 0.7;
     kit.add(lathe([[0, 0], [0.12, 0], [0.13, 0.02], [0.15, 0.24], [0.155, 0.25], [0.145, 0.25], [0.135, 0.03], [0, 0.03]], kit.seg(8, 10, 14)), '#8d969e', SURF.metal, T(bx, 0, bz), { uv: (x, y) => [y, x] });
     kit.add(new THREE.TorusGeometry(0.15, 0.006, 3, 10, Math.PI), '#5d646a', SURF.metal, T(bx, 0.25, bz, 0, 0.4, 0));
-    kit.cyl(0.13, 0.13, 0.01, '#4b6a7a', [0.35, 0, 0, PAT.plain], T(bx, 0.2, bz), { seg: kit.seg(8, 10, 14) });
+    kit.cyl(0.13, 0.13, 0.01, '#2c4654', [0.6, 0, 0, PAT.plain], T(bx, 0.2, bz), { seg: kit.seg(8, 10, 14) });
     // удочка прислонена к свае
     const rodA = V3(pilesX[1] + 0.25, 0.02, HW - 0.05), rodB = V3(pilesX[1] - 1.4, 1.65, HW + 0.2);
     kit.add(tube([rodA, rodB], (t) => 0.018 * (1 - t) + 0.005 * t, 4), '#4a3424', SURF.lacq, null);
@@ -169,7 +169,25 @@ export function buildPier(ctx) {
   kit.add(new THREE.BoxGeometry(len, 0.2, HW * 2), '#8f7556', SURF.wood, T(0, -0.1, 0), { bake: false });
   kit.pop();
 
-  buildBoat(ctx, along2(-2.6, -(HW + 1.05)), ry + 0.08);
+  // лодка носом к пирсу, привязана канатом к утке на краю настила
+  const BL = 3.3, bry = ry + Math.PI + 0.06;
+  const [bx, bz] = along2(-2.6, -(HW + 0.28 + BL / 2));
+  {
+    kit.setLayer('solid');
+    const cl = along2(-2.45, -HW + 0.12);
+    kit.push(T(cl[0], topY, cl[1], 0, ry, 0));
+    kit.box(0.26, 0.05, 0.07, '#3a3c40', SURF.iron, T(0, 0.045, 0), { bevel: 0.012, shadow: false });
+    kit.box(0.06, 0.05, 0.05, '#3a3c40', SURF.iron, T(0, 0.02, 0), { sharp: true, shadow: false });
+    kit.add(new THREE.TorusGeometry(0.035, 0.016, 4, 8), '#c9b28a', SURF.fabric, T(0.05, 0.05, 0, Math.PI / 2, 0, 0), { shadow: false });
+    kit.pop();
+    const bow = V3(bx + Math.sin(bry) * (BL / 2 - 0.02), WATER_Y + 0.3, bz + Math.cos(bry) * (BL / 2 - 0.02));
+    const tie = V3(cl[0], topY + 0.06, cl[1]);
+    kit.setLayer('detail');
+    kit.add(tube(sagPoints(tie, bow, 0.18, kit.seg(4, 6, 8)), 0.016, 4), '#c9b28a', SURF.fabric, null, { uv: (x, y, z) => [x * 3 + z * 3, y * 3] });
+    kit.setLayer('solid');
+  }
+  buildBoat(ctx, [bx, bz], bry);
+  ctx.exclude(bx, bz, 2.2); // кувшинки и камыш не прорастают сквозь лодку
   ctx.exclude(...along2(len / 2 + 1.6, -2.4), 1.0);
 }
 
@@ -610,7 +628,7 @@ export function buildCabin(ctx) {
     drifts.forEach(([dx, dz, rx, ryy, rz], i) => snowMound(kit, cx + dx, y, cz + dz, rx, ryy, rz, 20 + i));
   }
   kit.group('cabin');
-  lantern(ctx, cx + 2.6, cz + 9.3, { seed: 1444 });
+  lantern(ctx, cx + 2.6, cz + 9.3, { seed: 1444, snow: true });
   kit.group('cabin');
 
   // дальний вид
