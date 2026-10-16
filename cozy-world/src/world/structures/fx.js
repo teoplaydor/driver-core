@@ -59,10 +59,11 @@ void main() {
   // мультяшные полосы: красно-оранжевый край, оранжевый, жёлтая сердцевина у основания
   float mid = smoothstep(0.07, 0.14, d) * (1.0 - smoothstep(0.55, 0.95, y));
   float core = smoothstep(0.2, 0.3, d) * (1.0 - smoothstep(0.2, 0.6, y));
-  vec3 col = vec3(0.92, 0.2, 0.03);
-  col = mix(col, vec3(1.0, 0.5, 0.06), mid);
-  col = mix(col, vec3(1.0, 0.82, 0.32), core * clamp(vB, 0.4, 1.0));
-  float I = uIntensity * (0.85 + 0.3 * vB) * (1.0 + 0.5 * core);
+  // (тонмаппинг Neutral обесцвечивает яркое к белому - сердцевина жёлто-оранжевая, а не бледно-жёлтая)
+  vec3 col = vec3(0.95, 0.2, 0.03);
+  col = mix(col, vec3(1.0, 0.46, 0.05), mid);
+  col = mix(col, vec3(1.0, 0.7, 0.2), core * clamp(vB, 0.4, 1.0));
+  float I = uIntensity * (0.85 + 0.3 * vB) * (1.0 + 0.35 * core);
   // предумноженная альфа: огонь плотный (виден днём), середина ярче 1.0 - ловит bloom
   gl_FragColor = vec4(col * I * a, a * 0.9);
   #include <tonemapping_fragment>

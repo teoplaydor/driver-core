@@ -4,7 +4,7 @@
 import * as THREE from 'three';
 import { heightAt, WATER_Y, LAKE } from '../terrain-data.js';
 import { mulberry32, hash2, smoothstep, TAU } from '../../util/math.js';
-import { SURF, PAT, glow, T, addLog, stoneGeo, lathe, tube, sagPoints, slabGeo, bevelBox } from './kit.js';
+import { SURF, PAT, glow, T, TY, addLog, stoneGeo, lathe, tube, sagPoints, slabGeo, bevelBox } from './kit.js';
 import { plankBench, stumpSeat, barrel, mailbox, lantern, woodLabel, fenceRun, along } from './hub.js';
 import { buildParticles } from './fx.js';
 
@@ -537,7 +537,7 @@ export function buildCabin(ctx) {
         const rr = 0.07 + rand() * 0.025;
         const x = -0.92 + (c + (r % 2) * 0.5) * (1.84 / cols);
         if (x > 0.95) continue;
-        addLog(kit, 0.45 + rand() * 0.06, rr, T(x, 0.17 + r * 0.17, (rand() - 0.5) * 0.05, 0, Math.PI / 2, rand() * TAU), { seed: 1500 + r * 20 + c, seg: kit.seg(5, 6, 7), rings: 1, wood: '#e2bc84' });
+        addLog(kit, 0.45 + rand() * 0.06, rr, TY(x, 0.17 + r * 0.17, (rand() - 0.5) * 0.05, Math.PI / 2, rand() * TAU), { seed: 1500 + r * 20 + c, seg: kit.seg(5, 6, 7), rings: 1, wood: '#e2bc84' });
       }
     }
     kit.box(2.1, 0.08, 0.6, '#f4f8fc', SURF.snow, T(0, 0.17 + rows * 0.17, 0), { bevel: 0.035, bake: false });

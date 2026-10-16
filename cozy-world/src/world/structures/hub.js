@@ -8,7 +8,7 @@ import { buildHeroTree } from '../vegetation.js';
 import { mulberry32, hash2, smoothstep, TAU } from '../../util/math.js';
 import { CAMPFIRE } from '../../../shared/layout.js';
 import {
-  SURF, PAT, glow, T, TY, addLog, stoneGeo, lathe, tube, sagPoints, slabGeo, cylUV,
+  SURF, PAT, FLICKER, glow, T, TY, addLog, stoneGeo, lathe, tube, sagPoints, slabGeo, cylUV,
 } from './kit.js';
 import { atlas } from './material.js';
 import { buildFlames, buildParticles } from './fx.js';
@@ -73,6 +73,37 @@ export function woodLabel(text, w, h, { bg = '#c99a5e', fg = '#3d2412', font, ar
 
 // ---------- костёр ----------
 
+// Пятно кострища: диск из колец с неровным краем (у CircleGeometry нет промежуточных колец, и цвет
+// интерполировался бы от центра сразу к краю). Центр чуть приподнят горкой пепла, край утоплен в землю.
+function ashBed(kit, R, seed) {
+  const seg = kit.seg(18, 30, 40), rings = kit.seg(4, 7, 9);
+  const rand = mulberry32(seed);
+  const p0 = rand() * TAU, p1 = rand() * TAU, p2 = rand() * TAU;
+  const edge = (a) => R * (1 + 0.07 * Math.sin(a * 3 + p0) + 0.05 * Math.sin(a * 5 + p1) + 0.03 * Math.sin(a * 11 + p2));
+  const pos = [0, 0.035, 0], idx = [];
+  for (let i = 1; i <= rings; i++) {
+    const t = Math.pow(i / rings, 0.85);
+    for (let k = 0; k < seg; k++) {
+      const a = (k / seg) * TAU;
+      const r = edge(a) * t;
+      pos.push(Math.cos(a) * r, 0.035 * (1 - t * t) - 0.006 * t, Math.sin(a) * r);
+    }
+  }
+  for (let k = 0; k < seg; k++) idx.push(0, 1 + ((k + 1) % seg), 1 + k);
+  for (let i = 1; i < rings; i++) {
+    const o = 1 + (i - 1) * seg, n = o + seg;
+    for (let k = 0; k < seg; k++) {
+      const k1 = (k + 1) % seg;
+      idx.push(o + k, o + k1, n + k, o + k1, n + k1, n + k);
+    }
+  }
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  geo.setIndex(idx);
+  geo.computeVertexNormals();
+  return { geo, edge };
+}
+
 function campfire(ctx) {
   const { kit, col, root, anim } = ctx;
   const { x: cx, z: cz } = CAMPFIRE;
@@ -81,22 +112,39 @@ function campfire(ctx) {
   kit.group('hub', { cx, cz, r: 14 });
   kit.push(T(cx, y0, cz));
 
-  // зола и пепел в круге камней, угли посередине
-  const det = kit.seg(14, 22, 30);
-  const ash = new THREE.CircleGeometry(1.08, det, 0, TAU).rotateX(-Math.PI / 2);
-  const ashC = new THREE.Color('#57524d'), ashL = new THREE.Color('#8c867e'), hot = new THREE.Color('#ff6a1e');
-  kit.setLayer('detail').add(ash, (x, y, z, nx, ny, nz, out) => {
-    const r = Math.hypot(x, z);
-    out.copy(ashC).lerp(ashL, smoothstep(0.3, 1.05, r) * 0.8);
-    out.lerp(hot, smoothstep(0.24, 0.0, r) * 0.75);
-  }, SURF.ash, T(0, 0.025, 0), { emis: (x, y, z) => smoothstep(0.24, 0.0, Math.hypot(x, z)) * 1.1 });
-  // угольки
-  for (let i = 0; i < kit.seg(6, 14, 18); i++) {
-    const a = rand() * TAU, r = Math.sqrt(rand()) * 0.55;
-    const s = 0.035 + rand() * 0.045;
-    const hotK = smoothstep(0.6, 0.1, r);
-    const c = new THREE.Color('#2a1d16').lerp(new THREE.Color('#ff6a1c'), 0.35 + hotK * 0.6);
-    kit.add(stoneGeo(s, 30 + i, 0, 0.5, 0.6), c, glow(0.8 + hotK * 2.4, PAT.plain, true), T(Math.cos(a) * r, 0.02, Math.sin(a) * r, 0, rand() * 3, 0));
+  // кострище: пятно с неровным краем - тлеющие угли в центре, пепел, копоть, край уходит в землю
+  const bed = ashBed(kit, 1.12, 8);
+  const coal = new THREE.Color('#1d1612'), ember = new THREE.Color('#ff5a12'), ashC = new THREE.Color('#5d5852'),
+    ashL = new THREE.Color('#9d978e'), soot = new THREE.Color('#3b322b'), rim = new THREE.Color('#7d6852');
+  const bedT = (x, z) => Math.hypot(x, z) / bed.edge(Math.atan2(z, x));
+  const glowAt = (x, z) => {
+    const t = bedT(x, z);
+    const n = hash2(Math.round(x * 14), Math.round(z * 14), 17);
+    return smoothstep(0.42, 0.08, t) * (n > 0.45 ? (n - 0.45) * 5.5 : 0.15);
+  };
+  kit.setLayer('detail').add(bed.geo, (x, y, z, nx, ny, nz, out) => {
+    const t = bedT(x, z);
+    const n = hash2(Math.round(x * 9), Math.round(z * 9), 5);
+    out.copy(ashC).lerp(ashL, n * 0.6 * smoothstep(0.25, 0.6, t));
+    out.lerp(coal, smoothstep(0.5, 0.2, t) * 0.85);
+    out.lerp(soot, smoothstep(0.62, 0.86, t));
+    out.lerp(rim, smoothstep(0.88, 1.0, t));
+    const g = glowAt(x, z);
+    if (g > 0.2) out.lerp(ember, Math.min(1, g * 0.5));
+  }, [0.98, 0, 0, PAT.ash + FLICKER], T(0, 0.012, 0), { emis: (x, y, z) => glowAt(x, z) * 1.6 });
+  // угольки и головешки: часть тлеет (свечение мерцает), часть - чёрный уголь
+  for (let i = 0; i < kit.seg(8, 16, 22); i++) {
+    const a = rand() * TAU, r = Math.sqrt(rand()) * 0.6;
+    const s = 0.03 + rand() * 0.045;
+    const hotK = smoothstep(0.62, 0.1, r) * (rand() < 0.75 ? 1 : 0);
+    const c = new THREE.Color('#231a15').lerp(new THREE.Color('#ff6a1c'), hotK * 0.85);
+    kit.add(stoneGeo(s, 30 + i, 0, 0.5, 0.6), c, hotK > 0 ? glow(0.6 + hotK * 2.6, PAT.plain, true) : SURF.ash, T(Math.cos(a) * r, 0.02, Math.sin(a) * r, 0, rand() * 3, 0));
+  }
+  for (let i = 0; i < kit.seg(1, 3, 4); i++) {
+    const a = rand() * TAU, r = 0.55 + rand() * 0.25;
+    addLog(kit, 0.24 + rand() * 0.16, 0.035 + rand() * 0.015, TY(Math.cos(a) * r, 0.035, Math.sin(a) * r, -a + Math.PI / 2 + (rand() - 0.5), rand() * TAU), {
+      seed: 340 + i, char: 0.45, ember: 0.8, bark: '#4a3424', barkDark: '#241810', seg: kit.seg(5, 6, 8), rings: 2,
+    });
   }
 
   // камни вокруг: крупные разного размера + мелкие в промежутках
@@ -106,7 +154,7 @@ function campfire(ctx) {
     const a = (i / N) * TAU + (rand() - 0.5) * 0.18, r = 1.22 + rand() * 0.1;
     const s = 0.2 + rand() * 0.13;
     const sx = Math.cos(a) * r, sz = Math.sin(a) * r;
-    kit.add(stoneGeo(s, 100 + i, kit.seg(1, 1, 2), 0.4, 0.72), stoneColor('#a3a09a', i, { x: cx, z: cz, r: r - s * 0.2 }), SURF.stone,
+    kit.add(stoneGeo(s, 100 + i, kit.seg(1, 2, 2), 0.4, 0.72), stoneColor('#a3a09a', i, { x: cx, z: cz, r: r - s * 0.2 }), SURF.stone,
       T(sx, -0.04, sz, (rand() - 0.5) * 0.3, rand() * TAU, (rand() - 0.5) * 0.3));
   }
   kit.setLayer('detail');
@@ -116,49 +164,57 @@ function campfire(ctx) {
       T(Math.cos(a) * r, -0.02, Math.sin(a) * r, 0, rand() * TAU, 0));
   }
 
-  // шалаш из поленьев: низ на окружности 0.48 м, верх сходится над центром
+  // шалаш из поленьев: низ на окружности 0.5 м, верх сходится над центром. Ось бревна направлена
+  // сверху вниз - обуглен и тлеет нижний конец, обращённый к огню; верхний - светлый спил.
   kit.setLayer('solid');
-  const NL = 6;
+  const NL = 7;
   for (let i = 0; i < NL; i++) {
     const a = (i / NL) * TAU + 0.3 + (rand() - 0.5) * 0.25;
-    const rb = 0.5 + rand() * 0.06, top = 0.82 + rand() * 0.12;
-    const b = new THREE.Vector3(Math.cos(a) * rb, 0.04, Math.sin(a) * rb);
-    const t = new THREE.Vector3(Math.cos(a + 0.4) * 0.06, top, Math.sin(a + 0.4) * 0.06);
-    const dir = t.clone().sub(b);
-    const len = dir.length() + 0.12;
+    const rb = 0.5 + rand() * 0.07, top = 0.8 + rand() * 0.14;
+    const b = new THREE.Vector3(Math.cos(a) * rb, 0.05, Math.sin(a) * rb);
+    const t = new THREE.Vector3(Math.cos(a + 0.4) * 0.07, top, Math.sin(a + 0.4) * 0.07);
+    const dir = b.clone().sub(t);
+    const len = dir.length() + 0.14;
     const mid = b.clone().add(t).multiplyScalar(0.5);
-    addLog(kit, len, 0.065 + rand() * 0.02, along(mid, dir, rand() * TAU), { seed: 300 + i, char: 0.55, bark: '#6e4a2c', barkDark: '#3a2516', seg: kit.seg(6, 8, 10), rings: kit.seg(2, 3, 5) });
+    addLog(kit, len, 0.07 + rand() * 0.022, along(mid, dir, rand() * TAU), {
+      seed: 300 + i, char: 0.62, ember: 0.9, bark: '#6e5644', barkDark: '#33261c', wood: '#d9a86a', seg: kit.seg(6, 8, 10), rings: kit.seg(2, 4, 6),
+    });
   }
   // два полена поперёк у основания (тлеют)
   for (const [a, l] of [[0.9, 0.95], [2.7, 0.85]]) {
-    addLog(kit, l, 0.07, T(Math.cos(a) * 0.12, 0.08, Math.sin(a) * 0.12, 0, -a, 0), { seed: 320 + l * 10, char: 0.9, bark: '#4a3424', barkDark: '#241810', seg: kit.seg(6, 8, 10) });
+    addLog(kit, l, 0.075, T(Math.cos(a) * 0.12, 0.085, Math.sin(a) * 0.12, 0, -a, 0), { seed: 320 + l * 10, char: 1, ember: 1.6, bark: '#4a3424', barkDark: '#241810', seg: kit.seg(6, 8, 10) });
   }
   kit.pop();
 
   // пламя, искры, дым, свет
   // языки пламени: большой центральный выше шалаша, пара боковых, низкие у основания между поленьями
   const flames = [
-    { x: 0, y: 0.05, z: 0, w: 0.5, h: 2.0, b: 0.9, seed: 0.11 },
-    { x: 0.16, y: 0.05, z: 0.06, w: 0.3, h: 1.45, b: 0.75, seed: 0.37 },
-    { x: -0.15, y: 0.05, z: 0.09, w: 0.3, h: 1.55, b: 0.8, seed: 0.59 },
-    { x: 0.03, y: 0.05, z: -0.16, w: 0.28, h: 1.35, b: 0.75, seed: 0.83 },
-    { x: -0.04, y: 0.04, z: -0.03, w: 0.3, h: 0.95, b: 1.4, seed: 0.23 },
-    { x: 0.36, y: 0.03, z: -0.18, w: 0.16, h: 0.55, b: 1.0, seed: 0.71 },
-    { x: -0.3, y: 0.03, z: -0.26, w: 0.15, h: 0.5, b: 1.0, seed: 0.47 },
-    { x: -0.12, y: 0.03, z: 0.36, w: 0.16, h: 0.6, b: 1.0, seed: 0.93 },
+    { x: 0, y: 0.05, z: 0, w: 0.46, h: 1.75, b: 0.9, seed: 0.11 },
+    { x: 0.16, y: 0.05, z: 0.06, w: 0.3, h: 1.3, b: 0.75, seed: 0.37 },
+    { x: -0.15, y: 0.05, z: 0.09, w: 0.3, h: 1.4, b: 0.8, seed: 0.59 },
+    { x: 0.03, y: 0.05, z: -0.16, w: 0.28, h: 1.25, b: 0.75, seed: 0.83 },
+    { x: 0.12, y: 0.05, z: -0.1, w: 0.22, h: 1.05, b: 0.85, seed: 0.66 },
+    { x: -0.04, y: 0.04, z: -0.03, w: 0.32, h: 0.85, b: 1.4, seed: 0.23 },
+    { x: 0.36, y: 0.03, z: -0.18, w: 0.16, h: 0.5, b: 1.0, seed: 0.71 },
+    { x: -0.3, y: 0.03, z: -0.26, w: 0.15, h: 0.45, b: 1.0, seed: 0.47 },
+    { x: -0.12, y: 0.03, z: 0.36, w: 0.16, h: 0.55, b: 1.0, seed: 0.93 },
+    { x: 0.3, y: 0.03, z: 0.24, w: 0.13, h: 0.4, b: 1.0, seed: 0.05 },
   ];
-  const fire = buildFlames(flames, ctx.level === 0 ? 1.5 : 1.9);
+  const fire = buildFlames(flames, ctx.level === 0 ? 1.45 : 1.75);
   fire.position.set(cx, y0, cz);
   const parts = buildParticles([
     { x: 0, y: 0.25, z: 0, sparks: kit.seg(16, 26, 32) },
     { x: 0, y: 0.5, z: 0, smoke: kit.seg(8, 14, 18), type: 1, life: 6.5, size: 0.55, spread: 0.35 },
   ], 9);
   parts.position.set(cx, y0, cz);
-  const light = new THREE.PointLight('#ff9448', 30, 22, 2);
-  light.position.set(cx, y0 + 1.15, cz);
+  // затухание мягче физического (decay 1.3): вблизи огня земля и камни не выгорают в белое,
+  // а свет при этом дотягивается до брёвен-скамеек
+  // свет - внутри шалаша, на уровне языков: наружные бока поленьев остаются в своей тени
+  const light = new THREE.PointLight('#ff9448', 5.5, 24, 1.3);
+  light.position.set(cx, y0 + 0.62, cz);
   kit.cur.extra.push({ obj: fire, lod: 'near' }, { obj: parts, lod: 'detail' }, { obj: light, lod: 'always' });
   anim.push((dt, t) => {
-    light.intensity = 27 + Math.sin(t * 11) * 4 + Math.sin(t * 27.3) * 2.5 + Math.sin(t * 5.1) * 2;
+    light.intensity = 5.5 + Math.sin(t * 11) * 0.7 + Math.sin(t * 27.3) * 0.45 + Math.sin(t * 5.1) * 0.4;
   });
   void root;
   col.addCircle(cx, cz, 1.55, y0 - 1, y0 + 1.6);
@@ -183,7 +239,7 @@ function benches(ctx) {
       const gy = heightAt(px, pz);
       const len = 1.9 + (rand() - 0.5) * 0.1;
       kit.setLayer('solid');
-      addLog(kit, len, 0.26, T(px, gy + 0.266, pz, rand() * 0.2 - 0.1, ry, 0), {
+      addLog(kit, len, 0.26, TY(px, gy + 0.266, pz, ry, rand() * 0.2 - 0.1), {
         seed: 400 + i, flat: 0.1, bark: '#83552f', barkDark: '#4c3019', wood: '#dfb27a', seg: kit.seg(9, 12, 16), rings: kit.seg(3, 6, 8),
       });
       // сучки и пятна мха
@@ -385,7 +441,7 @@ function hubProps(ctx) {
         const x = -W / 2 + 0.09 + (c + (r % 2) * 0.5) * ((W - 0.18) / cols);
         if (x > W / 2 - 0.08) continue;
         const yy = 0.12 + r * 0.17 + rand() * 0.02;
-        addLog(kit, 0.55 + rand() * 0.08, rr, T(x, yy, (rand() - 0.5) * 0.06, 0, Math.PI / 2 + (rand() - 0.5) * 0.08, rand() * TAU), {
+        addLog(kit, 0.55 + rand() * 0.08, rr, TY(x, yy, (rand() - 0.5) * 0.06, Math.PI / 2 + (rand() - 0.5) * 0.08, rand() * TAU), {
           seed: 700 + r * 20 + c, seg: kit.seg(5, 6, 7), rings: 1, bark: '#6f4c2e', barkDark: '#3f2a18', wood: '#e2bc84',
         });
       }
@@ -474,7 +530,7 @@ function cart(ctx, px, pz, ry, seed) {
   // дрова в кузове
   kit.setLayer('detail');
   for (let j = 0; j < kit.seg(3, 6, 8); j++) {
-    addLog(kit, 0.6 + rand() * 0.15, 0.06 + rand() * 0.02, T((rand() - 0.5) * 0.3, Hb + 0.09 + Math.floor(j / 3) * 0.12, -0.2 + (j % 3) * 0.2, 0, (rand() - 0.5) * 0.3, rand() * TAU), { seed: 800 + j, seg: kit.seg(5, 6, 7), rings: 1 });
+    addLog(kit, 0.6 + rand() * 0.15, 0.06 + rand() * 0.02, TY((rand() - 0.5) * 0.3, Hb + 0.09 + Math.floor(j / 3) * 0.12, -0.2 + (j % 3) * 0.2, (rand() - 0.5) * 0.3, rand() * TAU), { seed: 800 + j, seg: kit.seg(5, 6, 7), rings: 1 });
   }
   kit.pop();
   col.addBox(px, pz, 0.85, 0.45, ry, gy - 0.3, gy + Hb + 0.2);
@@ -736,5 +792,4 @@ export function buildHub(ctx) {
   hubProps(ctx);
   heroTree(ctx);
   void cylUV;
-  void TY;
 }

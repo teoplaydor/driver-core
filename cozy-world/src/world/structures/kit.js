@@ -438,23 +438,34 @@ export function logParts(len, r, { seg = 10, rings = 6, seed = 1, flat = 0, tape
 }
 
 // Добавить бревно целиком: кора + спилы с кольцами. xf - положение центра бревна (ось X бревна).
-export function addLog(kit, len, r, xf, { bark = '#7a5232', barkDark = '#4a3020', wood = '#d9a86a', seed = 1, flat = 0, seg, rings, char = 0, bend = 0, layer, caps = true } = {}) {
+// char - доля длины от конца +X, обугленная углём; ember - тлеющие трещины на обугленном (свечение мерцает).
+export function addLog(kit, len, r, xf, { bark = '#7a5232', barkDark = '#4a3020', wood = '#d9a86a', seed = 1, flat = 0, seg, rings, char = 0, ember = 0, bend = 0, layer, caps = true } = {}) {
   const parts = logParts(len, r, { seg: seg ?? kit.seg(7, 9, 12), rings: rings ?? kit.seg(2, 4, 6), seed, flat, bend });
   const bc = new THREE.Color(bark), bd = new THREE.Color(barkDark), wc = new THREE.Color(wood), charC = new THREE.Color('#1c1612');
+  const hotC = new THREE.Color('#ff5a14');
   const flatY = r * (1 - flat);
   const proxy = new THREE.CylinderGeometry(r * 0.96, r * 0.96, len, 6, 1).rotateZ(Math.PI / 2);
   if (bend) proxy.translate(0, bend * 0.6, 0);
+  const charK = (x) => (char > 0 ? smoothstep(1 - char, 1 - char * 0.4, x / len + 0.5) : 0);
+  // тлеющие места: пятна на обугленной части, ярче к самому концу
+  const hot = (x, y, z) => {
+    if (!ember) return 0;
+    const k = charK(x);
+    if (k < 0.5) return 0;
+    const n = hash2(Math.round(Math.atan2(z, y) * 2.5 + seed), Math.round(x * 16), seed + 3);
+    return n > 0.66 ? ((n - 0.66) / 0.34) * k * k * k * ember : 0;
+  };
   kit.add(parts.side, (x, y, z, nx, ny, nz, out) => {
     const a = Math.atan2(z, y);
     const n = hash2(Math.round(a * 3 + seed), Math.round(x * 2), seed);
     out.copy(bc).lerp(bd, 0.25 + n * 0.35);
     if (flat > 0 && y >= flatY - 0.004) out.copy(wc).multiplyScalar(0.92);
-    if (char > 0) {
-      const t = x / len + 0.5;
-      const k = smoothstep(1 - char, 1 - char * 0.4, t);
-      out.lerp(charC, k * 0.92);
-    }
-  }, SURF.bark, xf, { uv: (x, y, z) => [x, Math.atan2(z, y) * r], layer, shadow: proxy });
+    if (char > 0) out.lerp(charC, charK(x) * 0.92);
+    const h = hot(x, y, z);
+    if (h > 0) out.lerp(hotC, Math.min(0.85, h));
+  }, ember ? [0.92, 0, 0, PAT.bark + FLICKER] : SURF.bark, xf, {
+    uv: (x, y, z) => [x, Math.atan2(z, y) * r], layer, shadow: proxy, emis: ember ? (x, y, z) => hot(x, y, z) * 2.2 : undefined,
+  });
   for (const cap of caps ? [parts.capA, parts.capB] : []) {
     const end = cap === parts.capB;
     const rim = cap.userData.rim;
@@ -462,7 +473,10 @@ export function addLog(kit, len, r, xf, { bark = '#7a5232', barkDark = '#4a3020'
       const rr = Math.hypot(y, z);
       if (rr > rim * 0.97) out.copy(bd); else out.copy(wc);
       if (char > 0 && end) out.lerp(charC, 0.85);
-    }, SURF.rings, xf, { uv: (x, y, z) => [y, z], layer, shadow: false });
+      if (ember && end && rr < rim * 0.7) out.lerp(hotC, 0.7);
+    }, ember && end ? [0.8, 0, 0, PAT.rings + FLICKER] : SURF.rings, xf, {
+      uv: (x, y, z) => [y, z], layer, shadow: false, emis: ember && end ? (x, y, z) => (Math.hypot(y, z) < rim * 0.7 ? ember * 1.4 : 0) : undefined,
+    });
   }
 }
 

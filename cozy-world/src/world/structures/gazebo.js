@@ -186,8 +186,22 @@ export function buildGazebo(ctx) {
     col.addBox(cx + sx, cz + sz, 0.17, 0.17, 0, y0 + FL, y0 + FL + 0.4);
   }
 
-  // ящики с цветами у углов снаружи
-  for (const [sx, sz] of [[-1, -1], [1, -1], [1, 1], [-1, 1]]) {
+  // тропа от хаба упирается в юго-западный угол: от неё к обоим входам - плоские камни-ступеньки
+  kit.setLayer('detail');
+  {
+    const from = [-HW - 0.9, HW + 0.9];
+    for (const to of [[-HW - 0.75, 0.9], [-0.9, HW + 0.75]]) {
+      for (let i = 0; i < 4; i++) {
+        const t = (i + 0.5) / 4;
+        const px = from[0] + (to[0] - from[0]) * t + (rand() - 0.5) * 0.15, pz = from[1] + (to[1] - from[1]) * t + (rand() - 0.5) * 0.15;
+        const gy = heightAt(cx + px, cz + pz) - y0;
+        kit.add(stoneGeo(0.24 + rand() * 0.06, 60 + i * 3 + to[0], kit.seg(0, 1, 1), 0.7, 0.25), stoneColor('#a39e94', 80 + i), SURF.stone, T(px, gy - 0.04, pz, 0, rand() * TAU, 0), { shadow: false });
+        ctx.exclude(cx + px, cz + pz, 0.4);
+      }
+    }
+  }
+  // ящики с цветами у углов снаружи (кроме юго-западного - туда приходит тропа)
+  for (const [sx, sz] of [[-1, -1], [1, -1], [1, 1]]) {
     const px = sx * (HW + 0.55), pz = sz * (HW + 0.55);
     kit.setLayer('solid');
     kit.box(0.55, 0.4, 0.55, '#7f5634', SURF.planks, T(px, 0.2, pz, 0, 0.0, 0), { bevel: 0.02 });
