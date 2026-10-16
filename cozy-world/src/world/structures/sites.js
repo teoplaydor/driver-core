@@ -223,13 +223,14 @@ function buildBoat(ctx, [bx, bz], ry) {
     for (let i = 0; i <= NX; i++) {
       const t = -1 + (2 * i) / NX;
       const zz = (t * L) / 2;
-      let arc = 0, prev = null;
+      // v - длина обвода от ближнего планширя (полосы краски симметричны на обоих бортах)
+      const ring = [], arcs = [0];
+      for (let j = 0; j <= NS; j++) ring.push(sec(t, j, inset));
+      for (let j = 1; j <= NS; j++) arcs.push(arcs[j - 1] + Math.hypot(ring[j][0] - ring[j - 1][0], ring[j][1] - ring[j - 1][1]));
+      const total = arcs[NS];
       for (let j = 0; j <= NS; j++) {
-        const [x, y] = sec(t, j, inset);
-        if (prev) arc += Math.hypot(x - prev[0], y - prev[1]);
-        prev = [x, y];
-        pos.push(x, y, zz);
-        uv.push(zz, arc);
+        pos.push(ring[j][0], ring[j][1], zz);
+        uv.push(zz, Math.min(arcs[j], total - arcs[j]));
       }
     }
     const R = NS + 1;
@@ -246,11 +247,11 @@ function buildBoat(ctx, [bx, bz], ry) {
     g.computeVertexNormals();
     return g;
   };
-  const paint = new THREE.Color('#3f7f96'), stripe = new THREE.Color('#f2ebdc'), bottom = new THREE.Color('#9a3a2c');
+  // краска борта; белый пояс у планширя и красное днище рисует узор hull по длине обвода (чёткие края
+  // не зависят от того, как легли вершины сечения)
+  const paint = '#2f7396';
   const outer = shell(0, false);
-  kit.add(outer, (x, y, z, nx, ny, nz, out) => {
-    out.copy(y > 0.12 + sheer((2 * z) / L) ? stripe : y < -0.12 ? bottom : paint);
-  }, SURF.planks, null, { uv: 'keep' });
+  kit.add(outer, paint, SURF.hull, null, { uv: 'keep' });
   const inner = shell(0.035, true);
   kit.add(inner, '#b88b5a', SURF.planks, null, { uv: 'keep', shadow: false });
   // планширь: кромка поверх борта

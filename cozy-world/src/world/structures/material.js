@@ -10,7 +10,7 @@ import { NATURE, GLSL_NOISE } from '../nature/shared.js';
 export const PAT = {
   plain: 0, wood: 1, planks: 2, brick: 3, bark: 4, stone: 5, shingle: 6, rings: 7, fabric: 8, gingham: 9,
   label: 10, straw: 11, snow: 12, metal: 13, padded: 14, glass: 15, mossy: 16, ash: 17,
-  masonry: 18, wallpaper: 19, tiles: 20, mats: 21, stripes: 22, soil: 23,
+  masonry: 18, wallpaper: 19, tiles: 20, mats: 21, stripes: 22, soil: 23, hull: 24,
 };
 export const FLICKER = 32;
 
@@ -271,6 +271,19 @@ vec3 cozyPattern(float pat, vec2 p, vec3 base, vec3 wp, vec3 wn, float fwp) {
     float n2 = nzValue(wp.xz * 17.0);
     float fur = sin(p.x * 9.0) * 0.5 + 0.5;
     return base * (0.7 + 0.35 * n) * (0.85 + 0.25 * n2) * (0.82 + 0.25 * fur);
+  }
+  if (pat < 24.5) { // борт лодки: обшивка внахлёст, белый пояс у планширя, красное днище ниже ватерлинии
+    // p.x - метры вдоль лодки, p.y - метры по обводу от планширя; base - цвет краски борта
+    float aa = 1.0 - smoothstep(0.01, 0.04, fwp);
+    float ew = max(fwp, 0.004);
+    float W = 0.105;
+    float f = fract(p.y / W);
+    float lap = mix(0.93, 0.8 + 0.2 * smoothstep(0.0, 0.3, f) - 0.08 * smoothstep(0.9, 1.0, f), aa);
+    vec3 c = mix(vec3(0.94, 0.91, 0.84), base, smoothstep(0.075 - ew, 0.075 + ew, p.y));
+    c = mix(c, vec3(0.62, 0.2, 0.14), smoothstep(0.255 - ew, 0.255 + ew, p.y));
+    float n = nzValue(vec2(p.x * 2.0, p.y * 30.0));
+    float grain = sGrain(vec2(p.x, p.y * 0.4), 1.0 - smoothstep(0.03, 0.12, fwp));
+    return c * lap * (0.95 + 0.07 * n) * mix(1.0, grain, 0.5);
   }
   return base;
 }

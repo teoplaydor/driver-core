@@ -26,7 +26,7 @@ export const SURF = {
   padded: [0.9, 0, 0, PAT.padded], glass: [0.08, 0, 0, PAT.glass], rubber: [0.95, 0, 0, PAT.plain],
   mossy: [0.92, 0, 0, PAT.mossy], ash: [0.98, 0, 0, PAT.ash], masonry: [0.9, 0, 0, PAT.masonry],
   wallpaper: [0.85, 0, 0, PAT.wallpaper], tiles: [0.3, 0, 0, PAT.tiles], mats: [0.75, 0, 0, PAT.mats],
-  stripes: [0.9, 0, 0, PAT.stripes], soil: [1, 0, 0, PAT.soil],
+  stripes: [0.9, 0, 0, PAT.stripes], soil: [1, 0, 0, PAT.soil], hull: [0.55, 0, 0, PAT.hull],
   ceramic: [0.22, 0, 0, PAT.plain], plastic: [0.45, 0, 0, PAT.plain],
 };
 // светящаяся поверхность: k - сила свечения (HDR: цвет x k > 1, чтобы ловил bloom)
