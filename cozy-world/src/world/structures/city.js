@@ -194,7 +194,7 @@ export function buildBlock(ctx) {
     kit.box(2.5, 2.9, 0.05, '#3a2a22', SURF.plain, T(0, 0.32 + 1.45, 0.0), { sharp: true, shadow: false });
     for (const s of [-1, 1]) {
       kit.box(1.02, 2.5, 0.07, '#5a3a28', SURF.lacq, T(s * 0.53, 0.32 + 1.25, -0.04), { bevel: 0.015, shadow: false });
-      kit.add(new THREE.PlaneGeometry(0.66, 1.4), '#ffd59a', glow(1.6, PAT.glass), T(s * 0.53, 0.32 + 1.55, -0.08), { shadow: false, bake: false, uv: (x, yy) => [x * 2, yy] });
+      kit.add(new THREE.PlaneGeometry(0.66, 1.4), '#ffd59a', glow(1.6, PAT.glass), T(s * 0.53, 0.32 + 1.55, -0.08, 0, Math.PI, 0), { shadow: false, bake: false, uv: (x, yy) => [x * 2, yy] });
       kit.box(0.04, 0.4, 0.04, '#c8a040', SURF.metal, T(s * 0.12, 0.32 + 1.15, -0.12), { sharp: true, shadow: false });
     }
     kit.box(2.3, 0.45, 0.05, '#ffd59a', glow(1.3, PAT.glass), T(0, 0.32 + 2.75, -0.03), { sharp: true, shadow: false, bake: false });
@@ -206,8 +206,8 @@ export function buildBlock(ctx) {
     kit.box(0.46, 0.46, 0.02, '#ffffff', SURF.paint, T(1.78, 2.45, -0.01), { sharp: true, shadow: false });
     atlasPlane(kit, num, 0.42, 0.42, T(1.78, 2.45, -0.022, 0, Math.PI, 0));
     const street = signTex('ул. Дождливая', 520, 120, { bg: '#2f5d9a', border: '#ffffff' });
-    kit.box(0.94, 0.24, 0.02, '#ffffff', SURF.paint, T(-1.87, 2.3, -0.01), { sharp: true, shadow: false });
-    atlasPlane(kit, street, 0.9, 0.2, T(-1.87, 2.3, -0.022, 0, Math.PI, 0));
+    kit.box(0.84, 0.22, 0.02, '#ffffff', SURF.paint, T(-1.92, 2.3, -0.01), { sharp: true, shadow: false });
+    atlasPlane(kit, street, 0.8, 0.18, T(-1.92, 2.3, -0.022, 0, Math.PI, 0));
     // домофон
     kit.box(0.18, 0.3, 0.05, '#2a2c30', SURF.metal, T(1.55, 1.45, -0.03), { bevel: 0.01, shadow: false });
     kit.setLayer('detail');
@@ -721,7 +721,7 @@ export function buildInterior(ctx, apt) {
         kit.box(0.12, 0.02, 0.02, '#8e9499', SURF.metal, T(dx, H0 - 0.15, -0.32), { sharp: true, shadow: false });
       }
       // плитка над столешницей и верхние шкафы
-      kit.add(new THREE.PlaneGeometry(len, 0.6), '#9fc4c8', SURF.tiles, T(len / 2, H0 + 0.34, 0.285), { shadow: false, uv: (x, yy) => [x, yy] });
+      kit.add(new THREE.PlaneGeometry(len, 0.6), '#9fc4c8', SURF.tiles, T(len / 2, H0 + 0.34, 0.285, 0, Math.PI, 0), { shadow: false, uv: (x, yy) => [x, yy] }); // лицом в комнату (-z)
       kit.box(len, 0.7, 0.34, cw, SURF.paint, T(len / 2, H0 + 1.0, 0.13), { bevel: 0.01 });
       for (let i = 0; i < nd; i++) {
         const dx = (i + 0.5) * (len / nd);
@@ -812,12 +812,18 @@ export function buildInterior(ctx, apt) {
     const hx = ox + 1.25, hz = z0 + 0.5, hy = 2.3;
     for (let i = 0; i < 3; i++) { const a = (i / 3) * TAU; kit.add(tube([V3(hx, h, hz), V3(hx + Math.cos(a) * 0.14, hy + 0.12, hz + Math.sin(a) * 0.14)], 0.004, 3), '#c9b28a', SURF.fabric, null, { shadow: false }); }
     kit.add(lathe([[0, 0], [0.1, 0], [0.16, 0.1], [0.17, 0.14], [0, 0.14]], 10), '#c8643c', SURF.ceramic, T(hx, hy, hz), { uv: (x, yy) => [yy, x], shadow: false });
+    const leafGeo = new THREE.CircleGeometry(0.035, 5);
     for (let i = 0; i < 7; i++) {
       const a = (i / 7) * TAU, L = 0.4 + rand() * 0.6;
       const pts = [];
       for (let k = 0; k <= 5; k++) { const t = k / 5; pts.push(V3(hx + Math.cos(a) * (0.15 + t * 0.12), hy + 0.12 - t * L, hz + Math.sin(a) * (0.15 + t * 0.12))); }
       kit.add(tube(pts, 0.006, 3), '#3f6a2a', SURF.plain, null, { shadow: false });
-      for (let k = 1; k <= 5; k++) kit.add(new THREE.CircleGeometry(0.035, 5), '#4f8a3a', SURF.gloss, T(pts[k].x, pts[k].y, pts[k].z, rand() * 3, a, 0), { shadow: false });
+      // листик - кружок с обеих сторон (материал односторонний)
+      for (let k = 1; k <= 5; k++) {
+        const lm = T(pts[k].x, pts[k].y, pts[k].z, rand() * 3, a, 0);
+        kit.add(leafGeo, '#4f8a3a', SURF.gloss, lm, { shadow: false });
+        kit.add(leafGeo, '#4f8a3a', SURF.gloss, lm.multiply(T(0, 0, 0, 0, Math.PI, 0)), { shadow: false });
+      }
     }
   }
   // картины

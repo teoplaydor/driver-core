@@ -557,7 +557,8 @@ export function mailbox(ctx, px, pz, ry, color = '#c8423a', flag = '#f2c84b') {
   kit.box(0.24, 0.04, 0.5, '#6a4628', SURF.wood, T(0, 1.0, 0), { bevel: 0.01 });
   // корпус: короб + полукруглая крыша
   kit.box(0.24, 0.16, 0.46, color, SURF.paint, T(0, 1.1, 0), { bevel: 0.01 });
-  kit.add(new THREE.CylinderGeometry(0.12, 0.12, 0.46, kit.seg(8, 10, 14), 1, false, -Math.PI / 2, Math.PI), color, SURF.paint, T(0, 1.18, 0, Math.PI / 2, 0, 0));
+  // половина цилиндра лежит на z >= 0; поворот на -90° вокруг X ставит её выпуклостью вверх
+  kit.add(new THREE.CylinderGeometry(0.12, 0.12, 0.46, kit.seg(8, 10, 14), 1, false, -Math.PI / 2, Math.PI), color, SURF.paint, T(0, 1.18, 0, -Math.PI / 2, 0, 0));
   kit.setLayer('detail');
   kit.box(0.2, 0.2, 0.01, new THREE.Color(color).multiplyScalar(0.8), SURF.paint, T(0, 1.15, 0.236), { bevel: 0.004 });
   kit.box(0.04, 0.025, 0.02, '#d9d4c8', SURF.metal, T(0, 1.2, 0.25), { bevel: 0.004 });
