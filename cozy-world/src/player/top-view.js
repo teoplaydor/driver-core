@@ -452,6 +452,9 @@ export class TopView {
           x = (_v.x * 0.5 + 0.5) * W;
           y = (-_v.y * 0.5 + 0.5) * H + this.ringR * 22 + 12;
         }
+        // не вылезать за края экрана
+        x = clamp(x, size.w / 2 + 6, W - size.w / 2 - 6);
+        y = below ? Math.min(y, H - size.h - 16) : Math.max(y, size.h + 16);
         g.ui.setTargetLabel?.(t.label, g.isTouch ? '✋' : 'E', x, y, below);
         return;
       }
