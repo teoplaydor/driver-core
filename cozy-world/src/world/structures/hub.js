@@ -644,10 +644,19 @@ function heroTree(ctx) {
     if (kit.q > 1) kit.cyl(0.02, 0.02, 0.04, '#3a3530', SURF.plain, T(p.x, p.y - 0.005, p.z), { seg: 5, bake: false });
   });
 
-  // скворечник на стволе (смотрит на хаб)
+  // скворечник на стволе (смотрит на хаб): радиус ствола на этой высоте - лучом по мешу дерева
+  // (ствол толще метра - на постоянном радиусе домик оказался бы внутри коры)
   {
     const a = 0.75; // направление от центра ствола
-    const bx = x + Math.cos(a) * 0.62, bz = z + Math.sin(a) * 0.62, by = y + 3.1;
+    const by = y + 3.1;
+    let rr = 0.95;
+    tree.updateMatrixWorld(true);
+    const ray = new THREE.Raycaster(new THREE.Vector3(x + Math.cos(a) * 4, by, z + Math.sin(a) * 4), new THREE.Vector3(-Math.cos(a), 0, -Math.sin(a)), 0, 4);
+    for (const h of ray.intersectObject(tree, true)) {
+      const tint = h.object.geometry.getAttribute('aTint'); // 0 - кора, 1 - листва
+      if (!tint || !h.face || tint.getX(h.face.a) < 0.5) { rr = 4 - h.distance; break; }
+    }
+    const bx = x + Math.cos(a) * (rr + 0.05), bz = z + Math.sin(a) * (rr + 0.05);
     kit.setLayer('solid');
     kit.push(T(bx, by, bz, 0, -a + Math.PI / 2, 0));
     kit.box(0.24, 0.3, 0.22, '#b88a58', SURF.wood, T(0, 0, 0.05), { bevel: 0.01 });

@@ -6,7 +6,7 @@
 import * as THREE from 'three';
 import { NATURE, GLSL_NOISE } from '../nature/shared.js';
 
-// Коды узоров (aMat.w). +16 - свечение мерцает (угли, огонёк фонаря).
+// Коды узоров (aMat.w). +FLICKER (32) - свечение мерцает (угли, огонёк фонаря).
 export const PAT = {
   plain: 0, wood: 1, planks: 2, brick: 3, bark: 4, stone: 5, shingle: 6, rings: 7, fabric: 8, gingham: 9,
   label: 10, straw: 11, snow: 12, metal: 13, padded: 14, glass: 15, mossy: 16, ash: 17,

@@ -287,11 +287,12 @@ export function buildGazebo(ctx) {
   kit.cyl(0.12, 0.08, 0.05, '#2e3034', SURF.iron, T(0, LY, 0), { seg: 6, bake: false });
   kit.add(new THREE.SphereGeometry(0.06, 6, 4), '#ffe2b0', glow(4.5, PAT.plain, true), T(0, LY + 0.15, 0, 0, 0, 0, 1, 1.5, 1), { bake: false });
 
-  // дальний вид: пол и столбы (крыша-меш остаётся всегда)
+  // дальний вид: пол, столбы, обвязка и шатёр крыши (меши крыш вдали скрываются вместе с ближней моделью)
   kit.setLayer('far');
   kit.add(new THREE.BoxGeometry(HW * 2, FL, HW * 2), WOOD_D, SURF.wood, T(0, FL / 2, 0), { bake: false });
   for (const [px, pz] of posts) kit.add(new THREE.BoxGeometry(0.2, PH, 0.2), TRIM, SURF.paint, T(px, FL + PH / 2, pz), { bake: false });
   kit.add(new THREE.BoxGeometry(HW * 2 + 0.3, 0.22, HW * 2 + 0.3), WOOD_D, SURF.wood, T(0, BY, 0), { bake: false });
+  kit.add(new THREE.ConeGeometry(E * Math.SQRT2, RISE, 4, 1), ROOF, SURF.plain, T(0, EY + RISE / 2, 0, 0, Math.PI / 4, 0), { bake: false });
   kit.pop();
   ctx.exclude(cx, cz, HW + 1.0);
 }

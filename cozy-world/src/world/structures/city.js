@@ -108,10 +108,12 @@ export function buildBlock(ctx) {
   };
   const cols = [-4.6, -1.55, 1.55, 4.6];
   const sideCols = [-4.0, -1.35, 1.35, 4.0];
+  // балконы - по краям фасада; над кафе на нижнем этаже вместо балкона окно: под ним вывеска «Кафе»
+  const hasBalcony = (f, a) => Math.abs(a) > 4 && !(f === 0 && a < 0);
   for (let f = 0; f < NF; f++) {
     const fy = G + FH * f + 0.85;
     for (const a of cols) {
-      const balcony = Math.abs(a) > 4 && f >= 0;
+      const balcony = hasBalcony(f, a);
       win(0, a, balcony ? fy - 0.62 : fy, balcony ? 0.95 : 1.25, balcony ? 2.25 : 1.65, balcony);
       win(1, a, fy);
     }
@@ -127,6 +129,7 @@ export function buildBlock(ctx) {
     const fy = G + FH * f + 0.2;
     for (const s of [-1, 1]) {
       const bx = s * 4.6;
+      if (!hasBalcony(f, bx)) continue;
       kit.push(T(bx, fy, -D / 2));
       kit.box(1.9, 0.14, 1.0, '#bdb6aa', SURF.plain, T(0, 0, -0.5), { bevel: 0.02 });
       // ограждение: стойки, поручень, низ
@@ -198,10 +201,13 @@ export function buildBlock(ctx) {
     for (const s of [-1, 1]) kit.box(0.14, 3.2, 0.16, trim, SURF.paint, T(s * 1.27, 0.32 + 1.6, -0.06), { bevel: 0.015, shadow: false });
     kit.box(2.7, 0.16, 0.18, trim, SURF.paint, T(0, 0.32 + 3.1, -0.07), { bevel: 0.015, shadow: false });
     // номер дома и табличка с улицей
+    // (лицом наружу: фасад смотрит в -z)
     const num = signTex('12', 180, 180, { bg: '#2f5d9a', border: '#ffffff' });
-    atlasPlane(kit, num, 0.42, 0.42, T(1.75, 2.45, -0.02));
+    kit.box(0.46, 0.46, 0.02, '#ffffff', SURF.paint, T(1.78, 2.45, -0.01), { sharp: true, shadow: false });
+    atlasPlane(kit, num, 0.42, 0.42, T(1.78, 2.45, -0.022, 0, Math.PI, 0));
     const street = signTex('ул. Дождливая', 520, 120, { bg: '#2f5d9a', border: '#ffffff' });
-    atlasPlane(kit, street, 1.2, 0.28, T(-2.0, 2.5, -0.02));
+    kit.box(0.94, 0.24, 0.02, '#ffffff', SURF.paint, T(-1.87, 2.3, -0.01), { sharp: true, shadow: false });
+    atlasPlane(kit, street, 0.9, 0.2, T(-1.87, 2.3, -0.022, 0, Math.PI, 0));
     // домофон
     kit.box(0.18, 0.3, 0.05, '#2a2c30', SURF.metal, T(1.55, 1.45, -0.03), { bevel: 0.01, shadow: false });
     kit.setLayer('detail');
@@ -280,8 +286,8 @@ export function buildBlock(ctx) {
     }
     // вывеска «Кафе» светится
     const cafe = signTex('Кафе', 360, 120, { bg: '#3a2a22', fg: '#ffd27a', border: '#ffd27a' });
-    kit.box(1.42, 0.52, 0.06, '#3a2a22', SURF.plain, T(0, 3.85, -0.0), { sharp: true, shadow: false });
-    atlasPlane(kit, cafe, 1.3, 0.43, T(0, 3.85, -0.035, 0, Math.PI, 0), glow(2.2, PAT.label));
+    kit.box(1.42, 0.52, 0.06, '#3a2a22', SURF.plain, T(0, 3.76, -0.0), { sharp: true, shadow: false });
+    atlasPlane(kit, cafe, 1.3, 0.43, T(0, 3.76, -0.035, 0, Math.PI, 0), glow(2.2, PAT.label));
     kit.pop();
     col.addCircle(cx - 4.2 + 1.6, cz - D / 2 - 0.95, 0.3, y, y + 0.85);
     // столик и стулья под маркизой
