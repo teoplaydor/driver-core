@@ -34,17 +34,22 @@ const res = await page.evaluate(async () => {
   step(crate, 8);
   out.crate = { owner: crate.owner, y: +crate.pos.y.toFixed(3) };
 
-  // 3. шахматная пешка падает на доску рядом с центром клетки: должна встать ровно в клетку
+  // 3. шахматы: стол с доской из беседки убран (WS5b; новую доску у спавна ставит WS5a), поэтому
+  // а) фигура, поставленная на высоте доски рядом с центром клетки, встаёт ровно в клетку (логика снапа);
+  // б) пешка, упавшая в беседке, ложится на чайный столик и не проваливается
   const pawn = P.byId.get('cwP3');
-  pawn.owner = 'me'; pawn.restT = 0;
   const c = 0.115, B = { x: 27, z: -19 };
-  pawn.pos.set(B.x + (2 - 3.5) * c + 0.03, 3.2, B.z + (4 - 3.5) * c - 0.02);
-  pawn.vel.set(0, 0, 0);
-  step(pawn, 6);
+  pawn.owner = null; pawn.vel.set(0, 0, 0);
+  pawn.pos.set(B.x + (2 - 3.5) * c + 0.03, 1.705 + 0.02, B.z + (4 - 3.5) * c - 0.02);
+  P._snapToBoard(pawn);
   const fx = (pawn.pos.x - B.x) / c + 3.5, fz = (pawn.pos.z - B.z) / c + 3.5;
   out.pawn = { owner: pawn.owner, y: +pawn.pos.y.toFixed(3), cellX: +fx.toFixed(3), cellZ: +fz.toFixed(3) };
+  pawn.owner = 'me'; pawn.restT = 0;
+  pawn.pos.set(B.x + 0.1, 3.2, B.z - 0.05);
+  step(pawn, 6);
+  out.pawnTea = { owner: pawn.owner, y: +pawn.pos.y.toFixed(3) };
 
-  // 4. игрок рядом с ящиком не проходит сквозь него (коллизия ящика у костра не нужна), а вот скамейка в беседке держит
+  // 4. верх чайного столика в беседке держит (на столы и лавки можно запрыгнуть)
   const tableTop = G.world.collisions.supportY(27, -19, 1.2, 0.45);
   out.tableTop = +tableTop.toFixed(3);
 
@@ -104,7 +109,8 @@ ok(res.ball.y > 0 && res.ball.y < 2.5, `мяч на странной высот�
 ok(res.crate.owner === null && res.crate.y > 0 && res.crate.y < 3, 'ящик не лёг');
 ok(res.pawn.owner === null && Math.abs(res.pawn.cellX - 2) < 0.01 && Math.abs(res.pawn.cellZ - 4) < 0.01, 'пешка не встала в клетку');
 ok(Math.abs(res.pawn.y - 1.705) < 0.01, `пешка стоит на высоте ${res.pawn.y}, а должна на доске (1.705)`);
-ok(Math.abs(res.tableTop - 1.63) < 0.02, `верх стола с доской ${res.tableTop}`);
+ok(res.pawnTea.owner === null && Math.abs(res.pawnTea.y - (res.tableTop + 0.075)) < 0.01, `пешка не легла на чайный столик: ${res.pawnTea.y}`);
+ok(Math.abs(res.tableTop - 1.3) < 0.02, `верх чайного столика в беседке ${res.tableTop}`);
 ok(res.bat.owner === null && Math.abs(res.bat.axisY) < 0.1, `бита не легла на бок (ось Y: ${res.bat.axisY})`);
 ok(res.bat.h > 0.02 && res.bat.h < 0.08, `бита на высоте ${res.bat.h} над землёй (провалилась или висит)`);
 ok(res.bat.jitter < 0.003 && res.bat.again === null, `бита дрожит в покое: сдвиг ${res.bat.jitter}`);
