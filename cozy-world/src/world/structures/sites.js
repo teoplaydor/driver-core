@@ -121,7 +121,7 @@ export function buildPier(ctx) {
     const bx = -2.0, bz = 0.7;
     kit.add(lathe([[0, 0], [0.12, 0], [0.13, 0.02], [0.15, 0.24], [0.155, 0.25], [0.145, 0.25], [0.135, 0.03], [0, 0.03]], kit.seg(8, 10, 14)), '#8d969e', SURF.metal, T(bx, 0, bz), { uv: (x, y) => [y, x] });
     kit.add(new THREE.TorusGeometry(0.15, 0.006, 3, 10, Math.PI), '#5d646a', SURF.metal, T(bx, 0.25, bz, 0, 0.4, 0));
-    kit.cyl(0.13, 0.13, 0.01, '#4b6a7a', SURF.glass, T(bx, 0.2, bz), { seg: kit.seg(8, 10, 14) });
+    kit.cyl(0.13, 0.13, 0.01, '#4b6a7a', [0.35, 0, 0, PAT.plain], T(bx, 0.2, bz), { seg: kit.seg(8, 10, 14) });
     // удочка прислонена к свае
     const rodA = V3(pilesX[1] + 0.25, 0.02, HW - 0.05), rodB = V3(pilesX[1] - 1.4, 1.65, HW + 0.2);
     kit.add(tube([rodA, rodB], (t) => 0.018 * (1 - t) + 0.005 * t, 4), '#4a3424', SURF.lacq, null);
@@ -374,7 +374,6 @@ export function buildCabin(ctx) {
       cg.computeVertexNormals();
       kit.add(cg, '#c4483a', glow(1.15, PAT.gingham), T(s * cw * 0.34, 0.0, -0.04), { shadow: false, bake: false, uv: (x, yy) => [x, yy] });
     }
-    kit.add(new THREE.PlaneGeometry(cw, ch), '#9fb8c8', [0.06, 0, 0, PAT.glass], T(0, 0, -0.01), { shadow: false, bake: false, uv: (x, yy) => [x + 3, yy] });
     // переплёт
     kit.box(0.045, ch, 0.05, '#efe6d2', SURF.paint, T(0, 0, 0.0), { sharp: true, shadow: false });
     kit.box(cw, 0.045, 0.05, '#efe6d2', SURF.paint, T(0, ch * 0.1, 0.0), { sharp: true, shadow: false });

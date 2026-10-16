@@ -43,26 +43,28 @@ varying float vB;
 varying float vH;
 ${GLSL_NOISE}
 void main() {
-  float y = vUv.y;
+  float y = vUv.y, x = vUv.x;
   float t = uTime;
-  vec2 q = vec2(vUv.x * 1.4 + vSeed * 13.0, y * 1.7 * vH - t * 2.4);
-  float n = nzValue(q * 2.0) * 0.6 + nzValue(q * 4.3 + 3.1) * 0.3 + nzValue(q * 8.7 - 1.7) * 0.1;
-  // капля: широкая у основания, острая сверху; извивается сильнее к верху
-  float w = 0.95 * pow(max(0.0, 1.0 - y), 0.62) * smoothstep(-0.15, 0.16, y);
-  float x = vUv.x + (n - 0.5) * 0.7 * y;
-  float shape = w - abs(x) - (n - 0.42) * 0.5 * y;
-  float a = smoothstep(0.0, 0.16, shape);
+  // шум бежит вверх; язык качается сильнее к вершине
+  vec2 q = vec2(x * 1.3 + vSeed * 17.0, y * 2.0 * vH - t * 2.6);
+  float n = nzValue(q * 1.7) * 0.55 + nzValue(q * 3.9 + 1.3) * 0.3 + nzValue(q * 8.3 - 2.1) * 0.15;
+  float xs = x + (n - 0.5) * 0.85 * y * y + sin(t * 3.1 + vSeed * 9.0 + y * 4.0) * 0.1 * y;
+  // капля: широкая внизу, острая сверху
+  float prof = pow(clamp(1.0 - y, 0.0, 1.0), 0.8) * smoothstep(0.0, 0.2, y) * 0.78 + 0.06 * (1.0 - y);
+  float d = prof - abs(xs);
   // верх рвётся на отдельные языки
-  a *= smoothstep(-0.05, 0.22, n * 1.3 + 0.5 - y);
-  if (a < 0.004) discard;
-  float core = smoothstep(0.1, 0.5, shape) * (1.0 - y * 0.75);
-  vec3 cO = vec3(1.0, 0.36, 0.06), cM = vec3(1.0, 0.62, 0.16), cC = vec3(1.0, 0.92, 0.62);
-  vec3 col = mix(cO, cM, smoothstep(0.0, 0.25, shape));
-  col = mix(col, cC, clamp(core * vB, 0.0, 1.0));
-  col *= 1.0 - y * 0.25;
-  float I = uIntensity * (0.75 + vB * 0.35);
-  // предумноженная альфа: края частично закрывают фон (огонь виден и днём), середина светится
-  gl_FragColor = vec4(col * a * I, a * 0.5);
+  d -= (1.0 - n) * 0.5 * y * y;
+  float a = smoothstep(0.0, 0.05, d);
+  if (a < 0.01) discard;
+  // мультяшные полосы: красно-оранжевый край, оранжевый, жёлтая сердцевина у основания
+  float mid = smoothstep(0.07, 0.14, d) * (1.0 - smoothstep(0.55, 0.95, y));
+  float core = smoothstep(0.2, 0.3, d) * (1.0 - smoothstep(0.2, 0.6, y));
+  vec3 col = vec3(0.92, 0.2, 0.03);
+  col = mix(col, vec3(1.0, 0.5, 0.06), mid);
+  col = mix(col, vec3(1.0, 0.82, 0.32), core * clamp(vB, 0.4, 1.0));
+  float I = uIntensity * (0.85 + 0.3 * vB) * (1.0 + 0.5 * core);
+  // предумноженная альфа: огонь плотный (виден днём), середина ярче 1.0 - ловит bloom
+  gl_FragColor = vec4(col * I * a, a * 0.9);
   #include <tonemapping_fragment>
   #include <colorspace_fragment>
 }`;
@@ -88,7 +90,7 @@ export function buildFlames(flames, intensity = 2.6) {
   g.setAttribute('aCorner', new THREE.BufferAttribute(cor, 2));
   g.setAttribute('aFlame', new THREE.BufferAttribute(prm, 4));
   g.setIndex(idx);
-  g.boundingSphere = new THREE.Sphere(new THREE.Vector3(0, 0.7, 0), 1.6);
+  g.boundingSphere = new THREE.Sphere(new THREE.Vector3(0, 0.9, 0), 1.9);
   const m = new THREE.ShaderMaterial({
     uniforms: { uTime: NATURE.uTime, uIntensity: { value: intensity } },
     vertexShader: FLAME_VERT,

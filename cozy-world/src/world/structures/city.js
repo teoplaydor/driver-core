@@ -30,7 +30,10 @@ function signTex(text, w, h, { bg = '#2f5d9a', fg = '#ffffff', font, border = '#
     g.fillStyle = fg;
     g.textAlign = 'center';
     g.textBaseline = 'middle';
-    g.font = font || `800 ${Math.round(h * (sub ? 0.46 : 0.6))}px "Baloo 2", "Trebuchet MS", system-ui, sans-serif`;
+    let fs = Math.round(h * (sub ? 0.46 : 0.6));
+    g.font = font || `800 ${fs}px "Baloo 2", "Trebuchet MS", system-ui, sans-serif`;
+    const tw = g.measureText(text).width;
+    if (!font && tw > w * 0.84) { fs = Math.floor(fs * w * 0.84 / tw); g.font = `800 ${fs}px "Baloo 2", "Trebuchet MS", system-ui, sans-serif`; }
     g.fillText(text, w / 2, sub ? h * 0.4 : h / 2 + h * 0.03);
     if (sub) {
       g.font = `700 ${Math.round(h * 0.2)}px "Baloo 2", "Trebuchet MS", system-ui, sans-serif`;
@@ -237,7 +240,7 @@ export function buildBlock(ctx) {
       kit.add(new THREE.CircleGeometry(0.08, 8).rotateX(Math.PI / 2), '#fff0c8', glow(5), T(lx2, 2.095, -0.08), { shadow: false, bake: false });
     }
     // доска-меню у входа
-    kit.push(T(1.0, 0, -1.3, 0, 0.3, 0));
+    kit.push(T(1.6, 0, -0.95, 0, 0.5, 0));
     const menu = signTex('Кофе • Какао', 300, 200, { bg: '#26302c', fg: '#f4f0e0', border: '#c8a070', sub: 'пирог дня' });
     for (const sgn of [-1, 1]) {
       kit.box(0.6, 0.8, 0.03, '#7a5236', SURF.wood, T(0, 0.42, sgn * 0.14, sgn * 0.18, 0, 0), { bevel: 0.01, shadow: false });
@@ -260,6 +263,7 @@ export function buildBlock(ctx) {
     kit.box(1.42, 0.52, 0.06, '#3a2a22', SURF.plain, T(0, 3.85, -0.0), { sharp: true, shadow: false });
     atlasPlane(kit, cafe, 1.3, 0.43, T(0, 3.85, -0.035, 0, Math.PI, 0), glow(2.2, PAT.label));
     kit.pop();
+    col.addCircle(cx - 4.2 + 1.6, cz - D / 2 - 0.95, 0.3, y, y + 0.85);
     // столик и стулья под маркизой
     const tx = cx - 4.2, tz = cz - D / 2 - 1.1, ty = heightAt(tx, tz);
     kit.push(T(-4.2, 0, -D / 2 - 1.1));

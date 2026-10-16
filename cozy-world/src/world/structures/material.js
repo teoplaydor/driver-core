@@ -91,11 +91,12 @@ vec3 cozyPattern(float pat, vec2 p, vec3 base, vec3 wp, vec3 wn, float fwp) {
     float col = floor((p.x + off) / L);
     vec2 f = vec2(fract((p.x + off) / L) * L, fract(p.y / W) * W);
     float e = min(min(f.x, L - f.x) * 0.5, min(f.y, W - f.y));
-    float aa = 1.0 - smoothstep(0.004, 0.02, fwp);
-    float seam = 1.0 - smoothstep(0.003, 0.009, e) * 1.0;
+    float aaT = 1.0 - smoothstep(0.05, 0.14, fwp);
+    float aaS = 1.0 - smoothstep(0.006, 0.03, fwp);
+    float seam = 1.0 - smoothstep(0.003, 0.009, e);
     float tone = 0.86 + 0.24 * nzHash(vec2(row, col) + 11.0);
-    vec3 c = base * mix(1.0, tone, aa) * sGrain(vec2(p.x + off, p.y + row * 0.37), 1.0 - smoothstep(0.03, 0.12, fwp));
-    return c * (1.0 - seam * 0.5 * aa);
+    vec3 c = base * mix(1.0, tone, aaT) * sGrain(vec2(p.x + off, p.y + row * 0.37), 1.0 - smoothstep(0.03, 0.12, fwp));
+    return c * mix(0.96, 1.0 - seam * 0.5, aaS);
   }
   if (pat < 3.5) { // кирпич (перевязка в полкирпича)
     vec2 b = p / vec2(0.25, 0.085);
@@ -103,15 +104,15 @@ vec3 cozyPattern(float pat, vec2 p, vec3 base, vec3 wp, vec3 wn, float fwp) {
     b.x += mod(row, 2.0) * 0.5;
     vec2 id = floor(b), f = fract(b);
     vec2 e2 = min(f, 1.0 - f) * vec2(0.25, 0.085);
-    float aa = 1.0 - smoothstep(0.004, 0.012, fwp);
+    float aaT = 1.0 - smoothstep(0.03, 0.09, fwp);
+    float aaM = 1.0 - smoothstep(0.006, 0.025, fwp);
     float inside = smoothstep(0.004, 0.009, min(e2.x, e2.y));
-    float tone = 0.8 + 0.32 * nzHash(id + 17.0);
+    float tone = mix(1.0, 0.8 + 0.32 * nzHash(id + 17.0), aaT);
     float speck = nzValue(p * 55.0);
-    vec3 brick = base * tone * (0.93 + 0.12 * speck) * (0.92 + 0.08 * smoothstep(0.0, 0.03, min(e2.x, e2.y)));
+    vec3 brick = base * tone * (0.93 + 0.12 * speck * aaM) * (0.92 + 0.08 * smoothstep(0.0, 0.03, min(e2.x, e2.y)));
     vec3 mortar = vec3(0.62, 0.58, 0.54) * (0.9 + 0.1 * speck);
-    vec3 c = mix(mortar, brick, inside);
-    vec3 avg = mix(mortar, base * 0.95, 0.82);
-    return mix(avg, c, aa);
+    vec3 avg = mix(mortar, brick, 0.82);
+    return mix(avg, mix(mortar, brick, inside), aaM);
   }
   if (pat < 4.5) { // кора: борозды вдоль u
     float n1 = sFbm(vec2(p.x * 1.6, p.y * 11.0));
@@ -131,13 +132,15 @@ vec3 cozyPattern(float pat, vec2 p, vec3 base, vec3 wp, vec3 wn, float fwp) {
     float u = p.x / Wd + mod(row, 2.0) * 0.5 + nzHash(vec2(row, 1.0)) * 0.3;
     float id = floor(u);
     vec2 f = vec2(fract(u) * Wd, fract(p.y / H) * H);
-    float aa = 1.0 - smoothstep(0.005, 0.02, fwp);
+    float aaT = 1.0 - smoothstep(0.05, 0.16, fwp);
+    float aaE = 1.0 - smoothstep(0.012, 0.05, fwp);
     float gap = smoothstep(0.004, 0.012, min(f.x, Wd - f.x));
     float edge = smoothstep(0.0, 0.05, f.y);           // тень под нижним краем верхнего ряда
-    float tone = 0.82 + 0.3 * nzHash(vec2(id, row) + 5.0);
+    float tone = mix(0.95, 0.82 + 0.3 * nzHash(vec2(id, row) + 5.0), aaT);
+    float rowTone = 0.9 + 0.16 * nzHash(vec2(row, 9.0));
     float n = nzValue(vec2(u * 3.0, p.y * 20.0));
-    vec3 c = base * tone * (0.92 + 0.12 * n) * mix(0.55, 1.0, edge) * mix(0.6, 1.0, gap);
-    return mix(base * 0.86, c, aa);
+    vec3 c = base * tone * rowTone * (0.92 + 0.12 * n * aaE);
+    return c * mix(0.86, mix(0.55, 1.0, edge) * mix(0.6, 1.0, gap), aaE);
   }
   if (pat < 7.5) { // годичные кольца на спиле (p - метры от оси)
     float r = length(p);
@@ -219,13 +222,14 @@ vec3 cozyPattern(float pat, vec2 p, vec3 base, vec3 wp, vec3 wn, float fwp) {
     float wob = (nzValue(p * 9.0) - 0.5) * 0.28;
     vec2 e = min(f, 1.0 - f) + wob;
     float d = min(e.x * 0.34, e.y * 0.22);
-    float aa = 1.0 - smoothstep(0.004, 0.015, fwp);
+    float aa = 1.0 - smoothstep(0.01, 0.035, fwp);
+    float aaT = 1.0 - smoothstep(0.05, 0.14, fwp);
     float stone = smoothstep(0.006, 0.02, d);
-    float tone = 0.72 + 0.4 * nzHash(id + 3.0);
+    float tone = mix(0.9, 0.72 + 0.4 * nzHash(id + 3.0), aaT);
     vec3 sc = base * tone * (0.88 + 0.2 * nzValue(p * 30.0)) * (0.85 + 0.15 * smoothstep(0.0, 0.06, d));
     sc = mix(sc, sc * vec3(1.08, 1.0, 0.9), step(0.7, nzHash(id + 9.0)));
     vec3 mortar = vec3(0.56, 0.53, 0.49) * (0.85 + 0.15 * nzValue(p * 40.0));
-    return mix(mix(mortar, base * 0.85, 0.75), mix(mortar, sc, stone), aa);
+    return mix(mix(mortar, sc, 0.78), mix(mortar, sc, stone), aa);
   }
   if (pat < 19.5) { // обои: тонкие вертикальные полосы и мелкий цветочный раппорт
     float aa = 1.0 - smoothstep(0.003, 0.012, fwp);

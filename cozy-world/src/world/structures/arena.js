@@ -58,12 +58,16 @@ export function buildArena(ctx) {
   const bake = (wx, wy, wz, nx, ny, nz) => {
     const lx = wx - cx, lz = wz - cz, ly = wy - y;
     const inside = Math.abs(lx) < inX + 0.02 && Math.abs(lz) < inZ + 0.02 && (ly < H - 0.01 || (ny < -0.5 && ly < H + 0.05));
-    if (!inside) return groundAO(wx, wy, wz, nx, ny, nz);
+    if (!inside) {
+      // снаружи: светлые стены подсвечены отражённым от песка светом
+      const g = groundAO(wx, wy, wz, nx, ny, nz);
+      return [g[0], ny > 0.5 ? 0 : 0.14];
+    }
     const ax = inX - Math.abs(lx), az = inZ - Math.abs(lz);
     let k = 1;
     if (ny > 0.5 && ly < 0.4) k *= 0.72 + 0.28 * smoothstep(0, 1.2, Math.min(ax, az));
     else if (Math.abs(nx) > 0.5 || Math.abs(nz) > 0.5) k *= 0.72 + 0.28 * smoothstep(0, 0.9, ly);
-    if (ny < -0.5) k *= 0.85 + 0.15 * smoothstep(0, 2, Math.min(ax, az));
+    if (ny < -0.5) return [k * (0.85 + 0.15 * smoothstep(0, 2, Math.min(ax, az))), 0.85];
     const top = smoothstep(1, H, ly);
     // крыша закрывает солнце: светлые стены в зале держатся на «отражённом» свете
     return [k, 0.42 + 0.2 * top];
@@ -72,22 +76,26 @@ export function buildArena(ctx) {
   kit.push(T(cx, y, cz));
 
   // ---------- пол: маты с цветными зонами ----------
-  const fseg = kit.seg(12, 32, 44);
-  const fl = new THREE.PlaneGeometry(W - T0 * 2, D - T0 * 2, fseg, fseg).rotateX(-Math.PI / 2);
-  const blue = new THREE.Color('#3f7fc8'), orange = new THREE.Color('#f08a3c'), red = new THREE.Color('#d8503a'), white = new THREE.Color('#f4f2ec');
-  kit.add(fl, (x, yy, z, nx, ny, nz, out) => {
-    const r = Math.hypot(x, z), edge = Math.min(inX - Math.abs(x), inZ - Math.abs(z));
-    out.copy(blue);
-    if (r < 3.6) out.copy(orange);
-    if (Math.abs(r - 3.8) < 0.18) out.copy(white);
-    if (edge < 1.3) out.copy(red);
-    if (Math.abs(edge - 1.4) < 0.1) out.copy(white);
-    if (Math.abs(x) < 0.08 && edge > 1.5 && r > 3.95) out.copy(white);
-  }, SURF.mats, T(0, 0.31, 0), { uv: (x, yy, z) => [x, z], shadow: false });
+  // зоны - отдельными плоскостями чуть выше основы (чёткие края; швы матов общие по координатам)
+  const FY = 0.31;
+  const mats = (geo, c, yy) => kit.add(geo, c, SURF.mats, T(0, FY + yy, 0), { uv: (x, y2, z) => [x, z], shadow: false });
+  const flat = (g) => g.rotateX(-Math.PI / 2);
+  mats(flat(new THREE.PlaneGeometry(W - T0 * 2, D - T0 * 2, kit.seg(4, 8, 12), kit.seg(4, 8, 12))), '#3f7fc8', 0);
+  const bw = 1.3;
+  for (const s2 of [-1, 1]) {
+    mats(flat(new THREE.PlaneGeometry(inX * 2, bw)).translate(0, 0, s2 * (inZ - bw / 2)), '#d8503a', 0.008);
+    mats(flat(new THREE.PlaneGeometry(bw, inZ * 2 - bw * 2)).translate(s2 * (inX - bw / 2), 0, 0), '#d8503a', 0.008);
+    mats(flat(new THREE.PlaneGeometry(inX * 2 - bw * 2, 0.12)).translate(0, 0, s2 * (inZ - bw - 0.06)), '#f4f2ec', 0.01);
+    mats(flat(new THREE.PlaneGeometry(0.12, inZ * 2 - bw * 2 - 0.24)).translate(s2 * (inX - bw - 0.06), 0, 0), '#f4f2ec', 0.01);
+    mats(flat(new THREE.PlaneGeometry(0.12, inZ - bw - 0.12 - 4.0)).translate(0, 0, s2 * (4.0 + (inZ - bw - 0.12 - 4.0) / 2)), '#f4f2ec', 0.01);
+  }
+  mats(flat(new THREE.CircleGeometry(3.6, kit.seg(16, 32, 48))), '#f08a3c', 0.012);
+  mats(flat(new THREE.RingGeometry(3.7, 3.88, kit.seg(16, 32, 48))), '#f4f2ec', 0.014);
+  mats(flat(new THREE.CircleGeometry(0.35, kit.seg(8, 16, 24))), '#f4f2ec', 0.016);
   kit.box(W, 0.3, D, '#d8d8de', SURF.plain, T(0, 0.15, 0), { sharp: true, shadow: false });
 
   // ---------- стены ----------
-  const wallC = '#f2f2f5';
+  const wallC = '#f6f1e6';
   const wallBox = (x, z, w, h, d, y0 = 0) => {
     kit.box(w, h, d, wallC, SURF.paint, T(x, y0 + h / 2, z), { bevel: 0.03 });
     col.addBox(cx + x, cz + z, w / 2, d / 2, 0, y + y0, y + y0 + h);
@@ -210,7 +218,7 @@ export function buildArena(ctx) {
 
   // ---------- потолок (C5): плита, фермы, светильники, гирлянды флажков ----------
   kit.roof('arena', { x0: cx - inX, x1: cx + inX, z0: cz - inZ, z1: cz + inZ });
-  kit.box(W + 0.4, 0.5, D + 0.4, '#e6e6ea', SURF.paint, T(0, H + 0.25, 0), { bevel: 0.04 });
+  kit.box(W + 0.4, 0.5, D + 0.4, '#e9eef4', SURF.paint, T(0, H + 0.25, 0), { bevel: 0.04 });
   kit.box(W + 0.6, 0.12, D + 0.6, '#ff8a3c', SURF.paint, T(0, H + 0.52, 0), { bevel: 0.02, shadow: false });
   // фермы поперёк зала
   for (let i = 0; i < 4; i++) {

@@ -55,7 +55,11 @@ export function woodLabel(text, w, h, { bg = '#c99a5e', fg = '#3d2412', font, ar
     // светлая фаска по краю и тень
     g.strokeStyle = 'rgba(255,230,190,0.35)'; g.lineWidth = 4; g.strokeRect(3, 3, w - 6, h - 6);
     g.strokeStyle = 'rgba(60,30,10,0.35)'; g.lineWidth = 3; g.strokeRect(7, 7, w - 14, h - 14);
-    g.font = font || `800 ${Math.round(h * 0.52)}px "Baloo 2", "Trebuchet MS", system-ui, sans-serif`;
+    // кегль подбираем так, чтобы надпись влезла в доску
+    let fs = Math.round(h * 0.52);
+    g.font = font || `800 ${fs}px "Baloo 2", "Trebuchet MS", system-ui, sans-serif`;
+    const tw = g.measureText(text).width, room = w * (arrow ? 0.8 : 0.86);
+    if (!font && tw > room) { fs = Math.floor(fs * room / tw); g.font = `800 ${fs}px "Baloo 2", "Trebuchet MS", system-ui, sans-serif`; }
     g.textAlign = 'center';
     g.textBaseline = 'middle';
     const cx = w / 2 - (arrow ? arrow * h * 0.18 : 0);
@@ -80,12 +84,12 @@ function campfire(ctx) {
   // зола и пепел в круге камней, угли посередине
   const det = kit.seg(14, 22, 30);
   const ash = new THREE.CircleGeometry(1.08, det, 0, TAU).rotateX(-Math.PI / 2);
-  const ashC = new THREE.Color('#3a3633'), ashL = new THREE.Color('#77716b'), hot = new THREE.Color('#ff6a1e');
+  const ashC = new THREE.Color('#57524d'), ashL = new THREE.Color('#8c867e'), hot = new THREE.Color('#ff6a1e');
   kit.setLayer('detail').add(ash, (x, y, z, nx, ny, nz, out) => {
     const r = Math.hypot(x, z);
-    out.copy(ashC).lerp(ashL, smoothstep(0.35, 1.05, r) * 0.8);
-    out.lerp(hot, smoothstep(0.32, 0.0, r) * 0.7);
-  }, SURF.ash, T(0, 0.025, 0), { emis: (x, y, z) => smoothstep(0.32, 0.0, Math.hypot(x, z)) * 1.4 });
+    out.copy(ashC).lerp(ashL, smoothstep(0.3, 1.05, r) * 0.8);
+    out.lerp(hot, smoothstep(0.24, 0.0, r) * 0.75);
+  }, SURF.ash, T(0, 0.025, 0), { emis: (x, y, z) => smoothstep(0.24, 0.0, Math.hypot(x, z)) * 1.1 });
   // угольки
   for (let i = 0; i < kit.seg(8, 14, 18); i++) {
     const a = rand() * TAU, r = Math.sqrt(rand()) * 0.55;
@@ -102,7 +106,7 @@ function campfire(ctx) {
     const a = (i / N) * TAU + (rand() - 0.5) * 0.18, r = 1.22 + rand() * 0.1;
     const s = 0.2 + rand() * 0.13;
     const sx = Math.cos(a) * r, sz = Math.sin(a) * r;
-    kit.add(stoneGeo(s, 100 + i, kit.seg(1, 1, 2), 0.4, 0.72), stoneColor('#8b8882', i, { x: cx, z: cz, r: r - s * 0.2 }), SURF.stone,
+    kit.add(stoneGeo(s, 100 + i, kit.seg(1, 1, 2), 0.4, 0.72), stoneColor('#a3a09a', i, { x: cx, z: cz, r: r - s * 0.2 }), SURF.stone,
       T(sx, -0.04, sz, (rand() - 0.5) * 0.3, rand() * TAU, (rand() - 0.5) * 0.3));
   }
   kit.setLayer('detail');
@@ -132,14 +136,18 @@ function campfire(ctx) {
   kit.pop();
 
   // пламя, искры, дым, свет
+  // языки пламени: большой центральный выше шалаша, пара боковых, низкие у основания между поленьями
   const flames = [
-    { x: 0, y: 0.06, z: 0, w: 0.46, h: 1.55, b: 0.9, seed: 0.11 },
-    { x: 0.17, y: 0.05, z: 0.06, w: 0.27, h: 1.05, b: 0.7, seed: 0.37 },
-    { x: -0.16, y: 0.05, z: 0.1, w: 0.28, h: 1.15, b: 0.75, seed: 0.59 },
-    { x: 0.03, y: 0.05, z: -0.17, w: 0.26, h: 1.0, b: 0.7, seed: 0.83 },
-    { x: -0.05, y: 0.04, z: -0.04, w: 0.26, h: 0.8, b: 1.5, seed: 0.23 },
+    { x: 0, y: 0.05, z: 0, w: 0.5, h: 2.0, b: 0.9, seed: 0.11 },
+    { x: 0.16, y: 0.05, z: 0.06, w: 0.3, h: 1.45, b: 0.75, seed: 0.37 },
+    { x: -0.15, y: 0.05, z: 0.09, w: 0.3, h: 1.55, b: 0.8, seed: 0.59 },
+    { x: 0.03, y: 0.05, z: -0.16, w: 0.28, h: 1.35, b: 0.75, seed: 0.83 },
+    { x: -0.04, y: 0.04, z: -0.03, w: 0.3, h: 0.95, b: 1.4, seed: 0.23 },
+    { x: 0.36, y: 0.03, z: -0.18, w: 0.16, h: 0.55, b: 1.0, seed: 0.71 },
+    { x: -0.3, y: 0.03, z: -0.26, w: 0.15, h: 0.5, b: 1.0, seed: 0.47 },
+    { x: -0.12, y: 0.03, z: 0.36, w: 0.16, h: 0.6, b: 1.0, seed: 0.93 },
   ];
-  const fire = buildFlames(flames, ctx.level === 0 ? 1.7 : 2.6);
+  const fire = buildFlames(flames, ctx.level === 0 ? 1.5 : 1.9);
   fire.position.set(cx, y0, cz);
   const parts = buildParticles([
     { x: 0, y: 0.25, z: 0, sparks: kit.seg(16, 26, 32) },
