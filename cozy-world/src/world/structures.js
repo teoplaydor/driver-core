@@ -30,9 +30,25 @@ const LOD = [
   { near: 170, detail: 90 },
 ];
 
+// Меш только для карты теней: в обычном кадре число вершин отрицательное (three пропускает отрисовку,
+// draw call не тратится), на время отрисовки в карту теней - вся геометрия. Рисуются задние грани
+// (так three поступает с FrontSide в тенях), поэтому заменитель чуть крупнее детали не затеняет её саму.
+const SHADOW_ONLY = new THREE.MeshBasicMaterial({ colorWrite: false, depthWrite: false });
+function shadowCaster(geo, name) {
+  geo.setDrawRange(0, -1);
+  const m = new THREE.Mesh(geo, SHADOW_ONLY);
+  m.name = name;
+  m.matrixAutoUpdate = false;
+  m.castShadow = true;
+  m.receiveShadow = false;
+  m.onBeforeShadow = () => { geo.drawRange.count = Infinity; };
+  m.onAfterShadow = () => { geo.drawRange.count = -1; };
+  return m;
+}
+
 export function buildStructures(world) {
   const level = qualityLevel(world.quality);
-  const kit = new Kit(level);
+  const kit = new Kit(level, world.quality.shadow > 0);
   const root = new THREE.Group();
   root.name = 'structures';
   const ctx = {
@@ -57,9 +73,14 @@ export function buildStructures(world) {
   for (const g of kit.groups.values()) {
     const node = new THREE.Group();
     node.name = `st-${g.name}`;
-    const z = { g, node, solid: null, detail: null, far: null, extra: g.extra, near: g.nearDist === Infinity ? lod.near : g.nearDist, det: g.detailDist === Infinity ? lod.detail : g.detailDist, state: -1 };
+    const z = { g, node, solid: null, detail: null, far: null, shadow: null, extra: g.extra, near: g.nearDist === Infinity ? lod.near : g.nearDist, det: g.detailDist === Infinity ? lod.detail : g.detailDist, state: -1 };
     for (const [layer, b] of g.buckets) {
       if (!b.n) continue;
+      if (layer === 'shadow') {
+        z.shadow = shadowCaster(b.toShadowGeometry(), `${g.name}:shadow`);
+        node.add(z.shadow);
+        continue;
+      }
       const mesh = new THREE.Mesh(b.toGeometry(), mat);
       mesh.name = `${g.name}:${layer}`;
       mesh.matrixAutoUpdate = false;
@@ -76,6 +97,7 @@ export function buildStructures(world) {
       else if (layer === 'solid') z.solid = mesh;
       node.add(mesh);
     }
+    if (z.shadow && z.solid) z.solid.castShadow = false; // тень за него рисует заменитель
     for (const e of g.extra) node.add(e.obj);
     root.add(node);
     zones.push(z);
@@ -87,6 +109,7 @@ export function buildStructures(world) {
     portals: ctx.portals,
     zones,
     tris: kit.tris,
+    shadowTris: kit.shadowTris,
     update(dt, t) {
       for (const z of zones) {
         const d = Math.max(0, Math.hypot(cam.x - z.g.cx, cam.z - z.g.cz) - z.g.r);
@@ -94,6 +117,7 @@ export function buildStructures(world) {
         if (st === z.state) continue;
         z.state = st;
         if (z.solid) z.solid.visible = st > 0 || !z.far;
+        if (z.shadow) z.shadow.visible = st > 0 || !z.far;
         if (z.detail) z.detail.visible = st > 1;
         if (z.far) z.far.visible = st === 0;
         for (const e of z.extra) {

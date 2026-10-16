@@ -32,16 +32,18 @@ export function buildGazebo(ctx) {
       const w = (HW * 2) / blocks - 0.02;
       const c = new THREE.Color('#9a958c').multiplyScalar(0.85 + rand() * 0.25);
       const m = side % 2 === 0 ? T(t, FL / 2 - 0.04, side === 0 ? -HW : HW) : T(side === 1 ? HW : -HW, FL / 2 - 0.04, t, 0, Math.PI / 2, 0);
-      kit.box(w, FL - 0.02, 0.24, c, SURF.stone, m, { bevel: 0.04 });
+      kit.box(w, FL - 0.02, 0.24, c, SURF.stone, m, { bevel: 0.04, shadow: false });
     }
   }
+  // тень от цоколя с полом - одним бруском
+  kit.shadowOnly(new THREE.BoxGeometry(HW * 2 + 0.1, FL, HW * 2 + 0.1), T(0, FL / 2 - 0.02, 0));
   // настил: доски вдоль X с зазорами, обвязка по краю
   const plank = 0.15;
   const np = Math.floor((HW * 2) / plank);
   for (let i = 0; i < np; i++) {
     const z = -HW + (i + 0.5) * plank;
     const c = new THREE.Color(WOOD).multiplyScalar(0.84 + hash2(i, 5) * 0.26);
-    kit.box(HW * 2 - 0.1, 0.04, plank - 0.012, c, SURF.wood, T((hash2(i, 9) - 0.5) * 0.02, FL - 0.02, z), { bevel: 0.01 });
+    kit.box(HW * 2 - 0.1, 0.04, plank - 0.012, c, SURF.wood, T((hash2(i, 9) - 0.5) * 0.02, FL - 0.02, z), { bevel: 0.01, shadow: false });
   }
   for (let side = 0; side < 4; side++) {
     const m = side % 2 === 0 ? T(0, FL - 0.06, side === 0 ? -HW - 0.02 : HW + 0.02) : T(side === 1 ? HW + 0.02 : -HW - 0.02, FL - 0.06, 0, 0, Math.PI / 2, 0);
@@ -89,6 +91,7 @@ export function buildGazebo(ctx) {
   const balProf = [[0.03, 0], [0.03, 0.04], [0.021, 0.07], [0.036, 0.17], [0.018, 0.3], [0.04, 0.4], [0.02, 0.5], [0.03, 0.54], [0.03, RH - 0.12]];
   const balSeg = kit.seg(4, 6, 8);
   const balGeo = kit.q === 0 ? null : lathe(balProf, balSeg);
+  const balShadow = new THREE.BoxGeometry(0.045, RH - 0.12, 0.045).translate(0, (RH - 0.12) / 2, 0);
   for (const { side, a, b } of bays) {
     const len = b - a - 0.17, mid = (a + b) / 2;
     const fixed = side === 0 ? -HW + 0.1 : side === 1 ? HW - 0.1 : side === 2 ? HW - 0.1 : -HW + 0.1;
@@ -100,7 +103,7 @@ export function buildGazebo(ctx) {
     const nb = Math.max(2, Math.round(len / 0.16));
     for (let i = 0; i < nb; i++) {
       const x = -len / 2 + ((i + 0.5) / nb) * len;
-      if (balGeo) kit.add(balGeo, TRIM, SURF.paint, T(x, FL + 0.125, 0), { uv: (px, py) => [py, px] });
+      if (balGeo) kit.add(balGeo, TRIM, SURF.paint, T(x, FL + 0.125, 0), { uv: (px, py) => [py, px], shadow: balShadow });
       else kit.box(0.05, RH - 0.12, 0.05, TRIM, SURF.paint, T(x, FL + 0.125 + (RH - 0.12) / 2, 0));
     }
     kit.pop();

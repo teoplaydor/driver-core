@@ -3,6 +3,8 @@
 // узор) и координаты узора aPat. Буферы разложены по группам (зона: хаб, беседка, домик...) и слоям:
 //   solid  - крупное, отбрасывает тень;      detail - мелочь без тени (исчезает дальше detailDist);
 //   far    - упрощённая копия зоны вдали;    roof:* - отдельные меши крыш (контракт C5).
+//   shadow - упрощённые копии крупного (solid) только для карты теней: у каждой детали свой дешёвый
+//            заменитель (брусок без фасок, цилиндр в 6 граней, камень-икосаэдр), сам solid тень не отбрасывает.
 // В итоге группа - 1-3 draw call одним материалом. Видимость слоёв переключается по расстоянию до камеры.
 
 import * as THREE from 'three';
@@ -46,6 +48,15 @@ const _box = new THREE.Box3();
 class Bucket {
   constructor() { this.pos = []; this.nrm = []; this.col = []; this.mat = []; this.pat = []; this.idx = []; this.n = 0; }
 
+  // только позиции и индексы (карта теней)
+  toShadowGeometry() {
+    const g = new THREE.BufferGeometry();
+    g.setAttribute('position', new THREE.Float32BufferAttribute(this.pos, 3));
+    g.setIndex(this.n > 65535 ? new THREE.Uint32BufferAttribute(this.idx, 1) : new THREE.Uint16BufferAttribute(this.idx, 1));
+    g.computeBoundingSphere();
+    return g;
+  }
+
   toGeometry() {
     const g = new THREE.BufferGeometry();
     g.setAttribute('position', new THREE.Float32BufferAttribute(this.pos, 3));
@@ -69,8 +80,11 @@ export function groundAO(wx, wy, wz, nx, ny) {
 
 export class Kit {
   // q: 0 - low, 1 - medium, 2 - high
-  constructor(q = 2) {
+  // shadows - строить ли заменители для карты теней (на low теней нет)
+  constructor(q = 2, shadows = true) {
     this.q = q;
+    this.shadows = shadows;
+    this.shadowTris = 0;
     this.groups = new Map();
     this.cur = null;
     this.layer = 'solid';
@@ -120,10 +134,13 @@ export class Kit {
   // geo - three-геометрия в локальных координатах детали; xf - Matrix4 детали (поверх текущей рамки).
   // color: hex | Color | fn(lx, ly, lz, nx, ny, nz, out, wx, wy, wz); surf: [r, m, e, pat];
   // uv: 'box' (метры, вдоль длинной оси) | 'keep' (из geo.uv) | fn(lx, ly, lz, nx, ny, nz) -> [u, v];
-  // layer - слой (по умолчанию текущий); bake: false - без затенения группы.
+  // layer - слой (по умолчанию текущий); bake: false - без затенения группы;
+  // shadow - заменитель для карты теней (геометрия | false), по умолчанию geo.userData.shadow или сама geo.
   add(geo, color = '#ffffff', surf = SURF.plain, xf = null, opts = {}) {
     const m = xf ? this.frame.clone().multiply(xf) : this.frame;
-    const b = this._bucket(opts.layer || this.layer);
+    const layer = opts.layer || this.layer;
+    if (layer === 'solid' && this.shadows && opts.shadow !== false) this._shadow(opts.shadow || geo.userData.shadow || geo, m);
+    const b = this._bucket(layer);
     const P = geo.getAttribute('position');
     if (!geo.getAttribute('normal')) geo.computeVertexNormals();
     const N = geo.getAttribute('normal');
@@ -188,24 +205,55 @@ export class Kit {
     return this;
   }
 
+  // Заменитель для тени: позиции в мировых координатах в слой 'shadow' текущей группы.
+  _shadow(geo, m) {
+    if (!this.shadows) return this;
+    const b = this._bucket('shadow');
+    const P = geo.getAttribute('position');
+    const base = b.n, e = m.elements;
+    for (let i = 0; i < P.count; i++) {
+      const x = P.getX(i), y = P.getY(i), z = P.getZ(i);
+      b.pos.push(e[0] * x + e[4] * y + e[8] * z + e[12], e[1] * x + e[5] * y + e[9] * z + e[13], e[2] * x + e[6] * y + e[10] * z + e[14]);
+    }
+    const I = geo.index;
+    if (I) { for (let i = 0; i < I.count; i++) b.idx.push(base + I.getX(i)); this.shadowTris += I.count / 3; } else { for (let i = 0; i < P.count; i++) b.idx.push(base + i); this.shadowTris += P.count / 3; }
+    b.n += P.count;
+    return this;
+  }
+
+  // Только тень (без видимой геометрии): xf поверх текущей рамки.
+  shadowOnly(geo, xf) { return this._shadow(geo, xf ? this.frame.clone().multiply(xf) : this.frame); }
+
   // ---------- удобные детали ----------
 
   // Брусок с фаской (на low - простой). w x h x d, центр в начале координат детали.
   box(w, h, d, color, surf, xf, opts = {}) {
     const bev = opts.bevel ?? Math.min(0.02, Math.min(w, h, d) * 0.18);
-    const g = this.q === 0 || bev <= 0 || opts.sharp ? new THREE.BoxGeometry(w, h, d) : bevelBox(w, h, d, bev);
-    return this.add(g, color, surf, xf, opts);
+    const plain = this.q === 0 || bev <= 0 || opts.sharp;
+    const g = plain ? boxGeo(w, h, d) : bevelBox(w, h, d, bev);
+    return this.add(g, color, surf, xf, { shadow: plain ? g : boxGeo(w, h, d), ...opts });
   }
 
   cyl(rt, rb, h, color, surf, xf, opts = {}) {
     const seg = opts.seg ?? this.seg(6, 8, 12);
-    return this.add(new THREE.CylinderGeometry(rt, rb, h, seg, opts.hseg ?? 1, !!opts.open), color, surf, xf, { uv: cylUV, ...opts });
+    const g = new THREE.CylinderGeometry(rt, rb, h, seg, opts.hseg ?? 1, !!opts.open);
+    const sh = seg <= 6 && !opts.hseg ? g : new THREE.CylinderGeometry(rt, rb, h, Math.min(seg, 6), 1, !!opts.open);
+    return this.add(g, color, surf, xf, { uv: cylUV, shadow: sh, ...opts });
   }
 
   sphere(r, color, surf, xf, opts = {}) {
     const ws = opts.seg ?? this.seg(6, 8, 12);
-    return this.add(new THREE.SphereGeometry(r, ws, Math.max(3, Math.round(ws * 0.7))), color, surf, xf, opts);
+    return this.add(new THREE.SphereGeometry(r, ws, Math.max(3, Math.round(ws * 0.7))), color, surf, xf, { shadow: new THREE.IcosahedronGeometry(r, 0), ...opts });
   }
+}
+
+// Простые бруски одного размера часто повторяются - кэш.
+const _boxes = new Map();
+function boxGeo(w, h, d) {
+  const k = `${w.toFixed(4)},${h.toFixed(4)},${d.toFixed(4)}`;
+  let g = _boxes.get(k);
+  if (!g) { g = new THREE.BoxGeometry(w, h, d); _boxes.set(k, g); }
+  return g;
 }
 
 // uv цилиндра: u - вдоль оси Y (длина), v - по окружности (метры)
@@ -391,6 +439,8 @@ export function addLog(kit, len, r, xf, { bark = '#7a5232', barkDark = '#4a3020'
   const parts = logParts(len, r, { seg: seg ?? kit.seg(7, 9, 12), rings: rings ?? kit.seg(2, 4, 6), seed, flat, bend });
   const bc = new THREE.Color(bark), bd = new THREE.Color(barkDark), wc = new THREE.Color(wood), charC = new THREE.Color('#1c1612');
   const flatY = r * (1 - flat);
+  const proxy = new THREE.CylinderGeometry(r * 0.96, r * 0.96, len, 6, 1).rotateZ(Math.PI / 2);
+  if (bend) proxy.translate(0, bend * 0.6, 0);
   kit.add(parts.side, (x, y, z, nx, ny, nz, out) => {
     const a = Math.atan2(z, y);
     const n = hash2(Math.round(a * 3 + seed), Math.round(x * 2), seed);
@@ -401,7 +451,7 @@ export function addLog(kit, len, r, xf, { bark = '#7a5232', barkDark = '#4a3020'
       const k = smoothstep(1 - char, 1 - char * 0.4, t);
       out.lerp(charC, k * 0.92);
     }
-  }, SURF.bark, xf, { uv: (x, y, z) => [x, Math.atan2(z, y) * r], layer });
+  }, SURF.bark, xf, { uv: (x, y, z) => [x, Math.atan2(z, y) * r], layer, shadow: proxy });
   for (const cap of [parts.capA, parts.capB]) {
     const end = cap === parts.capB;
     const rim = cap.userData.rim;
@@ -409,12 +459,12 @@ export function addLog(kit, len, r, xf, { bark = '#7a5232', barkDark = '#4a3020'
       const rr = Math.hypot(y, z);
       if (rr > rim * 0.97) out.copy(bd); else out.copy(wc);
       if (char > 0 && end) out.lerp(charC, 0.85);
-    }, SURF.rings, xf, { uv: (x, y, z) => [y, z], layer });
+    }, SURF.rings, xf, { uv: (x, y, z) => [y, z], layer, shadow: false });
   }
 }
 
 // Сглаженный камень: шумный икосаэдр с плоским низом. Индексированный.
-export function stoneGeo(r, seed, detail = 1, flatBottom = 0.35, squash = 0.75) {
+export function stoneGeo(r, seed, detail = 1, flatBottom = 0.35, squash = 0.75, proxy = true) {
   const g = new THREE.IcosahedronGeometry(1, detail);
   // склеиваем вершины (Icosahedron без индекса)
   const P = g.getAttribute('position');
@@ -441,6 +491,7 @@ export function stoneGeo(r, seed, detail = 1, flatBottom = 0.35, squash = 0.75) 
   out.computeVertexNormals();
   out.computeBoundingBox();
   out.translate(0, -out.boundingBox.min.y, 0); // низ на y = 0
+  if (proxy && detail > 0) out.userData.shadow = stoneGeo(r * 0.97, seed, 0, flatBottom, squash, false);
   return out;
 }
 

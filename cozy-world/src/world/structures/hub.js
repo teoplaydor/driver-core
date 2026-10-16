@@ -563,9 +563,10 @@ function heroTree(ctx) {
     }
   }
   const warm = ['#ffd38a', '#ffc070', '#ffe2a8', '#ffb35c'];
+  const bulbGeo = kit.q > 1 ? new THREE.SphereGeometry(0.055, 7, 5) : new THREE.IcosahedronGeometry(0.055, 0);
   bulbs.forEach((p, i) => {
-    kit.add(new THREE.SphereGeometry(0.055, kit.seg(5, 6, 8), kit.seg(4, 4, 6)), warm[i % 4], glow(3.2, PAT.plain), T(p.x, p.y - 0.06, p.z, 0, 0, 0, 1, 1.25, 1), { bake: false });
-    kit.cyl(0.02, 0.02, 0.04, '#3a3530', SURF.plain, T(p.x, p.y - 0.005, p.z), { seg: 5, bake: false });
+    kit.add(bulbGeo, warm[i % 4], glow(3.2, PAT.plain), T(p.x, p.y - 0.06, p.z, 0, 0, 0, 1, 1.25, 1), { bake: false });
+    if (kit.q > 1) kit.cyl(0.02, 0.02, 0.04, '#3a3530', SURF.plain, T(p.x, p.y - 0.005, p.z), { seg: 5, bake: false });
   });
 
   // скворечник на стволе (смотрит на хаб)
@@ -592,7 +593,7 @@ function heroTree(ctx) {
 const CELL = 48;
 function pathGroup(kit, x, z) {
   const ix = Math.floor(x / CELL), iz = Math.floor(z / CELL);
-  return kit.group(`path:${ix},${iz}`, { cx: (ix + 0.5) * CELL, cz: (iz + 0.5) * CELL, r: CELL * 0.72, detailDist: 1e9 });
+  return kit.group(`path:${ix},${iz}`, { cx: (ix + 0.5) * CELL, cz: (iz + 0.5) * CELL, r: CELL * 0.72, detailDist: 22 });
 }
 
 export function lantern(ctx, lx, lz, { h = 2.25, seed = 1, base = true } = {}) {
@@ -600,46 +601,52 @@ export function lantern(ctx, lx, lz, { h = 2.25, seed = 1, base = true } = {}) {
   const y = heightAt(lx, lz);
   const rand = mulberry32(seed);
   const iron = '#2e3034', ironL = '#44474d';
+  const layer0 = kit.layer;
   kit.push(T(lx, y, lz, 0, rand() * TAU, 0));
   // основание: тумба из камня и пара камней
   if (base) {
     kit.box(0.32, 0.26, 0.32, '#8d8a84', SURF.stone, T(0, 0.11, 0), { bevel: 0.04 });
-    kit.box(0.22, 0.06, 0.22, '#77746e', SURF.stone, T(0, 0.27, 0), { bevel: 0.015 });
+    kit.box(0.22, 0.06, 0.22, '#77746e', SURF.stone, T(0, 0.27, 0), { bevel: 0.015, shadow: false });
     if (kit.q > 0) {
+      kit.setLayer('detail');
       for (let i = 0; i < 3; i++) {
         const a = (i / 3) * TAU + rand(), r = 0.3 + rand() * 0.08;
         kit.add(stoneGeo(0.07 + rand() * 0.05, seed * 7 + i, 0, 0.4, 0.7), stoneColor('#8e8b84', seed + i), SURF.mossy, T(Math.cos(a) * r, -0.02, Math.sin(a) * r));
       }
+      kit.setLayer(layer0);
     }
   }
   // кованый столб: квадратный с фаской, кольца-воротники, завитки под фонарём
   kit.box(0.065, h - 0.3, 0.065, iron, SURF.iron, T(0, 0.3 + (h - 0.3) / 2, 0), { bevel: 0.012 });
-  kit.cyl(0.055, 0.06, 0.06, ironL, SURF.iron, T(0, 0.33, 0), { seg: kit.seg(6, 8, 8) });
-  kit.cyl(0.05, 0.045, 0.05, ironL, SURF.iron, T(0, h - 0.12, 0), { seg: kit.seg(6, 8, 8) });
+  // фонарь: шестигранник - дно, рамка, стёкла, огонёк, крыша с навершием
+  const hy = h;
+  kit.cyl(0.13, 0.11, 0.05, iron, SURF.iron, T(0, hy, 0), { seg: 6, shadow: false });
+  kit.cyl(0.14, 0.14, 0.32, '#ffd9a0', glow(1.0, PAT.glass), T(0, hy + 0.19, 0), { seg: 6, open: true, shadow: new THREE.CylinderGeometry(0.13, 0.13, 0.4, 6) });
+  for (let i = 0; i < 6; i++) {
+    const a = (i / 6) * TAU;
+    kit.box(0.022, 0.34, 0.022, iron, SURF.iron, T(Math.cos(a) * 0.14, hy + 0.19, Math.sin(a) * 0.14, 0, -a, 0), { sharp: kit.q < 2, bevel: 0.004, shadow: false });
+  }
+  kit.add(new THREE.SphereGeometry(0.06, kit.seg(5, 5, 8), 4), '#ffe2b0', glow(4.2, PAT.plain, true), T(0, hy + 0.16, 0, 0, 0, 0, 1, 1.5, 1), { shadow: false });
+  kit.add(new THREE.ConeGeometry(0.21, 0.15, 6, 1), iron, SURF.iron, T(0, hy + 0.43, 0));
+  kit.cyl(0.15, 0.15, 0.025, ironL, SURF.iron, T(0, hy + 0.36, 0), { seg: 6, shadow: false });
+  // мелочь - только вблизи
+  kit.setLayer('detail');
+  kit.cyl(0.055, 0.06, 0.06, ironL, SURF.iron, T(0, 0.33, 0), { seg: kit.seg(6, 6, 8) });
+  kit.cyl(0.05, 0.045, 0.05, ironL, SURF.iron, T(0, h - 0.12, 0), { seg: kit.seg(6, 6, 8) });
   if (kit.q > 0) {
     for (const s of [-1, 1]) {
       const pts = [];
-      for (let i = 0; i <= 10; i++) {
-        const t = i / 10, a = t * Math.PI * 1.6;
+      for (let i = 0; i <= 8; i++) {
+        const t = i / 8, a = t * Math.PI * 1.6;
         pts.push(new THREE.Vector3(s * (0.03 + Math.sin(a) * 0.09 * (1 - t * 0.5)), h - 0.5 + t * 0.32 + Math.cos(a) * 0.04, 0));
       }
-      kit.add(tube(pts, 0.011, 4, true), iron, SURF.iron, null);
+      kit.add(tube(pts, 0.011, kit.seg(3, 3, 4), true), iron, SURF.iron, null);
     }
   }
-  // фонарь: шестигранник - дно, рамка, стёкла, огонёк, крыша с навершием
-  const hy = h;
-  kit.cyl(0.13, 0.11, 0.05, iron, SURF.iron, T(0, hy, 0), { seg: 6 });
-  kit.cyl(0.14, 0.14, 0.32, '#ffd9a0', glow(1.0, PAT.glass), T(0, hy + 0.19, 0), { seg: 6, open: true });
-  for (let i = 0; i < 6; i++) {
-    const a = (i / 6) * TAU;
-    kit.box(0.022, 0.34, 0.022, iron, SURF.iron, T(Math.cos(a) * 0.14, hy + 0.19, Math.sin(a) * 0.14, 0, -a, 0), { bevel: 0.004 });
-  }
-  kit.add(new THREE.SphereGeometry(0.06, kit.seg(5, 6, 8), 4), '#ffe2b0', glow(4.2, PAT.plain, true), T(0, hy + 0.16, 0, 0, 0, 0, 1, 1.5, 1));
   kit.cyl(0.02, 0.025, 0.06, '#f4ead8', SURF.plain, T(0, hy + 0.06, 0), { seg: 5 });
-  kit.add(new THREE.ConeGeometry(0.21, 0.15, 6, 1), iron, SURF.iron, T(0, hy + 0.43, 0));
-  kit.cyl(0.15, 0.15, 0.025, ironL, SURF.iron, T(0, hy + 0.36, 0), { seg: 6 });
   kit.sphere(0.03, ironL, SURF.iron, T(0, hy + 0.53, 0), { seg: 6 });
-  kit.add(new THREE.TorusGeometry(0.03, 0.008, 4, 8), iron, SURF.iron, T(0, hy + 0.58, 0));
+  if (kit.q > 1) kit.add(new THREE.TorusGeometry(0.03, 0.008, 4, 8), iron, SURF.iron, T(0, hy + 0.58, 0));
+  kit.setLayer(layer0);
   kit.pop();
   col.addCircle(lx, lz, 0.17, y - 0.3, y + h + 0.6);
   ctx.exclude?.(lx, lz, 0.35);
