@@ -35,6 +35,8 @@ export class UI {
     this.pauseEl = $('pause');
     this.micEl = $('mic');
     this.fadeEl = $('fade');
+    this.tlabel = $('tlabel');
+    this._tlKey = '';
     this._hintKey = '';
     this._toastT = 0;
     this.onPlay = null;
@@ -195,6 +197,31 @@ export class UI {
   }
 
   setCrosshairHot(v) { this.crosshair.classList.toggle('hot', v); }
+
+  // WS6: подпись над целью в виде сверху (x, y — точка над целью в CSS-пикселях); text = null — скрыть.
+  setTargetLabel(text, key, x, y) {
+    const el = this.tlabel;
+    if (!el) return;
+    if (!text) { if (!el.hidden) el.hidden = true; return; }
+    const k = `${key}|${text}`;
+    if (k !== this._tlKey) {
+      this._tlKey = k;
+      const kb = document.createElement('kbd');
+      kb.textContent = key;
+      el.replaceChildren(kb, document.createTextNode(text));
+    }
+    el.style.transform = `translate(${x.toFixed(1)}px, ${y.toFixed(1)}px) translate(-50%, -100%)`;
+    if (el.hidden) el.hidden = false;
+  }
+
+  // WS6: режим камеры (C1) — кнопка 📷 подсвечена в виде сверху.
+  setCameraMode(mode) {
+    for (const b of document.querySelectorAll('.tmini [data-act="view"]')) {
+      b.classList.toggle('on', mode === 'top');
+      b.setAttribute('aria-label', mode === 'top' ? 'Камера: от первого лица' : 'Камера: вид сверху');
+    }
+    if (mode !== 'top') this.setTargetLabel(null);
+  }
   setRoom(code) { $('roomcode').textContent = code; }
   setCount(n) { $('count').textContent = `${n} в сети`; }
 
@@ -207,7 +234,7 @@ export class UI {
 
   showHelp(isTouch) {
     if (isTouch) { this.help.hidden = true; return; }
-    const rows = [['WASD', 'ходить'], ['Shift', 'бежать'], ['Пробел', 'прыжок'], ['E', 'взять / использовать'], ['Q', 'бросить (держи — сильнее)'], ['X', 'помахать'], ['V', 'микрофон'], ['T', 'чат'], ['C', 'вид от 3-го лица'], ['M', 'звук вкл/выкл'], ['Tab', 'кто в комнате']];
+    const rows = [['WASD', 'ходить'], ['Shift', 'бежать'], ['Пробел', 'прыжок'], ['E', 'взять / использовать'], ['Q', 'бросить (держи — сильнее)'], ['X', 'помахать'], ['V', 'микрофон'], ['T', 'чат'], ['C', 'камера: 1-е лицо → 3-е → сверху'], ['M', 'звук вкл/выкл'], ['Tab', 'кто в комнате']];
     this.help.hidden = false;
     this.help.style.opacity = '1';
     this.help.innerHTML = rows.map(([k, t]) => `<div><kbd>${k}</kbd>${t}</div>`).join('');

@@ -169,6 +169,31 @@ kbd {
   text-shadow: 0 2px 0 rgba(30, 20, 40, 0.6), 0 0 8px rgba(30, 20, 40, 0.45);
 }
 #hints div { display: flex; align-items: center; gap: 10px; }
+/* WS6: подпись над целью в виде сверху (позицию ставит ui.setTargetLabel каждый кадр) */
+#tlabel {
+  left: 0; top: 0;
+  display: flex; align-items: center; gap: 7px;
+  padding: 3px 13px 3px 4px; margin-top: -10px;
+  background: rgba(255, 244, 223, 0.94);
+  border: 3px solid #fff; border-radius: 999px;
+  box-shadow: 0 3px 0 rgba(120, 80, 40, 0.18), 0 6px 16px rgba(40, 25, 10, 0.25);
+  font-size: 16px; font-weight: 800; line-height: 1.2; color: var(--ink);
+  white-space: nowrap;
+  will-change: transform;
+  animation: tlabel-in 0.18s ease-out;
+}
+#tlabel::after {
+  content: ''; position: absolute; left: 50%; bottom: -9px; margin-left: -7px;
+  border: 7px solid transparent; border-top-color: #fff; border-bottom: 0;
+}
+#tlabel kbd {
+  min-width: 26px; height: 26px; padding: 0 5px; line-height: 22px;
+  border: 0; border-radius: 999px;
+  background: var(--orange); color: #fff; font-size: 14px;
+  box-shadow: inset 0 -2px 0 rgba(120, 50, 0, 0.25);
+}
+@keyframes tlabel-in { from { opacity: 0; } to { opacity: 1; } }
+body.cam-top #crosshair { display: none; }
 #chatlog {
   left: calc(14px + var(--safe-l)); bottom: calc(68px + var(--safe-b));
   width: min(420px, 62vw);
@@ -223,6 +248,7 @@ kbd {
 #touch { position: fixed; inset: 0; pointer-events: none; touch-action: none; }
 #touch > * { pointer-events: auto; position: absolute; touch-action: none; }
 #lookpad { right: 0; top: 0; width: 62%; height: 100%; }
+body.cam-top #lookpad { width: 100%; } /* WS6: вид сверху — тап и поворот по всему экрану (джойстик и кнопки выше) */
 #joy {
   left: calc(24px + var(--safe-l)); bottom: calc(26px + var(--safe-b));
   width: 132px; height: 132px; border-radius: 50%;
