@@ -205,9 +205,9 @@ function benches(ctx) {
   }
 }
 
-export function plankBench(ctx, px, pz, ry, seed, { len = 1.7, color = '#b07a48' } = {}) {
+export function plankBench(ctx, px, pz, ry, seed, { len = 1.7, color = '#b07a48', y0 = null } = {}) {
   const { kit, col } = ctx;
-  const gy = heightAt(px, pz);
+  const gy = y0 ?? heightAt(px, pz);
   const rand = mulberry32(seed);
   const H = 0.44;
   kit.push(T(px, gy, pz, 0, ry, 0));
@@ -652,14 +652,15 @@ export function lantern(ctx, lx, lz, { h = 2.25, seed = 1, base = true } = {}) {
   ctx.exclude?.(lx, lz, 0.35);
 }
 
-function fenceRun(ctx, pts, seed) {
-  // pts: точки линии забора [[x, z], ...]; столбы на точках, две жерди между ними
+// pts: точки линии забора [[x, z], ...]; столбы на точках, две жерди между ними.
+// group - имя группы кита (по умолчанию - ячейка троп по положению столба).
+export function fenceRun(ctx, pts, seed, group = null) {
   const { kit, col } = ctx;
   const rand = mulberry32(seed);
   for (let i = 0; i < pts.length; i++) {
     const [x, z] = pts[i];
     const y = heightAt(x, z);
-    pathGroup(kit, x, z);
+    if (group) kit.group(group); else pathGroup(kit, x, z);
     kit.box(0.1, 1.0, 0.1, new THREE.Color('#7a5434').multiplyScalar(0.85 + rand() * 0.25), SURF.wood, T(x, y + 0.45, z, (rand() - 0.5) * 0.06, rand() * 3, (rand() - 0.5) * 0.06), { bevel: 0.02 });
     kit.add(new THREE.ConeGeometry(0.075, 0.08, 4), '#6a482c', SURF.wood, T(x, y + 0.98, z, 0, Math.PI / 4, 0));
     if (i === 0) continue;

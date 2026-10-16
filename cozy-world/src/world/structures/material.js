@@ -10,6 +10,7 @@ import { NATURE, GLSL_NOISE } from '../nature/shared.js';
 export const PAT = {
   plain: 0, wood: 1, planks: 2, brick: 3, bark: 4, stone: 5, shingle: 6, rings: 7, fabric: 8, gingham: 9,
   label: 10, straw: 11, snow: 12, metal: 13, padded: 14, glass: 15, mossy: 16, ash: 17,
+  masonry: 18, wallpaper: 19, tiles: 20, mats: 21, stripes: 22, soil: 23,
 };
 export const FLICKER = 32;
 
@@ -192,22 +193,82 @@ vec3 cozyPattern(float pat, vec2 p, vec3 base, vec3 wp, vec3 wn, float fwp) {
     float aa = 1.0 - smoothstep(0.01, 0.04, fwp);
     return base * mix(0.95, (0.84 + 0.18 * puff) * (1.0 - seam * 0.22), aa);
   }
-  if (pat > 15.5 && pat < 16.5) { // камень с мхом сверху
+  if (pat < 15.5) { // стекло: отражение неба по высоте и косой блик
+    float g = smoothstep(-0.2, 1.2, fract(p.y * 0.25 + p.x * 0.12));
+    float streak = smoothstep(0.08, 0.0, abs(fract((p.x + p.y * 0.6) * 0.9) - 0.5) - 0.12);
+    return base * (0.75 + 0.35 * g) + vec3(0.06, 0.08, 0.1) * streak;
+  }
+  if (pat < 16.5) { // камень с мхом сверху
     float n = sFbm(wp.xz * 2.6 + wp.y * 1.7);
     float n2 = nzValue(wp.xz * 9.0 - wp.y * 6.0);
     vec3 c = base * (0.8 + 0.3 * n) * (0.94 + 0.12 * n2);
     float moss = smoothstep(0.55, 0.9, wn.y) * smoothstep(0.55, 0.75, nzValue(wp.xz * 1.7 + 4.0));
     return mix(c, vec3(0.2, 0.32, 0.12) * (0.8 + 0.4 * n2), moss * 0.6);
   }
-  if (pat > 16.5) { // зола: серые пятна, тёмные угольки
+  if (pat < 17.5) { // зола: серые пятна, тёмные угольки
     float n = sFbm(wp.xz * 5.0);
     float n2 = nzValue(wp.xz * 23.0);
     return base * (0.7 + 0.5 * n) * (0.85 + 0.3 * n2);
   }
-  // стекло: отражение неба по высоте и косой блик
-  float g = smoothstep(-0.2, 1.2, fract(p.y * 0.25 + p.x * 0.12)) ;
-  float streak = smoothstep(0.08, 0.0, abs(fract((p.x + p.y * 0.6) * 0.9) - 0.5) - 0.12);
-  return base * (0.75 + 0.35 * g) + vec3(0.06, 0.08, 0.1) * streak;
+  if (pat < 18.5) { // бутовая кладка: округлые камни разного размера и швы раствора
+    vec2 q = p / vec2(0.34, 0.22);
+    float row = floor(q.y);
+    q.x += nzHash(vec2(row, 7.0)) * 3.0 + mod(row, 2.0) * 0.5;
+    vec2 id = floor(q), f = fract(q);
+    // сдвиг границы камней шумом - неровные края
+    float wob = (nzValue(p * 9.0) - 0.5) * 0.28;
+    vec2 e = min(f, 1.0 - f) + wob;
+    float d = min(e.x * 0.34, e.y * 0.22);
+    float aa = 1.0 - smoothstep(0.004, 0.015, fwp);
+    float stone = smoothstep(0.006, 0.02, d);
+    float tone = 0.72 + 0.4 * nzHash(id + 3.0);
+    vec3 sc = base * tone * (0.88 + 0.2 * nzValue(p * 30.0)) * (0.85 + 0.15 * smoothstep(0.0, 0.06, d));
+    sc = mix(sc, sc * vec3(1.08, 1.0, 0.9), step(0.7, nzHash(id + 9.0)));
+    vec3 mortar = vec3(0.56, 0.53, 0.49) * (0.85 + 0.15 * nzValue(p * 40.0));
+    return mix(mix(mortar, base * 0.85, 0.75), mix(mortar, sc, stone), aa);
+  }
+  if (pat < 19.5) { // обои: тонкие вертикальные полосы и мелкий цветочный раппорт
+    float aa = 1.0 - smoothstep(0.003, 0.012, fwp);
+    float st = smoothstep(0.42, 0.5, abs(fract(p.x / 0.16) - 0.5));
+    vec2 c = fract(vec2(p.x / 0.16 + 0.5, p.y / 0.2 + mod(floor(p.x / 0.16), 2.0) * 0.5)) - 0.5;
+    float fl = smoothstep(0.17, 0.11, length(c * vec2(1.0, 1.25)));
+    vec3 c1 = base * (1.0 - 0.07 * st * aa);
+    return mix(c1, base * vec3(0.86, 0.78, 0.74), fl * 0.55 * aa);
+  }
+  if (pat < 20.5) { // плитка: квадраты 0.15 с белыми швами
+    vec2 f = fract(p / 0.15);
+    vec2 id = floor(p / 0.15);
+    float e = min(min(f.x, 1.0 - f.x), min(f.y, 1.0 - f.y)) * 0.15;
+    float aa = 1.0 - smoothstep(0.003, 0.01, fwp);
+    float grout = 1.0 - smoothstep(0.002, 0.005, e);
+    vec3 c = base * (0.92 + 0.12 * nzHash(id + 1.0));
+    return mix(base, mix(c, vec3(0.9, 0.88, 0.84), grout), aa);
+  }
+  if (pat < 21.5) { // маты 2 x 1 м: мягкие края и швы
+    vec2 q = p / vec2(2.0, 1.0);
+    q.x += mod(floor(q.y), 2.0) * 0.5;
+    vec2 f = fract(q);
+    vec2 e = min(f, 1.0 - f) * vec2(2.0, 1.0);
+    float d = min(e.x, e.y);
+    float aa = 1.0 - smoothstep(0.01, 0.04, fwp);
+    float edge = smoothstep(0.0, 0.07, d);
+    float seam = 1.0 - smoothstep(0.004, 0.012, d);
+    vec3 c = base * mix(0.78, 1.0, edge) * (0.97 + 0.05 * nzValue(p * 13.0));
+    return mix(base * 0.93, c * (1.0 - seam * 0.45), aa);
+  }
+  if (pat < 22.5) { // полосатая ткань (маркиза): широкие полосы вдоль v
+    float s = step(0.5, fract(p.x / 0.32));
+    float aa = 1.0 - smoothstep(0.02, 0.08, fwp);
+    vec3 c = mix(base, vec3(0.96, 0.94, 0.88), s);
+    return mix(mix(base, vec3(0.96, 0.94, 0.88), 0.5), c, aa) * (0.95 + 0.06 * nzValue(p * 60.0));
+  }
+  if (pat < 23.5) { // земля грядки: комья и борозды
+    float n = sFbm(wp.xz * 3.0);
+    float n2 = nzValue(wp.xz * 17.0);
+    float fur = sin(p.x * 9.0) * 0.5 + 0.5;
+    return base * (0.7 + 0.35 * n) * (0.85 + 0.25 * n2) * (0.82 + 0.25 * fur);
+  }
+  return base;
 }
 `;
 

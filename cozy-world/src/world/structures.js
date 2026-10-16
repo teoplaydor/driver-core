@@ -56,15 +56,21 @@ export function buildStructures(world) {
     exclude: (x, z, r) => world.excludeNature?.(x, z, r),
   };
 
-  buildHub(ctx);
-  buildPaths(ctx);
-  buildGazebo(ctx);
-  buildPier(ctx);
-  buildCabin(ctx);
-  buildFarm(ctx);
-  const apt = buildBlock(ctx);
-  buildArena(ctx);
-  buildInterior(ctx, apt);
+  // каждый сборщик должен вернуть стек рамок кита в исходное состояние
+  const step = (name, fn) => {
+    const r = fn();
+    if (kit.stack.length !== 1) { console.warn(`structures: ${name} оставил ${kit.stack.length - 1} рамок`); kit.stack.length = 1; }
+    return r;
+  };
+  step('hub', () => buildHub(ctx));
+  step('paths', () => buildPaths(ctx));
+  step('gazebo', () => buildGazebo(ctx));
+  step('pier', () => buildPier(ctx));
+  step('cabin', () => buildCabin(ctx));
+  step('farm', () => buildFarm(ctx));
+  const apt = step('block', () => buildBlock(ctx));
+  step('arena', () => buildArena(ctx));
+  step('interior', () => buildInterior(ctx, apt));
 
   // склейка: группа -> меши слоёв одним материалом
   const mat = structureMaterial();
@@ -98,6 +104,9 @@ export function buildStructures(world) {
       node.add(mesh);
     }
     if (z.shadow && z.solid) z.solid.castShadow = false; // тень за него рисует заменитель
+    // группа, собранная в своих координатах (лодка качается на воде): узел ставим в точку опоры
+    if (g.pivot) { node.position.set(g.pivot.x, g.pivot.y, g.pivot.z); node.rotation.y = g.pivot.ry || 0; }
+    if (g.onNode) g.onNode(node, z);
     for (const e of g.extra) node.add(e.obj);
     root.add(node);
     zones.push(z);
