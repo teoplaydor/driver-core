@@ -42,6 +42,7 @@ export class TopCamera {
     this._turnTo = null; // куда отворачиваемся от такой стены
     this.autoYaw = 0; // накопленный автоповорот — player.js держит по нему направление джойстика, пока тот нажат
     this.userT = 0; // пользователь только что крутил камеру — автоповорот не вмешивается
+    this.extra = []; // доп. препятствия в формате коллизий (крыши закрытых домов — ставит top-view.js)
     this.fov = 50;
     this._snap = true;
     this.justSnapped = false; // в этом кадре камера встала на место без сглаживания (вход в режим, телепорт)
@@ -224,6 +225,10 @@ export class TopCamera {
       } else if (o.r < 1.1 || o.y1 < fy - 0.2) return; // стволы тонкие — их прячет растворение листвы (C4)
       c.push(o);
     });
+    for (const o of this.extra) {
+      if (o.y1 < fy - 0.2 || Math.abs(fx - o.x) > r + o.hx || Math.abs(fz - o.z) > r + o.hz) continue;
+      c.push(o);
+    }
   }
 
   // Свободна ли линия фокус -> камера (рельеф и выбранные препятствия).

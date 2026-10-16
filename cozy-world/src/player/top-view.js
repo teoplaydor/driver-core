@@ -766,6 +766,8 @@ export class TopView {
         // внутрь не зайти, а без крыши видна пустая коробка — такую крышу не прячем (персонажа за домом
         // всё равно закрыли бы стены)
         r.closed = this._closed(r);
+        // для камеры такая крыша — препятствие (как стены в коллизиях): за домом камера поднимается круче
+        r.obs = r.closed ? { type: 1, x: (r.min.x + r.max.x) / 2, z: (r.min.z + r.max.z) / 2, hx: (r.max.x - r.min.x) / 2, hz: (r.max.z - r.min.z) / 2, c: 1, s: 0, y0: r.min.y, y1: r.max.y, solid: true } : null;
         // плавное растворение — полупрозрачной копией материала (с теми же патчами шейдера)
         const mk = (m) => {
           const c = m.clone();
@@ -780,6 +782,7 @@ export class TopView {
       }
       list.push(r);
     });
+    this.game.player.topCam.extra = list.filter((r) => r.obs).map((r) => r.obs);
     if (!fresh.length) return;
     // прогрев шейдеров копий, чтобы первое растворение не подвисало
     const tmp = new THREE.Group();
@@ -808,8 +811,9 @@ export class TopView {
       if (r.closed) { if (r.k !== 1) this._roofAlpha(r, 1); continue; }
       const a = r.area, m = 0.25;
       const under = p.x > a.x0 - m && p.x < a.x1 + m && p.z > a.z0 - m && p.z < a.z1 + m && p.y + 0.6 < r.max.y;
-      // крыша между камерой и игроком (стоим за беседкой) или над землёй перед ним (камера над самой крышей) — тоже прячем
-      const between = !under && (this._segRoof(cam, p.x, p.y + 1.1, p.z, r) || this._segRoof(cam, nx, p.y + 0.3, nz, r));
+      // навес между камерой и игроком (стоим за беседкой) или над землёй перед ним (камера над самой крышей) — тоже
+      // прячем; крышу зала — нет: персонажа за ним закрывают стены, а без крыши зал просто зияет
+      const between = !under && !r.hall && (this._segRoof(cam, p.x, p.y + 1.1, p.z, r) || this._segRoof(cam, nx, p.y + 0.3, nz, r));
       const hide = under || between;
       if (under && r.hall) indoor = true;
       let k = snap ? (hide ? 0 : 1) : damp(r.k, hide ? 0 : 1, hide ? 11 : 6, dt);
