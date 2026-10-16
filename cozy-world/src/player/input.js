@@ -175,7 +175,7 @@ export class Input {
       const l = this.lmb;
       if (e.button === 0 && l) {
         this.lmb = null;
-        if (this.enabled && this.mode === 'top' && l.moved <= 6 && e.timeStamp - l.t < 450) this.taps.push({ x: e.clientX, y: e.clientY });
+        if (this.enabled && this.mode === 'top' && l.moved <= 6 && e.timeStamp - l.t < 1200) this.taps.push({ x: e.clientX, y: e.clientY });
       }
     });
     this.canvas.addEventListener('mousedown', (e) => {
@@ -295,9 +295,10 @@ export class TouchControls {
       if (ptrs.size === 1) { this.gesture = null; return; }
       if (ptrs.size) return;
       // короткий тап по экрану: в виде сверху — идти туда / к предмету, иначе «использовать»
-      // (в виде сверху долгое касание без сдвига ничего другого не значит — тапом считаем и его)
+      // (в виде сверху долгое касание без сдвига ничего другого не значит — тапом считаем и его;
+      // запас по времени ещё и для медленных кадров: события приходят пачкой после долгого кадра)
       const top = this.input.mode === 'top';
-      if (!this.multi && e.timeStamp - this.tapAt < (top ? 650 : 300) && this.moved < 12) {
+      if (!this.multi && e.timeStamp - this.tapAt < (top ? 1500 : 300) && this.moved < 12) {
         if (top) { if (this.input.enabled) this.input.taps.push({ ...this.tapPos }); } else this.input.press('use');
       }
     };
