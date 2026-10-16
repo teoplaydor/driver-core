@@ -220,9 +220,23 @@ export class TopView {
     if (!on) { g.input.taps.length = 0; return; }
     for (const t of g.input.taps) this.tap(t.x, t.y);
     g.input.taps.length = 0;
+    this._room();
     this._walkStep(dt);
     this._pickTarget();
     this._hover();
+  }
+
+  // Комната-интерьер под крышей (C5), где стоит игрок: камера держит её в кадре (до движения камеры).
+  _room() {
+    const p = this.game.player.pos;
+    let area = null;
+    if (isInterior(p.x)) {
+      for (const r of this.roofs || []) {
+        const a = r.area;
+        if (p.x > a.x0 && p.x < a.x1 && p.z > a.z0 && p.z < a.z1 && p.y < r.max.y) { area = a; break; }
+      }
+    }
+    this.game.player.topCam.roomArea = area;
   }
 
   // ПК: курсор-«рука» над тем, по чему можно кликнуть (предмет, дверь, игрок, объект мира); раз в 4 кадра.
@@ -326,6 +340,7 @@ export class TopView {
       for (const r of this.roofs || []) this._roofAlpha(r, 1);
       this.indoor = false;
       g.player.topCam.indoor = false;
+      g.player.topCam.roomArea = null;
       g.ui.setNameTags?.(null, 0);
       g.canvas.style.cursor = '';
       // пузыри чата — обратно над спрайтом с ником
@@ -773,11 +788,14 @@ export class TopView {
     const g = this.game, pl = g.player, p = pl.pos, cam = g.camera.position;
     const snap = pl.topCam.justSnapped; // вход в режим, телепорт — без растворения
     let indoor = isInterior(p.x);
+    // точка на земле в ~2.2 м от персонажа в сторону камеры: низ экрана под ним тоже не должна закрывать крыша
+    const cx = cam.x - p.x, cz = cam.z - p.z, cl = Math.hypot(cx, cz) || 1;
+    const nx = p.x + (cx / cl) * Math.min(2.2, cl), nz = p.z + (cz / cl) * Math.min(2.2, cl);
     for (const r of this.roofs || []) {
       const a = r.area, m = 0.25;
       const under = p.x > a.x0 - m && p.x < a.x1 + m && p.z > a.z0 - m && p.z < a.z1 + m && p.y + 0.6 < r.max.y;
-      // крыша между камерой и игроком (стоим за беседкой) — тоже прячем
-      const between = !under && this._segRoof(cam, p, r);
+      // крыша между камерой и игроком (стоим за беседкой) или над землёй перед ним (камера над самой крышей) — тоже прячем
+      const between = !under && (this._segRoof(cam, p.x, p.y + 1.1, p.z, r) || this._segRoof(cam, nx, p.y + 0.3, nz, r));
       const hide = under || between;
       if (under && r.hall) indoor = true;
       let k = snap ? (hide ? 0 : 1) : damp(r.k, hide ? 0 : 1, hide ? 11 : 6, dt);
@@ -788,11 +806,11 @@ export class TopView {
     pl.topCam.indoor = indoor && !isInterior(p.x);
   }
 
-  // Отрезок камера -> голова игрока пересекает крышу? Сначала рамка, потом треугольники.
-  _segRoof(c, p, r) {
-    if (!this._segBox(c, p, r)) return false;
+  // Отрезок камера -> точка (голова игрока, земля перед ним) пересекает крышу? Сначала рамка, потом треугольники.
+  _segRoof(c, ax, ay, az, r) {
+    if (!this._segBox(c, ax, ay, az, r)) return false;
     const rc = this._rc, m = this._rcMesh;
-    rc.ray.origin.set(p.x, p.y + 1.1, p.z);
+    rc.ray.origin.set(ax, ay, az);
     rc.ray.direction.subVectors(c, rc.ray.origin);
     rc.far = rc.ray.direction.length();
     rc.ray.direction.normalize();
@@ -803,8 +821,7 @@ export class TopView {
     return this._hits.length > 0;
   }
 
-  _segBox(c, p, r) {
-    const ax = p.x, ay = p.y + 1.1, az = p.z;
+  _segBox(c, ax, ay, az, r) {
     const dx = c.x - ax, dy = c.y - ay, dz = c.z - az;
     let t0 = 0, t1 = 1;
     const lo = r.min, hi = r.max;

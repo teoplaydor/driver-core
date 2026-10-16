@@ -12,10 +12,12 @@ const D2R = Math.PI / 180;
 export const TOP = {
   dist: 11, min: 5, max: 20,
   pitchNear: 50 * D2R, pitchFar: 61 * D2R, // наклон при минимальной и максимальной дистанции
-  pitchMax: 84 * D2R,
+  pitchMax: 88 * D2R, // у высокой стены — почти отвесно: так видно персонажа и без выреза стены
+  minDist: 4.5, // ближе не подъезжаем: вплотную к голове кадр ломается
   focusY: 0.85, // точка, на которую смотрим: середина персонажа
   lead: 0.34, leadMax: 1.7, // упреждение: секунды скорости и предел, м
   roomDist: 8.5, roomPitch: 10 * D2R, // в квартире: не дальше и на столько круче
+  roomInset: 2.5, // в квартире фокус не ближе к стене: в кадре комната, а не пустота за ней
   hallPitch: 5 * D2R, // под большой крышей (арена): чуть круче, дистанция своя — зал большой
 };
 
@@ -32,6 +34,8 @@ export class TopCamera {
     this.room = 0; // 0..1 — насколько мы в квартире
     this.hall = 0; // 0..1 — насколько мы под большой крышей
     this.indoor = false; // под большой крышей (арена) — ставит top-view.js
+    this.roomArea = null; // комната-интерьер под крышей C5 { x0, x1, z0, z1 } — ставит top-view.js
+    this._pickYaw = false; // после телепорта: развернуться туда, где обзор не закрыт стеной
     this.fov = 50;
     this._snap = true;
     this.justSnapped = false; // в этом кадре камера встала на место без сглаживания (вход в режим, телепорт)
@@ -41,8 +45,9 @@ export class TopCamera {
 
   zoom(f) { this.dist = clamp(this.dist * f, TOP.min, TOP.max); }
 
-  // Следующий кадр без сглаживания (вход в режим, телепорт).
-  snap() { this._snap = true; }
+  // Следующий кадр без сглаживания (вход в режим, телепорт). pickYaw — ещё и повернуть камеру,
+  // если с текущей стороны обзор закрыт (вышли из дома — камера не над его крышей, а перед фасадом).
+  snap(pickYaw = false) { this._snap = true; this._pickYaw = pickYaw; }
 
   // Вертикальный угол обзора по пропорциям экрана: в альбомной ориентации телефона ~48°, в портретной шире.
   fovFor(aspect) {
@@ -73,7 +78,14 @@ export class TopCamera {
       this.room = damp(this.room, inRoom ? 1 : 0, 4, dt);
       this.hall = damp(this.hall, this.indoor ? 1 : 0, 4, dt);
     }
-    const fx = this.fx + this.lx, fy = this.fy, fz = this.fz + this.lz;
+    let fx = this.fx + this.lx, fz = this.fz + this.lz;
+    const fy = this.fy;
+    const ra = inRoom ? this.roomArea : null;
+    if (ra) {
+      const ix = Math.min(TOP.roomInset, (ra.x1 - ra.x0) / 2), iz = Math.min(TOP.roomInset, (ra.z1 - ra.z0) / 2);
+      fx = clamp(fx, ra.x0 + ix, ra.x1 - ix);
+      fz = clamp(fz, ra.z0 + iz, ra.z1 - iz);
+    }
 
     // желаемые наклон и дистанция
     let dist = this.curDist;
@@ -85,19 +97,23 @@ export class TopCamera {
     }
     pitch += TOP.hallPitch * this.hall;
 
-    // препятствия между фокусом и камерой: круче, потом ближе
+    // препятствия между фокусом и камерой: круче (вплоть до почти отвесного взгляда), потом ближе, но не вплотную;
+    // на последних шагах зазор у стены меньше — персонаж у самой стены всё равно виден сверху
     this._gather(fx, fy, fz, dist + 1.5);
+    if (this._snap && this._pickYaw) this._clearYaw(fx, fy, fz, pitch, dist, inRoom);
+    this._pickYaw = false;
     let wantP = pitch, wantD = dist;
-    if (!this._clear(fx, fy, fz, pitch, dist, inRoom)) {
+    if (!this._clear(fx, fy, fz, pitch, dist, inRoom, 0.3)) {
       let ok = false;
-      for (let pp = pitch + 5 * D2R; pp <= TOP.pitchMax + 1e-4; pp += 5 * D2R) {
-        if (this._clear(fx, fy, fz, pp, dist, inRoom)) { wantP = pp; ok = true; break; }
+      for (let pp = pitch + 4 * D2R; pp < TOP.pitchMax + 4 * D2R; pp += 4 * D2R) {
+        const p2 = Math.min(pp, TOP.pitchMax);
+        if (this._clear(fx, fy, fz, p2, dist, inRoom, 0.3)) { wantP = p2; ok = true; break; }
       }
       if (!ok) {
         wantP = TOP.pitchMax;
-        wantD = 2.2;
-        for (let dd = dist * 0.85; dd > 2.2; dd *= 0.85) {
-          if (this._clear(fx, fy, fz, wantP, dd, inRoom)) { wantD = dd; break; }
+        wantD = Math.min(dist, TOP.minDist);
+        for (let dd = dist; dd > TOP.minDist; dd *= 0.85) {
+          if (this._clear(fx, fy, fz, wantP, dd, inRoom, 0.1)) { wantD = dd; break; }
         }
       }
     }
@@ -125,6 +141,16 @@ export class TopCamera {
     return this;
   }
 
+  // Поворот без закрытого обзора: как есть, назад (лицом к двери, из которой вышли), вбок, наискосок.
+  _clearYaw(fx, fy, fz, pitch, dist, inRoom) {
+    const y0 = this.yaw;
+    for (const k of [0, 4, 2, -2, 1, -1, 3, -3]) {
+      this.yaw = y0 + (k * Math.PI) / 4;
+      if (this._clear(fx, fy, fz, pitch, dist, inRoom, 0.3)) return;
+    }
+    this.yaw = y0;
+  }
+
   // Стены и крупные объекты возле линии взгляда (один раз за кадр).
   _gather(fx, fy, fz, r) {
     const c = this._cand;
@@ -139,7 +165,7 @@ export class TopCamera {
   }
 
   // Свободна ли линия фокус -> камера (рельеф и выбранные препятствия).
-  _clear(fx, fy, fz, pitch, dist, inRoom) {
+  _clear(fx, fy, fz, pitch, dist, inRoom, pad) {
     const cp = Math.cos(pitch), sp = Math.sin(pitch);
     const dx = Math.sin(this.yaw) * cp * dist, dy = sp * dist, dz = Math.cos(this.yaw) * cp * dist;
     if (!inRoom) {
@@ -156,7 +182,7 @@ export class TopCamera {
         const ox = fx - o.x, oz = fz - o.z;
         const ax = ox * o.c - oz * o.s, az = ox * o.s + oz * o.c;
         const bx = dx * o.c - dz * o.s, bz = dx * o.s + dz * o.c;
-        const hx = o.hx + 0.3, hz = o.hz + 0.3;
+        const hx = o.hx + pad, hz = o.hz + pad;
         if (Math.abs(bx) < 1e-6) { if (Math.abs(ax) > hx) continue; } else {
           let a = (-hx - ax) / bx, b = (hx - ax) / bx;
           if (a > b) { const s = a; a = b; b = s; }
@@ -169,7 +195,7 @@ export class TopCamera {
         }
       } else {
         // вертикальный цилиндр (крупный валун)
-        const ox = fx - o.x, oz = fz - o.z, rr = o.r + 0.3;
+        const ox = fx - o.x, oz = fz - o.z, rr = o.r + pad;
         const A = dx * dx + dz * dz, B = 2 * (ox * dx + oz * dz), C = ox * ox + oz * oz - rr * rr;
         const disc = B * B - 4 * A * C;
         if (A < 1e-9 || disc < 0) continue;

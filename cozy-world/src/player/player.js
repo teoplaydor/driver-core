@@ -59,6 +59,11 @@ export class Player {
     this.vel.set(0, 0, 0);
     if (yaw !== undefined) this.yaw = yaw;
     this.onGround = false;
+    // вид сверху: за дверью камера смотрит по направлению выхода, а если там стена — с открытой стороны
+    if (this.cameraMode === 'top') {
+      if (yaw !== undefined) this.topCam.yaw = yaw;
+      this.topCam.snap(true);
+    }
   }
 
   // Совместимость со старым флагом (до C1): true — не от первого лица.
