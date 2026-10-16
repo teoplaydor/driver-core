@@ -83,10 +83,13 @@ const w1 = await ev(() => window.__cozy.game.player.pos.toArray());
 check('W идёт от камеры (на запад)', w1[0] - w0[0] < -1 && Math.abs(w1[2] - w0[2]) < 0.4, `dx=${(w1[0] - w0[0]).toFixed(2)} dz=${(w1[2] - w0[2]).toFixed(2)}`);
 check('персонаж смотрит по ходу движения', await ev(() => Math.abs(Math.atan2(Math.sin(window.__cozy.game.player.yaw - Math.PI / 2), Math.cos(window.__cozy.game.player.yaw - Math.PI / 2))) < 0.4));
 
-// клик по мячу — подходит и берёт
+// курсор-«рука» над предметом; клик по мячу — подходит и берёт
 await place(-6.5, 8.5, 0, 0);
 await frames(3);
 const bxy = await ev(() => { const G = window.__cozy.game, v = G.props.byId.get('ball2').pos.clone().project(G.camera); return [(v.x * 0.5 + 0.5) * innerWidth, (-v.y * 0.5 + 0.5) * innerHeight]; });
+await page.mouse.move(bxy[0], bxy[1]);
+await frames(5);
+check('курсор над мячом — «рука»', await ev(() => window.__cozy.game.canvas.style.cursor === 'pointer'));
 await page.mouse.click(bxy[0], bxy[1]);
 await page.waitForFunction(() => window.__cozy.game.props.holding?.id === 'ball2', null, { timeout: 120000 }).catch(() => {});
 check('клик по мячу: подошёл и взял', await ev(() => window.__cozy.game.props.holding?.id === 'ball2'));

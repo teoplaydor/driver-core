@@ -34,8 +34,15 @@ export class Input {
     this.zoomMul = 1; // вид сверху: множитель дистанции (щипок, колесо)
     this.twist = 0; // вид сверху: поворот двумя пальцами, рад
     this.mouse = { x: 0, y: 0, on: false }; // вид сверху на ПК: курсор над холстом
+    // счётчик кадров: тап, уложившийся в пару кадров, — всегда тап, даже если кадры шли по секунде (слабое устройство)
+    this.rafN = 0;
+    const tick = () => { this.rafN++; requestAnimationFrame(tick); };
+    requestAnimationFrame(tick);
     this._bind();
   }
+
+  // Короткое касание/клик: по времени или «за пару кадров» (60 к/с — это 50 мс).
+  isTap(t0, n0, t1, maxMs) { return t1 - t0 < maxMs || this.rafN - n0 <= 3; }
 
   // Нажатие, которое можно "забрать" один раз.
   consume(name) {
@@ -177,14 +184,14 @@ export class Input {
       const l = this.lmb;
       if (e.button === 0 && l) {
         this.lmb = null;
-        if (this.enabled && this.mode === 'top' && l.moved <= 6 && e.timeStamp - l.t < 1200) this.taps.push({ x: e.clientX, y: e.clientY });
+        if (this.enabled && this.mode === 'top' && l.moved <= 6 && this.isTap(l.t, l.n, e.timeStamp, 1200)) this.taps.push({ x: e.clientX, y: e.clientY });
       }
     });
     this.canvas.addEventListener('mousedown', (e) => {
       if (!this.enabled || this.isTouch) return;
       if (this.mode === 'top') {
         if (e.button === 2) this.rotDrag = true;
-        if (e.button === 0) this.lmb = { t: e.timeStamp, moved: 0 };
+        if (e.button === 0) this.lmb = { t: e.timeStamp, n: this.rafN, moved: 0 };
         return;
       }
       if (!this.locked) {
@@ -261,6 +268,7 @@ export class TouchControls {
       ptrs.set(e.pointerId, { x: e.clientX, y: e.clientY });
       if (ptrs.size === 1) {
         this.tapAt = e.timeStamp; // время события, а не обработчика: на медленном кадре тап не превращается в «долгое касание»
+        this.tapN = this.input.rafN;
         this.tapPos = { x: e.clientX, y: e.clientY };
         this.moved = 0;
         this.multi = false;
@@ -297,10 +305,9 @@ export class TouchControls {
       if (ptrs.size === 1) { this.gesture = null; return; }
       if (ptrs.size) return;
       // короткий тап по экрану: в виде сверху — идти туда / к предмету, иначе «использовать»
-      // (в виде сверху долгое касание без сдвига ничего другого не значит — тапом считаем и его;
-      // запас по времени ещё и для медленных кадров: события приходят пачкой после долгого кадра)
+      // (в виде сверху долгое касание без сдвига ничего другого не значит — тапом считаем и его)
       const top = this.input.mode === 'top';
-      if (!this.multi && e.timeStamp - this.tapAt < (top ? 1500 : 300) && this.moved < 12) {
+      if (!this.multi && this.moved < 12 && this.input.isTap(this.tapAt, this.tapN, e.timeStamp, top ? 1500 : 300)) {
         if (top) { if (this.input.enabled) this.input.taps.push({ ...this.tapPos }); } else this.input.press('use');
       }
     };

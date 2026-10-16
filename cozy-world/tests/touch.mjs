@@ -1,6 +1,7 @@
 // Проверка мобильного режима: эмуляция телефона (альбомная ориентация), вид сверху (WS6).
 // По умолчанию камера сверху; джойстик двигает относительно камеры; перетаскивание крутит камеру; щипок — зум;
-// тап по мячу — персонаж подходит и берёт; ✋ у двери — переход; кнопка прыжка; 📷 — в 1-е лицо и обратно.
+// тап по мячу — персонаж подходит и берёт; ники других — читаемые HTML-подписи; ✋ у двери — переход;
+// потолок квартиры скрыт (C5); кнопка прыжка; 📷 — в 1-е лицо и обратно.
 // BASE_URL=http://127.0.0.1:5173/ node tests/touch.mjs
 
 import { chromium } from 'playwright-core';
@@ -42,6 +43,23 @@ check('камера над персонажем, смотрит вниз ~55°',
   return c.position.y - p.y > 6 && pitch > 45 && pitch < 66 && Math.abs(c.fov - 48) < 20;
 }), await ev(() => `h=${(window.__cozy.game.camera.position.y - window.__cozy.game.player.pos.y).toFixed(1)} pitch=${(-window.__cozy.game.camera.rotation.x * 57.3).toFixed(0)}°`));
 check('свой ник и прицел скрыты', await ev(() => !window.__cozy.game.avatar.tag.visible && getComputedStyle(document.getElementById('crosshair')).display === 'none'));
+
+// ники других игроков: вместо мелкого спрайта — HTML-подпись над головой
+await ev(() => {
+  const G = window.__cozy.game, P = G.player, x = P.pos.x + 2.5, z = P.pos.z - 1;
+  G.remotes.add({ id: 'ws6-friend', name: 'Ромашка', look: [1, 2, 1, 1, 0, 1, 0], p: [x, G.world.collisions.supportY(x, z, 60), z], r: 0 });
+});
+await frames(3);
+check('ник другого игрока — HTML над головой, спрайт скрыт', await ev(() => {
+  const G = window.__cozy.game, r = G.remotes.get('ws6-friend');
+  const tags = [...document.querySelectorAll('.ntag')].filter((e) => !e.hidden && e.textContent === 'Ромашка');
+  if (tags.length !== 1 || r.avatar.tag.visible) return false;
+  const b = tags[0].getBoundingClientRect(), head = r.avatar.root.position.clone();
+  head.y += r.avatar.top;
+  const v = head.project(G.camera), hx = (v.x * 0.5 + 0.5) * innerWidth, hy = (-v.y * 0.5 + 0.5) * innerHeight;
+  return Math.abs((b.left + b.right) / 2 - hx) < 6 && b.bottom <= hy + 2 && b.bottom > hy - 40 && b.height >= 18;
+}));
+await ev(() => window.__cozy.game.remotes.remove('ws6-friend'));
 
 const cdp = await ctx.newCDPSession(page);
 const touch = (type, pts) => cdp.send('Input.dispatchTouchEvent', { type, touchPoints: pts.map(([x, y, id], i) => ({ x, y, id: id ?? i + 1 })) });
@@ -128,19 +146,24 @@ await tapBtn('.b-throw');
 await page.waitForFunction(() => !window.__cozy.game.props.holding, null, { timeout: 30000 }).catch(() => {});
 check('↗ кладёт предмет', await ev(() => !window.__cozy.game.props.holding));
 await ev(() => {
-  const G = window.__cozy.game, P = G.player, x = 22, z = 172.9;
-  P.pos.set(x, G.world.collisions.supportY(x, z, 50), z); P.vel.set(0, 0, 0); P.yaw = Math.PI;
+  const G = window.__cozy.game, P = G.player, ps = G.world.structures.portals;
+  const po = ps.find((p) => p.id === 'apt-in') || ps.find((p) => p.to.x > 600);
+  P.pos.set(po.x, G.world.collisions.supportY(po.x, po.z, po.y + 2), po.z); P.vel.set(0, 0, 0); P.yaw = Math.PI;
   P.topCam.snap();
 });
 await frames(4);
 check('у двери цель — дверь с подписью', await ev(() => window.__cozy.game.topView.target?.type === 'portal' && !document.getElementById('tlabel').hidden));
+check('подсветка цели — HDR-кольцо (bloom), видно', await ev(() => {
+  const T = window.__cozy.game.topView, c = T.ringMat.uniforms.uColor.value;
+  return T.ring.visible && Math.max(c.r, c.g, c.b) > 1.5;
+}));
 await page.screenshot({ path: 'tests/out/touch-door.png', timeout: 180000 });
 await tapBtn('.b-use');
 await page.waitForFunction(() => window.__cozy.game.player.pos.x > 600, null, { timeout: 30000 }).catch(() => {});
 check('✋ у двери — переход в квартиру', await ev(() => window.__cozy.game.player.pos.x > 600));
 await page.waitForFunction(() => !window.__cozy.game.teleporting, null, { timeout: 30000 }).catch(() => {});
 await frames(6);
-check('в квартире потолок скрыт (C5)', await ev(() => (window.__cozy.game.topView.roofs || []).some((r) => r.mesh.position.x > 600 && r.k < 0.5)));
+check('в квартире потолок скрыт (C5)', await ev(() => (window.__cozy.game.topView.roofs || []).some((r) => r.area.x0 > 600 && r.k < 0.5)));
 await page.screenshot({ path: 'tests/out/touch-apartment.png', timeout: 180000 });
 
 // прыжок кнопкой
