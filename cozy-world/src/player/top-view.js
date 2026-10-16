@@ -35,6 +35,7 @@ function ringMaterial(color, intensity) {
       uDash: { value: 1 },
       uFill: { value: 0.12 },
       uWidth: { value: 1 },
+      uGlow: { value: 1 },
     },
     vertexShader: /* glsl */`
       varying vec2 vUv;
@@ -46,14 +47,14 @@ function ringMaterial(color, intensity) {
       }`,
     fragmentShader: /* glsl */`
       uniform vec3 uColor;
-      uniform float uTime, uAlpha, uDash, uFill, uWidth;
+      uniform float uTime, uAlpha, uDash, uFill, uWidth, uGlow;
       varying vec2 vUv;
       void main() {
         float r = length(vUv);
         float e = fwidth(r) * 1.2;
         float w = 0.035 * uWidth;
         float line = 1.0 - smoothstep(w - e * 0.5, w + e, abs(r - ${RING_R}));
-        float glow = exp(-pow((r - ${RING_R}) / 0.14, 2.0)) * 0.42;
+        float glow = exp(-pow((r - ${RING_R}) / 0.14, 2.0)) * 0.42 * uGlow;
         float a = fract(atan(vUv.y, vUv.x) * 0.47746 + uTime * 0.11); // три дуги по кругу
         float seg = smoothstep(0.0, 0.04, a) * (1.0 - smoothstep(0.46, 0.5, a));
         float dash = seg * (1.0 - smoothstep(0.03 - e, 0.03 + e, abs(r - 0.9))) * uDash;
@@ -142,6 +143,17 @@ export class TopView {
     this.markMat.uniforms.uFill.value = 0.2;
     this.mark = ringMesh(this.markMat);
     this.mark.name = 'top-move-marker';
+    // без постобработки (low) bloom нет, а тонмаппинг выбеливает яркое — цвет без HDR-запаса,
+    // линия толще, ореол и заливка плотнее, иначе кольцо теряется в траве
+    this.lite = !game.post;
+    if (this.lite) {
+      for (const m of [this.ringMat, this.markMat]) {
+        m.uniforms.uColor.value.multiplyScalar(0.45);
+        m.uniforms.uWidth.value = 1.5;
+        m.uniforms.uGlow.value = 1.7;
+        m.uniforms.uFill.value += 0.08;
+      }
+    }
     this.markK = 0;
     this.markAge = 0;
     this.markPos = new THREE.Vector3();
@@ -150,6 +162,7 @@ export class TopView {
     pinGeo.rotateX(Math.PI);
     pinGeo.translate(0, 0.13, 0);
     this.pinMat = new THREE.MeshBasicMaterial({ color: new THREE.Color('#9fe8ff').multiplyScalar(2.2), transparent: true, depthWrite: false });
+    if (this.lite) this.pinMat.color.multiplyScalar(0.5);
     this.pin = new THREE.Mesh(pinGeo, this.pinMat);
     this.pin.renderOrder = 8;
     this.pin.visible = false;
@@ -158,6 +171,7 @@ export class TopView {
     aimGeo.rotateX(-Math.PI / 2);
     aimGeo.translate(0, 0, -0.5);
     this.aimMat = aimMaterial();
+    if (this.lite) this.aimMat.uniforms.uColor.value.multiplyScalar(0.5);
     this.aim = new THREE.Mesh(aimGeo, this.aimMat);
     this.aim.renderOrder = 8;
     this.aim.frustumCulled = false;

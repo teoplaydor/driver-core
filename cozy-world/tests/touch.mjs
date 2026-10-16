@@ -153,9 +153,9 @@ await ev(() => {
 });
 await frames(4);
 check('у двери цель — дверь с подписью', await ev(() => window.__cozy.game.topView.target?.type === 'portal' && !document.getElementById('tlabel').hidden));
-check('подсветка цели — HDR-кольцо (bloom), видно', await ev(() => {
+check('подсветка цели видна (с постобработкой — HDR-яркая для bloom)', await ev(() => {
   const T = window.__cozy.game.topView, c = T.ringMat.uniforms.uColor.value;
-  return T.ring.visible && Math.max(c.r, c.g, c.b) > 1.5;
+  return T.ring.visible && Math.max(c.r, c.g, c.b) > (T.lite ? 0.9 : 1.5);
 }));
 await page.screenshot({ path: 'tests/out/touch-door.png', timeout: 180000 });
 await tapBtn('.b-use');
