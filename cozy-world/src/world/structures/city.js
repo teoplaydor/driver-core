@@ -348,7 +348,8 @@ export function buildBlock(ctx) {
   kit.setLayer('far');
   kit.push(T(cx, y, cz));
   kit.add(new THREE.BoxGeometry(W, H + PAR, D), brick, SURF.plain, T(0, (H + PAR) / 2, 0), { bake: false });
-  for (const [px, py, pz, ry, w, h] of lit) kit.add(new THREE.PlaneGeometry(w, h), '#ffc77a', glow(2.0), T(px, py, pz, 0, ry, 0).multiply(T(0, 0, 0.03)), { bake: false });
+  // (окна на 10 см перед стеной: дальняя копия видна со 140+ м, где точности глубины на 3 см уже не хватает)
+  for (const [px, py, pz, ry, w, h] of lit) kit.add(new THREE.PlaneGeometry(w, h), '#ffc77a', glow(2.0), T(px, py, pz, 0, ry, 0).multiply(T(0, 0, 0.1)), { bake: false });
   kit.pop();
 
   col.addBox(cx, cz, W / 2 + 0.1, D / 2 + 0.1, 0, y - 1, y + H + PAR);
