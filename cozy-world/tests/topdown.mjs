@@ -157,6 +157,50 @@ await place(10, 4, 0, 0);
 await frames(14);
 check('вне беседки крыша на месте', await ev(() => (window.__cozy.game.topView.roofs || []).every((x) => x.k > 0.95)));
 
+// многоэтажка: стоим вплотную к фасаду, камера со стороны дома — она не внутри дома и персонаж виден
+// (встаёт над домом и отворачивается к улице); крыша закрытого дома не прячется
+const tall = await ev(() => {
+  const G = window.__cozy.game, col = G.world.collisions, po = G.world.structures.portals.find((p) => p.id === 'apt-in');
+  let b = null;
+  for (const o of col.boxes) if (o.solid && o.y1 - o.y0 > 10 && Math.hypot(o.x - po.x, o.z - po.z) < 20 && (!b || o.hx * o.hz > b.hx * b.hz)) b = o;
+  if (!b) return null;
+  const dx = b.x - po.x, dz = b.z - po.z, l = Math.hypot(dx, dz);
+  // шагаем от двери к дому, пока до стены не останется ~0.5 м
+  let x = po.x, z = po.z;
+  for (let t = 0; t < 8; t += 0.05) {
+    const px = po.x + (dx / l) * t, pz = po.z + (dz / l) * t;
+    const ox = px - b.x, oz = pz - b.z, ax = ox * b.c - oz * b.s, az = ox * b.s + oz * b.c;
+    if (Math.hypot(Math.max(0, Math.abs(ax) - b.hx), Math.max(0, Math.abs(az) - b.hz)) < 0.5) break;
+    x = px; z = pz;
+  }
+  return { x, z, cyaw: Math.atan2(dx, dz) };
+});
+if (tall) {
+  await place(tall.x, tall.z, tall.cyaw + Math.PI, tall.cyaw);
+  await frames(30);
+  const st = await ev(() => {
+    const G = window.__cozy.game, c = G.camera.position, p = G.player.pos;
+    const inside = (x, y, z) => G.world.collisions.boxes.some((o) => {
+      if (!o.solid || y < o.y0 || y > o.y1) return false;
+      const ox = x - o.x, oz = z - o.z;
+      return Math.abs(ox * o.c - oz * o.s) < o.hx && Math.abs(ox * o.s + oz * o.c) < o.hz;
+    });
+    let seen = true;
+    for (let i = 1; i < 20; i++) {
+      const t = i / 20;
+      if (inside(p.x + (c.x - p.x) * t, p.y + 1.1 + (c.y - p.y - 1.1) * t, p.z + (c.z - p.z) * t)) seen = false;
+    }
+    // камера не жмётся к стене выше себя (тогда низ кадра смотрит в фасад изнутри)
+    const hug = G.world.collisions.boxes.some((o) => {
+      if (!o.solid || o.y1 < c.y) return false;
+      const ox = c.x - o.x, oz = c.z - o.z, ax = ox * o.c - oz * o.s, az = ox * o.s + oz * o.c;
+      return Math.hypot(Math.max(0, Math.abs(ax) - o.hx), Math.max(0, Math.abs(az) - o.hz)) < 1;
+    });
+    return { inCam: inside(c.x, c.y, c.z), hug, seen, cam: c.toArray().map((v) => +v.toFixed(1)) };
+  });
+  check('у фасада многоэтажки камера не в доме и не у стены, персонаж виден', !st.inCam && !st.hug && st.seen, JSON.stringify(st));
+}
+
 // обратно в 1-е лицо: руки, без растворения листвы, курсор захватывается
 await page.keyboard.press('KeyC');
 await frames(16);

@@ -15,6 +15,7 @@ export const TOP = {
   pitchNear: 50 * D2R, pitchFar: 61 * D2R, // наклон при минимальной и максимальной дистанции
   pitchMax: 88 * D2R, // у стены — почти отвесно: так видно персонажа и без выреза стены
   turn: 3.2, // скорость, с которой камера отворачивается от слишком высокой стены
+  wallGap: 1.2, // ближе к стене выше себя камера не встаёт, м
   focusY: 0.85, // точка, на которую смотрим: середина персонажа
   lead: 0.34, leadMax: 1.7, // упреждение: секунды скорости и предел, м
   roomDist: 8.5, roomPitch: 10 * D2R, // в квартире: не дальше и на столько круче
@@ -178,28 +179,30 @@ export class TopCamera {
   }
 
   // Низ кадра: при крутом наклоне камера видит и то, что у неё за спиной. Стена выше камеры там — фасад
-  // в лоб снизу вверх (или вовсе изнутри здания) — не годится.
+  // в лоб снизу вверх (или вовсе изнутри здания) — не годится. И вплотную к такой стене камере не место:
+  // фасад лёг бы через весь кадр ребром.
   _back(fx, fy, fz, pitch, dist, vfov) {
     const over = pitch + vfov / 2 - Math.PI / 2;
-    if (over <= 0) return true;
     const cp = Math.cos(pitch), bx = Math.sin(this.yaw), bz = Math.cos(this.yaw);
     const cx = fx + bx * cp * dist, cy = fy + Math.sin(pitch) * dist, cz = fz + bz * cp * dist;
-    const reach = (cy - fy + TOP.focusY) * Math.tan(over) + 0.5; // насколько далеко за спину достаёт низ кадра
+    // насколько далеко за спину достаёт низ кадра
+    const reach = over > 0 ? (cy - fy + TOP.focusY) * Math.tan(over) + 0.5 : 0;
     for (const o of this._cand) {
       if (o.y1 < cy - 0.3) continue;
-      let vx, vz;
+      let d, behind;
       if (o.type === 1) {
         const ox = cx - o.x, oz = cz - o.z;
         const ax = ox * o.c - oz * o.s, az = ox * o.s + oz * o.c;
-        vx = clamp(ax, -o.hx, o.hx) - ax; vz = clamp(az, -o.hz, o.hz) - az;
+        const vx = clamp(ax, -o.hx, o.hx) - ax, vz = clamp(az, -o.hz, o.hz) - az;
         const lbx = bx * o.c - bz * o.s, lbz = bx * o.s + bz * o.c; // направление «за спину» в осях прямоугольника
-        const d = Math.hypot(vx, vz);
-        if (d < reach && vx * lbx + vz * lbz > -0.2 * d) { this._top = Math.max(this._top, o.y1); return false; }
+        d = Math.hypot(vx, vz);
+        behind = vx * lbx + vz * lbz > -0.2 * d;
       } else {
-        vx = o.x - cx; vz = o.z - cz;
-        const l = Math.hypot(vx, vz), d = Math.max(0, l - o.r);
-        if (d < reach && vx * bx + vz * bz > -0.2 * l) { this._top = Math.max(this._top, o.y1); return false; }
+        const vx = o.x - cx, vz = o.z - cz, l = Math.hypot(vx, vz);
+        d = Math.max(0, l - o.r);
+        behind = vx * bx + vz * bz > -0.2 * l;
       }
+      if (d < TOP.wallGap || (d < reach && behind)) { this._top = Math.max(this._top, o.y1); return false; }
     }
     return true;
   }
