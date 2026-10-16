@@ -33,6 +33,7 @@ export class Input {
     this.taps = []; // вид сверху: тапы/клики по экрану { x, y } (CSS-пиксели)
     this.zoomMul = 1; // вид сверху: множитель дистанции (щипок, колесо)
     this.twist = 0; // вид сверху: поворот двумя пальцами, рад
+    this.mouse = { x: 0, y: 0, on: false }; // вид сверху на ПК: курсор над холстом
     this._bind();
   }
 
@@ -159,7 +160,8 @@ export class Input {
     document.addEventListener('mousemove', (e) => {
       if (!this.enabled) return;
       if (this.mode === 'top') {
-        // вид сверху: ПКМ (или ЛКМ с протяжкой) крутит камеру
+        // вид сверху: ПКМ (или ЛКМ с протяжкой) крутит камеру; позиция курсора — для подсветки под ним
+        this.mouse.x = e.clientX; this.mouse.y = e.clientY; this.mouse.on = e.target === this.canvas;
         const l = this.lmb;
         if (l) l.moved += Math.abs(e.movementX) + Math.abs(e.movementY);
         if (this.rotDrag || (l && l.moved > 6)) this.lookDX += e.movementX;

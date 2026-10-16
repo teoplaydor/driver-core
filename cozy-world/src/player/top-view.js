@@ -128,6 +128,7 @@ export class TopView {
     this.ray = new THREE.Ray();
     this.time = 0;
     this.active = false;
+    this._hoverN = 0;
 
     // подсветка цели — тёплое золото; маркер точки — голубой (как кнопка броска)
     this.ringMat = ringMaterial('#ffc86b', 2.6);
@@ -207,6 +208,21 @@ export class TopView {
     g.input.taps.length = 0;
     this._walkStep(dt);
     this._pickTarget();
+    this._hover();
+  }
+
+  // ПК: курсор-«рука» над тем, по чему можно кликнуть (предмет, дверь, игрок, объект мира); раз в 4 кадра.
+  _hover() {
+    const g = this.game, m = g.input.mouse;
+    if (g.isTouch || (this._hoverN = (this._hoverN + 1) & 3)) return;
+    let hot = false;
+    if (m.on && !g.input.rotDrag) {
+      this._setRay(m.x, m.y);
+      const rect = g.canvas.getBoundingClientRect();
+      hot = !!this._hitObject(m.x - rect.left, m.y - rect.top, rect, false);
+    }
+    const c = hot ? 'pointer' : '';
+    if (g.canvas.style.cursor !== c) g.canvas.style.cursor = c;
   }
 
   // После анимации и предметов: подсветка, маркер, подпись, крыши, растворение листвы.
@@ -284,6 +300,7 @@ export class TopView {
       this.indoor = false;
       g.player.topCam.indoor = false;
       g.ui.setNameTags?.(null, 0);
+      g.canvas.style.cursor = '';
     }
   }
 
@@ -426,20 +443,28 @@ export class TopView {
 
   // x, y — CSS-пиксели в окне.
   tap(x, y) {
-    const g = this.game, cam = g.camera;
+    const g = this.game;
     if (g.player.frozen || g.teleporting) return;
-    const rect = g.canvas.getBoundingClientRect();
-    _ndc.set(((x - rect.left) / rect.width) * 2 - 1, -((y - rect.top) / rect.height) * 2 + 1);
-    cam.updateMatrixWorld();
-    this.ray.origin.setFromMatrixPosition(cam.matrixWorld);
-    this.ray.direction.set(_ndc.x, _ndc.y, 0.5).unproject(cam).sub(this.ray.origin).normalize();
+    const rect = this._setRay(x, y);
     const hit = this._hitObject(x - rect.left, y - rect.top, rect);
     if (hit) { this.startWalk(hit.type, hit.obj); return; }
     if (this._hitGround(_v2)) this.startWalk('ground', null, _v2.x, _v2.y, _v2.z);
   }
 
-  // Ближайший по лучу предмет / дверь / игрок / объект мира; промах — ближайший на экране в пределах ~38 px.
-  _hitObject(sx, sy, rect) {
+  // Луч из камеры через точку экрана (CSS-пиксели окна).
+  _setRay(x, y) {
+    const g = this.game, cam = g.camera;
+    const rect = g.canvas.getBoundingClientRect();
+    _ndc.set(((x - rect.left) / rect.width) * 2 - 1, -((y - rect.top) / rect.height) * 2 + 1);
+    cam.updateMatrixWorld();
+    this.ray.origin.setFromMatrixPosition(cam.matrixWorld);
+    this.ray.direction.set(_ndc.x, _ndc.y, 0.5).unproject(cam).sub(this.ray.origin).normalize();
+    return rect;
+  }
+
+  // Ближайший по лучу предмет / дверь / игрок / объект мира; промах — ближайший на экране в пределах ~38 px
+  // (loose = false — только точное попадание: для курсора на ПК).
+  _hitObject(sx, sy, rect, loose = true) {
     const g = this.game, ray = this.ray, pl = g.player;
     let best = null, bestT = 1e9;
     let near = null, nearD = 38 * 38;
@@ -451,7 +476,7 @@ export class TopView {
       if (ray.intersectSphere(_sphere, _v)) {
         const t = _v.distanceTo(o);
         if (t < bestT) { bestT = t; best = { type, obj }; }
-      } else if (!best) {
+      } else if (!best && loose) {
         _v.set(x, y, z).project(g.camera);
         if (_v.z > 1) return;
         const px = (_v.x * 0.5 + 0.5) * rect.width, py = (-_v.y * 0.5 + 0.5) * rect.height;
@@ -680,7 +705,11 @@ export class TopView {
           shadow: Array.isArray(o.material) ? o.material.map(() => this._shadowOnly) : this._shadowOnly,
           area: a || { x0: this._box.min.x, x1: this._box.max.x, z0: this._box.min.z, z1: this._box.max.z },
           min: this._box.min.clone(), max: this._box.max.clone(),
+          hall: false,
         };
+        // большой зал (арена): скрытая крыша не оставляет тени — внутри светло, как во дворе;
+        // навес (беседка) оставляет — видно, что над головой крыша
+        r.hall = (r.area.x1 - r.area.x0) * (r.area.z1 - r.area.z0) > 120;
         // плавное растворение — полупрозрачной копией материала (с теми же патчами шейдера)
         const mk = (m) => {
           const c = m.clone();
@@ -713,7 +742,7 @@ export class TopView {
       // крыша между камерой и игроком (стоим за беседкой) — тоже прячем
       const between = !under && this._segRoof(cam, p, r);
       const hide = under || between;
-      if (under && (a.x1 - a.x0) * (a.z1 - a.z0) > 120) indoor = true;
+      if (under && r.hall) indoor = true;
       let k = snap ? (hide ? 0 : 1) : damp(r.k, hide ? 0 : 1, hide ? 11 : 6, dt);
       if (k < 0.03) k = 0; else if (k > 0.985) k = 1;
       this._roofAlpha(r, k);
@@ -755,11 +784,14 @@ export class TopView {
     return true;
   }
 
-  // Прозрачность крыши: 1 — обычный материал, 0 — только тень (внутри остаётся тень от крыши), между —
+  // Прозрачность крыши: 1 — обычный материал, 0 — только тень (у навеса) или ничего (у зала), между —
   // полупрозрачная копия (тень при этом остаётся полной).
   _roofAlpha(r, k) {
     r.k = k;
     const mesh = r.mesh;
+    // видимость трогаем только свою: LOD построек может прятать меши сам
+    const hidden = k <= 0 && r.hall;
+    if (hidden !== !!r.hid) { r.hid = hidden; mesh.visible = !hidden; }
     if (k >= 1) { if (mesh.material !== r.base) mesh.material = r.base; return; }
     if (k <= 0 || !r.fade) {
       if (mesh.material !== r.shadow) mesh.material = r.shadow;

@@ -2,7 +2,7 @@
 // Наклон ~55° (чуть положе вблизи, круче вдали), дистанция 5–20 м (щипок / колесо), поворот по yaw
 // (перетаскивание по экрану, поворот двумя пальцами, ПКМ), упреждение по скорости, плавное следование.
 // Камера не уходит под рельеф и не прячется за стенами: сначала поднимается круче, потом подъезжает ближе.
-// В помещениях (квартира, арена) — ближе и круче, крыши над игроком скрывает top-view.js (C5).
+// В квартире — ближе и круче, под большой крышей (арена) — чуть круче; крыши над игроком скрывает top-view.js (C5).
 
 import { clamp, damp, smoothstep } from '../util/math.js';
 import { heightAt, isInterior } from '../world/terrain-data.js';
@@ -15,7 +15,8 @@ export const TOP = {
   pitchMax: 84 * D2R,
   focusY: 0.85, // точка, на которую смотрим: середина персонажа
   lead: 0.34, leadMax: 1.7, // упреждение: секунды скорости и предел, м
-  roomDist: 8.5, roomPitch: 10 * D2R, // в помещении: не дальше и на столько круче
+  roomDist: 8.5, roomPitch: 10 * D2R, // в квартире: не дальше и на столько круче
+  hallPitch: 5 * D2R, // под большой крышей (арена): чуть круче, дистанция своя — зал большой
 };
 
 export class TopCamera {
@@ -28,7 +29,8 @@ export class TopCamera {
     this.pitch = 55 * D2R;
     this.fx = 0; this.fy = 0; this.fz = 0; // сглаженная точка фокуса
     this.lx = 0; this.lz = 0; // упреждение
-    this.room = 0; // 0..1 — насколько мы «в помещении»
+    this.room = 0; // 0..1 — насколько мы в квартире
+    this.hall = 0; // 0..1 — насколько мы под большой крышей
     this.indoor = false; // под большой крышей (арена) — ставит top-view.js
     this.fov = 50;
     this._snap = true;
@@ -50,7 +52,6 @@ export class TopCamera {
   update(camera, dt, player) {
     const p = player.pos;
     const inRoom = isInterior(p.x);
-    const roomish = inRoom || this.indoor;
     // фокус: середина персонажа + упреждение по скорости
     let lx = player.vel.x * TOP.lead, lz = player.vel.z * TOP.lead;
     const ll = Math.hypot(lx, lz);
@@ -60,7 +61,8 @@ export class TopCamera {
       this._snap = true;
       this.fx = tx; this.fy = ty; this.fz = tz; this.lx = lx; this.lz = lz;
       this.curDist = this.dist;
-      this.room = roomish ? 1 : 0;
+      this.room = inRoom ? 1 : 0;
+      this.hall = this.indoor ? 1 : 0;
     } else {
       this.lx = damp(this.lx, lx, 2.6, dt);
       this.lz = damp(this.lz, lz, 2.6, dt);
@@ -68,7 +70,8 @@ export class TopCamera {
       this.fz = damp(this.fz, tz, 12, dt);
       this.fy = damp(this.fy, ty, 5, dt); // прыжки не дёргают камеру
       this.curDist = damp(this.curDist, this.dist, 8, dt);
-      this.room = damp(this.room, roomish ? 1 : 0, 4, dt);
+      this.room = damp(this.room, inRoom ? 1 : 0, 4, dt);
+      this.hall = damp(this.hall, this.indoor ? 1 : 0, 4, dt);
     }
     const fx = this.fx + this.lx, fy = this.fy, fz = this.fz + this.lz;
 
@@ -80,6 +83,7 @@ export class TopCamera {
       dist = Math.min(dist, dist + (TOP.roomDist - dist) * this.room);
       pitch += TOP.roomPitch * this.room;
     }
+    pitch += TOP.hallPitch * this.hall;
 
     // препятствия между фокусом и камерой: круче, потом ближе
     this._gather(fx, fy, fz, dist + 1.5);
