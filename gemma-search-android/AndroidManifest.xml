@@ -17,6 +17,8 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- the secretary's «Тишина»: «Не беспокоить» with only the important let through -->
+    <uses-permission android:name="android.permission.ACCESS_NOTIFICATION_POLICY" />
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
     <!-- reminders of notes at the minute set -->
     <uses-permission
@@ -218,6 +220,51 @@
             android:exported="false" />
         <receiver
             android:name=".app.WellbeingCheck"
+            android:exported="false" />
+        <!--
+          The secretary: its own icon and task (its chat page), its settings, «Отложить» for «Сделал?»,
+          the notification reader (Android keeps it running while access is granted), the answers from notifications,
+          the exact alarm for reminders and digests
+        -->
+        <activity
+            android:name=".app.SecActivity"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden"
+            android:exported="true"
+            android:icon="@mipmap/ic_secretary"
+            android:label="@string/secretary_label"
+            android:launchMode="singleTask"
+            android:taskAffinity="io.github.teoplaydor.semsearch.secretary"
+            android:windowSoftInputMode="adjustResize|stateHidden">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+        <activity
+            android:name=".app.SecSetup"
+            android:exported="false"
+            android:label="@string/secretary_setup_label"
+            android:taskAffinity="io.github.teoplaydor.semsearch.secretary" />
+        <activity
+            android:name=".app.SecAsk$Snooze"
+            android:excludeFromRecents="true"
+            android:exported="false"
+            android:taskAffinity="io.github.teoplaydor.semsearch.secretary.snooze"
+            android:theme="@style/QuickTheme" />
+        <service
+            android:name=".app.SecListener"
+            android:exported="true"
+            android:label="@string/secretary_label"
+            android:permission="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE">
+            <intent-filter>
+                <action android:name="android.service.notification.NotificationListenerService" />
+            </intent-filter>
+        </service>
+        <receiver
+            android:name=".app.SecAsk$Answer"
+            android:exported="false" />
+        <receiver
+            android:name=".app.SecHub$SecAlarm"
             android:exported="false" />
         <receiver
             android:name=".app.BootReceiver"

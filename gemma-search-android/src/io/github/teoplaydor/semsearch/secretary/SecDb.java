@@ -99,7 +99,7 @@ public final class SecDb {
     }
 
     public void kvSet(String k, String v) {
-        sql.insert("INSERT INTO kv(k, v) VALUES(?, ?) ON CONFLICT(k) DO UPDATE SET v=excluded.v", k, v);
+        sql.insert("INSERT OR REPLACE INTO kv(k, v) VALUES(?, ?)", k, v); // not UPSERT: SQLite before 3.24 (Android < 11)
     }
 
     // --- mail and phone chats (one table, told apart by kind) ---
@@ -166,8 +166,7 @@ public final class SecDb {
 
     public void setSenderRule(String addr, String rule) {
         if (rule == null) sql.update("DELETE FROM senders WHERE addr=?", lower(addr));
-        else sql.insert("INSERT INTO senders(addr, rule) VALUES(?, ?) ON CONFLICT(addr) DO UPDATE SET rule=excluded.rule",
-                lower(addr), rule);
+        else sql.insert("INSERT OR REPLACE INTO senders(addr, rule) VALUES(?, ?)", lower(addr), rule);
     }
 
     // --- events and reminders ---
@@ -268,8 +267,7 @@ public final class SecDb {
     }
 
     public int setMerchantCategory(String key, String category) {
-        sql.insert("INSERT INTO merchants(key, category) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET category=excluded.category",
-                key, category);
+        sql.insert("INSERT OR REPLACE INTO merchants(key, category) VALUES(?, ?)", key, category);
         return sql.update("UPDATE transactions SET category=? WHERE merchant_key=?", category, key);
     }
 
@@ -484,9 +482,9 @@ public final class SecDb {
     // --- what the model cost: here — tokens and time on the phone ---
     public void addUsage(String model, long tokensIn, long tokensOut) {
         String day = SecUtil.toDb(now()).substring(0, 10);
-        sql.insert("INSERT INTO llm_usage(day, model, calls, tokens_in, tokens_out) VALUES(?,?,1,?,?)"
-                + " ON CONFLICT(day, model) DO UPDATE SET calls=calls+1, tokens_in=tokens_in+excluded.tokens_in,"
-                + " tokens_out=tokens_out+excluded.tokens_out", day, model, tokensIn, tokensOut);
+        if (sql.update("UPDATE llm_usage SET calls=calls+1, tokens_in=tokens_in+?, tokens_out=tokens_out+? WHERE day=? AND model=?",
+                tokensIn, tokensOut, day, model) == 0)
+            sql.insert("INSERT INTO llm_usage(day, model, calls, tokens_in, tokens_out) VALUES(?,?,1,?,?)", day, model, tokensIn, tokensOut);
     }
 
     public List<Row> usageSince(String day) {

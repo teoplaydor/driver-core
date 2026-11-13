@@ -12,4 +12,6 @@
     <string name="widget_voice">Сказать заметку</string>
     <string name="widget_type">Напечатать заметку</string>
     <string name="widget_description">Заметка голосом в одно касание: «завтра в 9 позвонить маме» — и напоминание стоит</string>
+    <string name="secretary_label">Секретарь</string>
+    <string name="secretary_setup_label">Секретарь: настройка</string>
 </resources>

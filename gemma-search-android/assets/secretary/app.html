@@ -1,0 +1,536 @@
+<!doctype html>
+<!-- The secretary's chat page from its server version (static/app.html); on the phone its API is answered by the app. -->
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
+<meta name="color-scheme" content="dark light">
+<title>Секретарь</title>
+<style>
+  /* Палитра в духе Claude: тёплый тёмный фон, «слоновая кость», терракотовый акцент. */
+  :root {
+    --bg: #262624; --surface: #30302e; --raised: #3a3936; --line: #3e3d39;
+    --ink: #f5f4ef; --muted: #a6a39b; --faint: #75736c;
+    --accent: #d97757; --accent-ink: #ffffff; --accent-soft: rgba(217, 119, 87, .14);
+    --code: #1f1e1d; --danger: #e5856b; --ok: #8fbf8a; --scrim: rgba(0, 0, 0, .5);
+  }
+  @media (prefers-color-scheme: light) {
+    :root {
+      --bg: #faf9f5; --surface: #f0eee6; --raised: #e8e6dc; --line: #e1ded3;
+      --ink: #141413; --muted: #6b6a64; --faint: #9a988f;
+      --accent: #c96442; --accent-ink: #ffffff; --accent-soft: rgba(201, 100, 66, .12);
+      --code: #ece9df; --danger: #b6503a; --ok: #4f8a4b; --scrim: rgba(20, 20, 19, .35);
+    }
+  }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  [hidden] { display: none !important; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    background: var(--bg); color: var(--ink);
+    font: 15.5px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    display: flex; flex-direction: column; overflow: hidden;
+  }
+  button { font: inherit; color: inherit; }
+
+  /* ---------- шапка ---------- */
+  header {
+    display: grid; grid-template-columns: 44px 1fr 44px; align-items: center;
+    padding: calc(6px + env(safe-area-inset-top)) 6px 6px; flex: none;
+  }
+  .title { text-align: center; line-height: 1.2; min-width: 0; }
+  .title b { display: block; font-size: 16px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .status { font-size: 12.5px; color: var(--muted); display: inline-flex; align-items: center; gap: 6px; }
+  .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--faint); }
+  .dot.on { background: var(--ok); }
+  .dot.off { background: var(--danger); }
+  .icon-btn {
+    width: 44px; height: 44px; border: 0; background: none; color: var(--muted);
+    display: grid; place-items: center; border-radius: 50%; cursor: pointer;
+  }
+  .icon-btn svg { width: 22px; height: 22px; }
+
+  .banner { display: none; margin: 0 14px 8px; padding: 8px 12px; border-radius: 12px; font-size: 13.5px;
+            background: var(--accent-soft); color: var(--accent); text-align: center; }
+  .banner.show { display: block; }
+
+  /* ---------- чат ---------- */
+  main { flex: 1; overflow-y: auto; padding: 4px 18px 8px; min-height: 0; }
+  .empty { color: var(--muted); text-align: center; margin-top: 28vh; font-size: 15px; padding: 0 20px; }
+  .msg { display: flex; flex-direction: column; margin: 14px 0; min-width: 0; }
+  .msg.me { align-items: flex-end; margin-left: 15%; }
+  .bubble { white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word; }
+  .me .bubble { background: var(--raised); padding: 9px 14px; border-radius: 20px; }
+  .bot .bubble { padding: 0 2px; }
+  .bubble b { font-weight: 600; }
+  .bubble i { color: var(--muted); }
+  .bubble a { color: var(--accent); text-decoration: none; }
+  .bubble code {
+    background: var(--code); padding: 2px 7px; border-radius: 7px; cursor: pointer;
+    font-family: ui-monospace, "Cascadia Mono", Consolas, monospace; font-size: 14px;
+  }
+  .bubble blockquote { margin: 8px 0; padding: 2px 0 2px 12px; border-left: 2px solid var(--accent); }
+  .time { font-size: 11px; color: var(--faint); margin: 4px 2px 0; }
+  .me .time { margin-right: 6px; }
+
+  .buttons { display: flex; flex-direction: column; gap: 8px; margin-top: 10px; }
+  .buttons .row { display: flex; gap: 8px; flex-wrap: wrap; }
+  .buttons button {
+    flex: 1 1 auto; min-width: 0; max-width: 100%; min-height: 38px;
+    border: 1px solid var(--line); background: var(--surface); border-radius: 12px;
+    padding: 7px 12px; font-size: 13.5px; cursor: pointer;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .buttons button:active { border-color: var(--accent); }
+  .buttons button:disabled { opacity: .5; }
+
+  .typing { display: none; align-items: center; gap: 10px; color: var(--muted); font-size: 14px; padding: 0 20px 6px; }
+  .typing.show { display: flex; }
+  .spark { width: 14px; height: 14px; border-radius: 50%; border: 2px solid var(--accent);
+           border-right-color: transparent; animation: spin .9s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  /* ---------- экраны-вкладки ---------- */
+  .view { flex: 1; overflow-y: auto; padding: 4px 14px 12px; min-height: 0; }
+  .card { background: var(--surface); border: 1px solid var(--line); border-radius: 16px; padding: 12px 14px; margin: 10px 0; }
+  .card .bubble { padding: 0; }
+  .card .buttons { margin-top: 10px; }
+  .card .buttons button { background: var(--bg); }
+  .card.bare { background: none; border: 0; padding: 0; }
+  .card.bare .buttons { margin-top: 0; }
+  .section { color: var(--muted); font-size: 13px; font-weight: 600; letter-spacing: .02em; margin: 22px 4px 4px; }
+  .loading { color: var(--muted); text-align: center; padding: 30px 0; }
+
+  /* ---------- низ: поле ввода и вкладки ---------- */
+  .composer {
+    margin: 0 12px 8px; padding: 8px 8px 8px 16px; flex: none;
+    background: var(--surface); border: 1px solid var(--line); border-radius: 26px;
+    display: flex; align-items: flex-end; gap: 8px;
+  }
+  textarea {
+    flex: 1; resize: none; border: 0; outline: none; background: transparent; color: var(--ink);
+    font: inherit; padding: 8px 0; max-height: 150px;
+  }
+  textarea::placeholder { color: var(--faint); }
+  .round {
+    width: 40px; height: 40px; border-radius: 50%; border: 0; flex: none; cursor: pointer;
+    display: grid; place-items: center; background: var(--raised); color: var(--muted);
+  }
+  .round svg { width: 20px; height: 20px; }
+  .round.primary { background: var(--accent); color: var(--accent-ink); }
+  .round.rec { background: var(--danger); color: #fff; animation: pulse 1.2s infinite; }
+  @keyframes pulse { 50% { opacity: .65; } }
+
+  nav.tabs {
+    flex: none; display: grid; grid-template-columns: repeat(5, 1fr);
+    border-top: 1px solid var(--line); background: var(--bg);
+    padding: 4px 4px calc(4px + env(safe-area-inset-bottom));
+  }
+  .tab {
+    border: 0; background: none; color: var(--faint); cursor: pointer; position: relative;
+    display: flex; flex-direction: column; align-items: center; gap: 2px; padding: 6px 0; font-size: 11.5px;
+  }
+  .tab svg { width: 22px; height: 22px; }
+  .tab.active { color: var(--accent); }
+  .badge {
+    position: absolute; top: 2px; left: calc(50% + 6px); min-width: 17px; height: 17px; padding: 0 5px;
+    border-radius: 9px; background: var(--accent); color: var(--accent-ink); font-size: 11px; line-height: 17px;
+  }
+
+  /* ---------- шторка снизу ---------- */
+  .scrim { position: fixed; inset: 0; background: var(--scrim); z-index: 10; }
+  .sheet {
+    position: fixed; left: 0; right: 0; bottom: 0; z-index: 11;
+    background: var(--surface); border-radius: 20px 20px 0 0; padding: 10px 14px calc(14px + env(safe-area-inset-bottom));
+  }
+  .sheet .grip { width: 36px; height: 4px; border-radius: 2px; background: var(--line); margin: 0 auto 10px; }
+  .sheet h3 { margin: 4px 4px 10px; font-size: 15px; font-weight: 600; overflow-wrap: anywhere; }
+  .sheet button {
+    display: block; width: 100%; text-align: left; border: 0; background: none; cursor: pointer;
+    padding: 13px 8px; border-radius: 12px; font-size: 15.5px;
+  }
+  .sheet button:active { background: var(--raised); }
+  .sheet .muted { color: var(--muted); }
+
+  .toast {
+    position: fixed; left: 50%; bottom: 140px; transform: translateX(-50%); z-index: 20; max-width: 86vw;
+    background: var(--ink); color: var(--bg); padding: 8px 16px; border-radius: 18px; font-size: 14px;
+    opacity: 0; transition: opacity .2s; pointer-events: none; text-align: center;
+  }
+  .toast.show { opacity: .95; }
+</style>
+</head>
+<body>
+<header>
+  <button class="icon-btn" id="back" title="Назад" hidden>
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 18l-6-6 6-6"/></svg>
+  </button>
+  <span id="back-spacer"></span>
+  <div class="title">
+    <b id="title">Секретарь</b>
+    <span class="status"><span class="dot" id="dot"></span><span id="status">подключаюсь…</span></span>
+  </div>
+  <button class="icon-btn" id="menu" title="Ещё">
+    <svg viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="5" r="1.8"/><circle cx="12" cy="12" r="1.8"/><circle cx="12" cy="19" r="1.8"/></svg>
+  </button>
+</header>
+<div class="banner" id="banner">Нет связи с сервером — повторяю…</div>
+
+<main id="list"><div class="empty" id="empty">Загружаю…</div></main>
+<section class="view" id="view" hidden></section>
+
+<div class="typing" id="typing"><span class="spark"></span>Секретарь думает…</div>
+<div class="composer" id="composer">
+  <textarea id="input" rows="1" placeholder="Написать секретарю"></textarea>
+  <button class="round" id="mic" title="Голосом" hidden>
+    <svg id="mic-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3"/></svg>
+    <svg id="stop-icon" viewBox="0 0 24 24" fill="currentColor" hidden><rect x="7" y="7" width="10" height="10" rx="2"/></svg>
+  </button>
+  <button class="round primary" id="send" title="Отправить">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M6 11l6-6 6 6"/></svg>
+  </button>
+</div>
+
+<nav class="tabs" id="tabs">
+  <button class="tab active" data-tab="chat">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"><path d="M4 5h16v11H9l-5 4z"/></svg>Чат
+  </button>
+  <button class="tab" data-tab="tasks">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="4" width="16" height="16" rx="4"/><path d="M8.5 12l2.5 2.5 4.5-5"/></svg>Дела<span class="badge" id="badge" hidden></span>
+  </button>
+  <button class="tab" data-tab="today">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><rect x="4" y="5" width="16" height="15" rx="3"/><path d="M4 10h16M9 3v4M15 3v4"/></svg>Сегодня
+  </button>
+  <button class="tab" data-tab="digest">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M5 6h14M5 12h14M5 18h9"/></svg>Сводка
+  </button>
+  <button class="tab" data-tab="spent">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="6" width="18" height="13" rx="3"/><path d="M3 10h18M16 15h2"/></svg>Расходы
+  </button>
+</nav>
+
+<div class="scrim" id="scrim" hidden></div>
+<div class="sheet" id="sheet" hidden><div class="grip"></div><h3 id="sheet-title"></h3><div id="sheet-body"></div></div>
+<div class="toast" id="toast"></div>
+
+<script>
+(() => {
+  const native = window.Android || null;
+  const $ = (id) => document.getElementById(id);
+  const list = $("list"), input = $("input"), view = $("view");
+  let lastId = -1, failures = 0, recording = false;
+  let tab = "chat", viewArg = 0;
+  const rendered = new Map();
+  const TAB_TITLES = { chat: "Секретарь" };
+
+  const fmtTime = (iso) => new Date(iso).toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit" });
+  const nearBottom = () => list.scrollHeight - list.scrollTop - list.clientHeight < 120;
+  const toBottom = () => { list.scrollTop = list.scrollHeight; };
+
+  function toast(html) {
+    const t = $("toast");
+    t.innerHTML = html; t.classList.add("show");
+    clearTimeout(toast.timer); toast.timer = setTimeout(() => t.classList.remove("show"), 2200);
+  }
+
+  function setOnline(ok) {
+    $("dot").className = "dot " + (ok ? "on" : "off");
+    $("status").textContent = ok ? "на связи" : "нет связи";
+    $("banner").classList.toggle("show", !ok && failures > 1);
+  }
+
+  function setTyping(on) { $("typing").classList.toggle("show", on && tab === "chat"); if (on) toBottom(); }
+
+  async function api(path, body) {
+    // on the phone the secretary answers itself: POST through the app's bridge (a WebView does not pass a body on)
+    if (body !== undefined && native && native.post) {
+      const out = native.post(path, JSON.stringify(body));
+      if (out.startsWith("!")) throw new Error("HTTP " + out.slice(1));
+      return JSON.parse(out);
+    }
+    const r = await fetch(path, body === undefined ? {} : {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+    });
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    return r.json();
+  }
+
+  // ---------- кнопки: одни и те же для сообщений и экранов ----------
+  function buttonsEl(rows, ctx) {
+    const box = document.createElement("div");
+    box.className = "buttons";
+    for (const row of rows) {
+      const r = document.createElement("div");
+      r.className = "row";
+      for (const b of row) {
+        const btn = document.createElement("button");
+        btn.textContent = b.text;
+        btn.onclick = () => press(b.data, btn, ctx);
+        r.appendChild(btn);
+      }
+      box.appendChild(r);
+    }
+    return box;
+  }
+
+  async function press(data, btn, ctx) {
+    const [action, raw] = data.split(":");
+    const id = Number(raw);
+    if (action === "full") return navigate("item", id);
+    if (action === "cat") return navigate("cat", id);
+    if (action === "ops") return navigate("ops");
+    if (action === "tsnz") return snoozeSheet(id, ctx);
+    if (action === "draft") { navigate("chat"); setTyping(true); return post("draft", id, ctx.msg); }
+    btn.disabled = true;
+    await post(action, id, ctx.msg);
+    btn.disabled = false;
+  }
+
+  async function post(action, id, msg = 0) {
+    try {
+      const r = await api("/api/button", { action, id, msg });
+      if (!r.ok) { toast("Не получилось: " + (r.error || "")); return; }
+      if (r.message) render(r.message);          // сообщение правится на месте
+      else if (r.reply) toast(r.reply);
+      if (tab !== "chat") refreshView();          // экран показывает свежее состояние
+      refreshBadge();
+    } catch (e) { toast("Нет связи — попробуй ещё раз"); }
+  }
+
+  // ---------- шторка «Отложить» ----------
+  function openSheet(title, items) {
+    $("sheet-title").textContent = title;
+    const body = $("sheet-body");
+    body.innerHTML = "";
+    for (const [label, fn, muted] of items) {
+      const b = document.createElement("button");
+      b.textContent = label;
+      if (muted) b.className = "muted";
+      b.onclick = () => { closeSheet(); fn(); };
+      body.appendChild(b);
+    }
+    $("scrim").hidden = false; $("sheet").hidden = false;
+  }
+  function closeSheet() { $("scrim").hidden = true; $("sheet").hidden = true; }
+  $("scrim").onclick = closeSheet;
+
+  function snoozeSheet(id, ctx) {
+    openSheet("Когда спросить снова?", [
+      ["Через 30 минут", () => post("t30m", id, ctx.msg)],
+      ["Через 2 часа", () => post("t2h", id, ctx.msg)],
+      ["Вечером", () => post("teve", id, ctx.msg)],
+      ["Завтра утром", () => post("ttom", id, ctx.msg)],
+      ["Принял — спроси ближе к сроку", () => post("tacc", id, ctx.msg)],
+      ["Не нужно", () => post("tdrop", id, ctx.msg), true],
+    ]);
+  }
+
+  // ---------- чат ----------
+  function render(m) {
+    $("empty")?.remove();
+    let wrap = rendered.get(m.id);
+    if (!wrap) {
+      wrap = document.createElement("div");
+      wrap.className = "msg " + (m.role === "me" ? "me" : "bot");
+      list.appendChild(wrap);
+      rendered.set(m.id, wrap);
+    }
+    wrap.innerHTML = "";
+    const bubble = document.createElement("div");
+    bubble.className = "bubble";
+    bubble.innerHTML = m.html;  // сервер экранирует весь пользовательский текст
+    bubble.querySelectorAll("a").forEach((a) => { a.target = "_blank"; a.rel = "noopener"; });
+    const time = document.createElement("div");
+    time.className = "time";
+    time.textContent = fmtTime(m.ts);
+    wrap.append(bubble, time);
+    if (m.buttons.length) wrap.appendChild(buttonsEl(m.buttons, { msg: m.id }));
+  }
+
+  function addMessages(msgs) {
+    if (!msgs.length) return;
+    const stick = nearBottom() || lastId < 0;
+    for (const m of msgs) {
+      render(m);
+      lastId = Math.max(lastId, m.id);
+      if (m.role === "bot") setTyping(false);
+    }
+    if (stick) toBottom();
+    if (native && document.visibilityState === "visible") native.seen(lastId);
+    refreshBadge();
+  }
+
+  async function poll() {
+    for (;;) {
+      try {
+        const wait = lastId < 0 ? 0 : 25;
+        const data = await api(`/api/messages?after=${lastId}&wait=${wait}`);
+        failures = 0; setOnline(true);
+        if (lastId < 0 && !data.messages.length) {
+          $("empty").textContent = "Здесь будут срочное и ответы. Спроси что-нибудь — голосом или текстом.";
+          lastId = 0;
+        }
+        addMessages(data.messages);
+      } catch (e) {
+        failures++; setOnline(false);
+        await new Promise((r) => setTimeout(r, Math.min(15000, 2000 * failures)));
+      }
+    }
+  }
+
+  // ---------- экраны-вкладки ----------
+  async function refreshView() {
+    try {
+      const v = await api(`/api/view?name=${tab}&id=${viewArg}`);
+      $("title").innerHTML = v.title;
+      view.innerHTML = "";
+      for (const b of v.blocks) {
+        if (b.section) {  // заголовок раздела, например «Позже · 3»
+          const h = document.createElement("div");
+          h.className = "section";
+          h.textContent = b.section;
+          view.appendChild(h);
+          continue;
+        }
+        const card = document.createElement("div");
+        card.className = b.html ? "card" : "card bare";
+        if (b.html) {
+          const bubble = document.createElement("div");
+          bubble.className = "bubble";
+          bubble.innerHTML = b.html;
+          bubble.querySelectorAll("a").forEach((a) => { a.target = "_blank"; a.rel = "noopener"; });
+          card.appendChild(bubble);
+        }
+        if (b.buttons.length) card.appendChild(buttonsEl(b.buttons, { msg: 0 }));
+        view.appendChild(card);
+      }
+    } catch (e) {
+      view.innerHTML = '<div class="loading">Нет связи — потяни позже</div>';
+    }
+  }
+
+  // Нижние вкладки — корни: «Назад» с любой ведёт в «Чат», из «Чата» — выход из приложения.
+  // Вложенные экраны (письмо, категория расходов, история, близкие) — «Назад» на предыдущий.
+  const ROOTS = ["chat", "tasks", "today", "digest", "spent"];
+  const stack = [];
+
+  function show(name, arg = 0) {
+    tab = name; viewArg = arg;
+    document.querySelectorAll(".tab").forEach((t) => t.classList.toggle("active", t.dataset.tab === name));
+    const chat = name === "chat";
+    const sub = !ROOTS.includes(name);
+    list.hidden = !chat; $("composer").hidden = !chat;
+    view.hidden = chat;
+    $("back").hidden = !sub; $("back-spacer").hidden = sub;
+    if (!chat) setTyping(false);
+    if (chat) { $("title").textContent = TAB_TITLES.chat; toBottom(); return; }
+    view.innerHTML = '<div class="loading">Загружаю…</div>';
+    view.scrollTop = 0;
+    refreshView();
+  }
+
+  function navigate(name, arg = 0) {
+    if (name === tab && arg === viewArg) return;
+    if (ROOTS.includes(name)) {
+      stack.length = 0;
+      if (name !== "chat") stack.push({ name: "chat", arg: 0 });
+    } else {
+      stack.push({ name: tab, arg: viewArg });
+    }
+    show(name, arg);
+  }
+
+  // Системная кнопка «Назад» на телефоне спрашивает страницу: true — шаг назад сделан здесь.
+  window.goBack = () => {
+    if (!$("sheet").hidden) { closeSheet(); return true; }
+    const prev = stack.pop();
+    if (!prev) return false;
+    show(prev.name, prev.arg);
+    return true;
+  };
+
+  $("tabs").addEventListener("click", (e) => {
+    const t = e.target.closest("[data-tab]");
+    if (t) navigate(t.dataset.tab);
+  });
+  $("back").onclick = () => window.goBack();
+
+  async function refreshBadge() {
+    try {
+      const n = (await api("/api/tasks?active=1")).tasks.length;
+      $("badge").hidden = !n; $("badge").textContent = n;
+    } catch (e) { /* без связи — оставим как было */ }
+  }
+
+  $("menu").onclick = () => {
+    const items = [
+      ["Близкие люди", () => navigate("people")],
+      ["Нейросеть: сколько потрачено", () => navigate("usage")],
+      ["Что умеет секретарь", () => navigate("help")],
+    ];
+    if (native) items.push(["Настройки секретаря", () => native.openSetup()]);
+    openSheet("Ещё", items);
+  };
+
+  // ---------- ввод ----------
+  async function sendText() {
+    const text = input.value.trim();
+    if (!text) return;
+    input.value = ""; autosize();
+    try { await api("/api/message", { text }); setTyping(true); }
+    catch (e) { input.value = text; autosize(); toast("Не отправилось, проверь связь"); }
+  }
+  function autosize() { input.style.height = "auto"; input.style.height = Math.min(150, input.scrollHeight) + "px"; }
+
+  async function copy(text) {
+    if (native) { native.copy(text); toast("Скопировано"); return; }
+    try { await navigator.clipboard.writeText(text); }
+    catch (e) {
+      const t = document.createElement("textarea");
+      t.value = text; document.body.appendChild(t); t.select(); document.execCommand("copy"); t.remove();
+    }
+    toast("Скопировано");
+  }
+  document.body.addEventListener("click", (e) => {
+    const code = e.target.closest(".bubble code");
+    if (code) copy(code.textContent);
+  });
+  $("send").onclick = sendText;
+  input.addEventListener("input", autosize);
+  input.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && !e.shiftKey && !native) { e.preventDefault(); sendText(); }
+  });
+
+  function setRecording(on) {
+    recording = on;
+    $("mic").classList.toggle("rec", on);
+    $("mic-icon").hidden = on; $("stop-icon").hidden = !on;
+  }
+  if (native) {
+    $("mic").hidden = false;
+    $("mic").onclick = () => {
+      if (!recording) {
+        if (native.startVoice()) setRecording(true);
+      } else {
+        setRecording(false);
+        native.stopVoice();
+        setTyping(true);
+      }
+    };
+    window.onVoiceResult = (ok, error) => {
+      if (!ok) { setTyping(false); toast(error || "Голосовое не отправилось"); }
+    };
+    document.addEventListener("visibilitychange", () => {
+      if (document.visibilityState === "visible") {
+        if (lastId > 0) native.seen(lastId);
+        if (tab !== "chat") refreshView();
+        refreshBadge();
+      }
+    });
+  }
+
+  poll();
+  refreshBadge();
+})();
+</script>
+</body>
+</html>

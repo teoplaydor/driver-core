@@ -22,6 +22,9 @@
 #   ScanTest        — a document photo offered as a scan for printing: the sheet cut out, black and white, saved;
 #                     a bent sheet flattened, its lines straightened by «Текст ровно»; pictures chosen with a long
 #                     press, the documents among them scanned into one PDF
+#   SecretaryAppTest — the secretary: notifications read into it, «Тишина» (Не беспокоить + the important shown
+#                     again), its own notifications, «Сделал?» and its answer, the exact alarm, its chat page with the API
+#                     (intercepted GET, POST through the bridge), its settings, the GGUF picked from a repo
 #   AppIndexingTest — MediaStore → decode → embed → SQLite with a stand-in model, Russian bridge
 #   IndexStopTest   — a broken model (the same error file after file, the NPU process gone) stops the run, files unmarked
 #   AutoIndexTest   — background jobs: content triggers on MediaStore, the periodic safety net
@@ -102,7 +105,7 @@ fi
 
 rm -rf build/shots
 TESTS=("$@")
-[ ${#TESTS[@]} -gt 0 ] || TESTS=(UiShots AppFlowTest AppIndexingTest IndexStopTest PipelineTest ViewerTest HiddenTest PeopleAppTest NavTest ScanTest NotesTest QuickNoteTest AssistantTest WellbeingTest WristTest WristWatchTest AudioFilesTest OpenTimeoutTest AutoIndexTest IdleIndexTest SpeedupsTest)
+[ ${#TESTS[@]} -gt 0 ] || TESTS=(UiShots AppFlowTest AppIndexingTest IndexStopTest PipelineTest ViewerTest HiddenTest PeopleAppTest NavTest ScanTest NotesTest QuickNoteTest AssistantTest WellbeingTest WristTest WristWatchTest AudioFilesTest OpenTimeoutTest AutoIndexTest IdleIndexTest SpeedupsTest io.github.teoplaydor.semsearch.app.SecretaryAppTest)
 # One JVM per class: Engine is an app-wide singleton.
 for t in "${TESTS[@]}"; do
   echo "-- $t"

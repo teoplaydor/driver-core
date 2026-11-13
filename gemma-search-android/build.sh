@@ -10,8 +10,8 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 ORT_VERSION=1.30.0
-VERSION_CODE=77
-VERSION_NAME=0.26.1
+VERSION_CODE=78
+VERSION_NAME=0.27
 ANDROID_JAR=${ANDROID_JAR:-/usr/lib/android-sdk/platforms/android-23/android.jar}
 AAPT2=${AAPT2:-$(ls /usr/lib/android-sdk/build-tools/*/aapt2 2>/dev/null | head -1)}
 DX=${DX:-dalvik-exchange}
@@ -66,23 +66,29 @@ cp "$SECLLM" "$B/apk/lib/arm64-v8a/libsecllm.so"
 
 # --- resources + manifest
 # The manifest uses Android 14 attributes (foreground service type): link it against the Android 14
-# framework resource table, taken from Robolectric's android-all on Maven Central (cached, 4 MB kept).
+# framework resource table — from Robolectric's android-all if the UI tests already fetched it, else from the
+# Android 14 platform's android.jar on Google's repository (63 MB, checked; 4 MB kept).
 FW_RES="$B/deps/android-34-res.apk"
 if [ ! -s "$FW_RES" ]; then
   AA=build/robo4/deps/android-all-instrumented-14-robolectric-10818077-i7.jar
   if [ ! -s "$AA" ]; then
-    AA="$B/deps/android-all-14.jar"
-    fetch "https://repo1.maven.org/maven2/org/robolectric/android-all-instrumented/14-robolectric-10818077-i7/android-all-instrumented-14-robolectric-10818077-i7.jar" "$AA"
+    AA="$B/deps/platform-34.zip"
+    fetch "https://dl.google.com/android/repository/platform-34-ext7_r03.zip" "$AA"
+    echo "1f2e9478d6a7601425ceaa553311dc43191f103d  $AA" | sha1sum -c --quiet - || { rm -f "$AA"; echo "platform-34 checksum" >&2; exit 1; }
   fi
   python3 - "$AA" "$FW_RES" <<'PY2'
-import sys, zipfile
-src, out = zipfile.ZipFile(sys.argv[1]), zipfile.ZipFile(sys.argv[2] + ".tmp", "w", zipfile.ZIP_DEFLATED)
+import io, sys, zipfile
+src = zipfile.ZipFile(sys.argv[1])
+jar = [n for n in src.namelist() if n.endswith("/android.jar")]
+if jar:  # the platform zip: the table is inside its android.jar
+    src = zipfile.ZipFile(io.BytesIO(src.read(jar[0])))
+out = zipfile.ZipFile(sys.argv[2] + ".tmp", "w", zipfile.ZIP_DEFLATED)
 for n in ("AndroidManifest.xml", "resources.arsc"):
     out.writestr(n, src.read(n))
 out.close()
 PY2
   mv "$FW_RES.tmp" "$FW_RES"
-  rm -f "$B/deps/android-all-14.jar"
+  rm -f "$B/deps/platform-34.zip"
 fi
 "$AAPT2" compile --dir res -o "$B/res.zip"
 "$AAPT2" link -o "$B/base.apk" -I "$FW_RES" --manifest AndroidManifest.xml \

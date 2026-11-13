@@ -24,5 +24,6 @@
         <item name="android:textColorHighlight">#3A4858</item>
     </style>
     <color name="bg">#0E1116</color>
+    <color name="secretary_bg">#D97757</color>
     <color name="icon_bg">#18202A</color>
 </resources>
