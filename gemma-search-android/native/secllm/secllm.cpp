@@ -11,6 +11,7 @@
 #include <chrono>
 #include <cstdio>
 #include <cstring>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <vector>
@@ -171,6 +172,24 @@ int prefix_slot(Engine &e, const std::vector<llama_token> &toks) {
     return slot->seq;
 }
 
+// The context is shared by the kept prefixes and the request in hand: make room for `need` more tokens by dropping
+// the least recently used prefixes (never `keep`). False when even all of them gone is not enough.
+bool ensure_room(Engine &e, int need, int keep) {
+    llama_memory_t mem = llama_get_memory(e.ctx);
+    for (;;) {
+        int used = 0;
+        for (auto &p : e.prefixes) used += (int) p.tokens.size();
+        if (e.n_ctx - used >= need) return true;
+        Prefix *victim = nullptr;
+        for (auto &p : e.prefixes)
+            if (!p.tokens.empty() && p.seq != keep && (!victim || p.used < victim->used)) victim = &p;
+        if (!victim) return false;
+        llama_memory_seq_rm(mem, victim->seq, -1, -1);
+        victim->tokens.clear();
+        victim->used = 0;
+    }
+}
+
 double ms_since(Clock::time_point t) {
     return std::chrono::duration<double, std::milli>(Clock::now() - t).count();
 }
@@ -238,18 +257,28 @@ JNIEXPORT void JNICALL Java_io_github_teoplaydor_semsearch_secretary_LocalLlm_na
     if (e) e->cancel = true;
 }
 
+/** Forget a cancel not yet used (before a request that must not be stopped by an earlier one). */
+JNIEXPORT void JNICALL Java_io_github_teoplaydor_semsearch_secretary_LocalLlm_nativeResetCancel(JNIEnv *, jclass, jlong h) {
+    Engine *e = reinterpret_cast<Engine *>(h);
+    if (e) e->cancel = false;
+}
+
 /**
  * prefix: kept in the cache for the next request of the same kind (the system prompt and the start of the user
  * turn); suffix: the rest of the prompt. grammar: GBNF (empty — free text). temperature 0 — greedy.
  * Returns the answer; null when cancelled or the context is too small.
  */
-JNIEXPORT jstring JNICALL Java_io_github_teoplaydor_semsearch_secretary_LocalLlm_nativeGenerate(
-        JNIEnv *env, jclass, jlong h, jstring jprefix, jstring jsuffix, jstring jgrammar, jint max_tokens,
-        jfloat temperature, jint seed) {
+static jstring generate(JNIEnv *env, jlong h, jstring jprefix, jstring jsuffix, jstring jgrammar, jint max_tokens,
+                       jfloat temperature, jint seed) {
     Engine *e = reinterpret_cast<Engine *>(h);
     if (!e) return nullptr;
     std::lock_guard<std::mutex> g(e->lock);
-    e->cancel = false;
+    // a cancel that came before this request started counts too (it is meant for it); it is used up at the end
+    struct Reset {
+        Engine *e;
+        ~Reset() { e->cancel = false; }
+    } reset{e};
+    if (e->cancel.load()) return nullptr;
     e->last_prefix_new = 0;
     e->last_prefix_hit = false;
     const std::string prefix = to_utf8(env, jprefix), suffix = to_utf8(env, jsuffix), grammar = to_utf8(env, jgrammar);
@@ -261,6 +290,10 @@ JNIEXPORT jstring JNICALL Java_io_github_teoplaydor_semsearch_secretary_LocalLlm
     if (stoks.empty() || (int) (ptoks.size() + stoks.size()) + max_tokens > e->n_ctx) return nullptr;
 
     llama_memory_seq_rm(mem, e->work, -1, -1);
+    int hit = -1;
+    for (auto &p : e->prefixes)
+        if (!ptoks.empty() && p.tokens == ptoks) hit = p.seq;
+    if (!ensure_room(*e, (hit >= 0 ? 0 : (int) ptoks.size()) + (int) stoks.size() + max_tokens + 1, hit)) return nullptr;
     int pos = 0;
     if (!ptoks.empty()) {
         const int slot = prefix_slot(*e, ptoks);
@@ -288,6 +321,9 @@ JNIEXPORT jstring JNICALL Java_io_github_teoplaydor_semsearch_secretary_LocalLlm
         }
     }
     llama_sampler *chain = llama_sampler_chain_init(llama_sampler_chain_default_params());
+    // freed however this ends (a C++ exception from the grammar included)
+    std::unique_ptr<llama_sampler, void (*)(llama_sampler *)> gs_guard(gs, [](llama_sampler *p) { if (p) llama_sampler_free(p); });
+    std::unique_ptr<llama_sampler, void (*)(llama_sampler *)> chain_guard(chain, llama_sampler_free);
     if (temperature <= 0) {
         llama_sampler_chain_add(chain, llama_sampler_init_greedy());
     } else {
@@ -309,6 +345,10 @@ JNIEXPORT jstring JNICALL Java_io_github_teoplaydor_semsearch_secretary_LocalLlm
     int n_out = 0;
     bool cancelled = false;
     llama_batch one = llama_batch_init(1, 0, 1);
+    struct BatchFree {
+        llama_batch *b;
+        ~BatchFree() { llama_batch_free(*b); }
+    } one_guard{&one};
     for (; n_out < max_tokens; n_out++) {
         if (e->cancel.load()) { cancelled = true; break; }
         llama_token_data_array arr;
@@ -328,6 +368,7 @@ JNIEXPORT jstring JNICALL Java_io_github_teoplaydor_semsearch_secretary_LocalLlm
                                   [](const llama_token_data &x, const llama_token_data &y) { return x.logit > y.logit; });
                 llama_token_data_array top{cur.data(), k, -1, true};
                 llama_sampler_apply(gs, &top);
+                top.sorted = false; // refused ones are -inf now, in place: top-k must not take the order as given
                 bool any = false;
                 for (size_t i = 0; i < k && !any; i++) any = top.data[i].logit != -INFINITY;
                 if (any) {
@@ -356,14 +397,26 @@ JNIEXPORT jstring JNICALL Java_io_github_teoplaydor_semsearch_secretary_LocalLlm
             break;
         }
     }
-    if (gs) llama_sampler_free(gs);
-    llama_batch_free(one);
-    llama_sampler_free(chain);
     llama_memory_seq_rm(mem, e->work, -1, -1);
     e->last_out = n_out;
     e->last_decode_ms = ms_since(t1);
     if (cancelled) return nullptr;
     return from_utf8(env, out);
+}
+
+JNIEXPORT jstring JNICALL Java_io_github_teoplaydor_semsearch_secretary_LocalLlm_nativeGenerate(
+        JNIEnv *env, jclass, jlong h, jstring jprefix, jstring jsuffix, jstring jgrammar, jint max_tokens,
+        jfloat temperature, jint seed) {
+    // a C++ exception must not cross into Java (it would end the whole app): it becomes an error answer
+    try {
+        return generate(env, h, jprefix, jsuffix, jgrammar, max_tokens, temperature, seed);
+    } catch (const std::exception &ex) {
+        Engine *e = reinterpret_cast<Engine *>(h);
+        if (e) llama_memory_seq_rm(llama_get_memory(e->ctx), e->work, -1, -1);
+        return from_utf8(env, std::string("\x01error: ") + ex.what());
+    } catch (...) {
+        return from_utf8(env, std::string("\x01error"));
+    }
 }
 
 /** The last request: "prompt tokens, of them read now, prefill ms, answer tokens, decode ms, prefix hit". */
@@ -406,6 +459,39 @@ JNIEXPORT jint JNICALL Java_io_github_teoplaydor_semsearch_secretary_LocalLlm_na
     if (!e) return -1;
     const std::vector<llama_token> t = tokenize(*e, to_utf8(env, text));
     return t.size() == 1 && llama_vocab_get_attr(e->vocab, t[0]) & LLAMA_TOKEN_ATTR_CONTROL ? t[0] : -1;
+}
+
+/**
+ * Does the grammar take this text, as the model would write it (its tokens, then the end)? 1 yes, 0 no, -1 a broken
+ * grammar. For tests of the grammars: the same checks as in generation, without a model's choice.
+ */
+JNIEXPORT jint JNICALL Java_io_github_teoplaydor_semsearch_secretary_LocalLlm_nativeGrammarAccepts(
+        JNIEnv *env, jclass, jlong h, jstring jgrammar, jstring jtext) {
+    Engine *e = reinterpret_cast<Engine *>(h);
+    if (!e) return -1;
+    std::lock_guard<std::mutex> g(e->lock);
+    const std::string grammar = to_utf8(env, jgrammar), text = to_utf8(env, jtext);
+    llama_sampler *gs = llama_sampler_init_grammar(e->vocab, grammar.c_str(), "root");
+    if (!gs) return -1;
+    std::unique_ptr<llama_sampler, void (*)(llama_sampler *)> guard(gs, llama_sampler_free);
+    try {
+        int n = -llama_tokenize(e->vocab, text.c_str(), (int32_t) text.size(), nullptr, 0, false, false);
+        std::vector<llama_token> toks(std::max(n, 0));
+        if (n > 0) llama_tokenize(e->vocab, text.c_str(), (int32_t) text.size(), toks.data(), n, false, false);
+        for (llama_token t : toks) {
+            llama_token_data one{t, 1.0f, 0.0f};
+            llama_token_data_array arr{&one, 1, -1, false};
+            llama_sampler_apply(gs, &arr);
+            if (one.logit == -INFINITY) return 0;
+            llama_sampler_accept(gs, t);
+        }
+        llama_token_data end{llama_vocab_eos(e->vocab), 1.0f, 0.0f};
+        llama_token_data_array arr{&end, 1, -1, false};
+        llama_sampler_apply(gs, &arr);
+        return end.logit == -INFINITY ? 0 : 1;
+    } catch (const std::exception &) {
+        return 0;
+    }
 }
 
 }  // extern "C"

@@ -123,14 +123,24 @@ public final class LocalLlm implements Closeable {
     /** The prompt as given: `prefix` kept in the cache, `suffix` read each time. */
     public String raw(String prefix, String suffix, String grammar, int maxTokens, float temperature, int seed) {
         String out = nativeGenerate(h(), prefix, suffix, grammar == null ? "" : grammar, maxTokens, temperature, seed);
-        if (out != null && out.startsWith("\u0001")) throw new IllegalArgumentException("bad grammar");
+        if (out != null && out.startsWith("\u0001grammar")) throw new IllegalArgumentException("bad grammar");
+        if (out != null && out.startsWith("\u0001")) throw new IllegalStateException("the engine failed: " + out.substring(1));
         return out;
     }
 
-    /** Stops the request in hand (from any thread): it returns null. */
+    /**
+     * Stops the request in hand (from any thread): it returns null. A cancel that comes just before a request starts
+     * stops that one (it is used up by it).
+     */
     public void cancel() {
         long hh = handle;
         if (hh != 0) nativeCancel(hh);
+    }
+
+    /** Forgets a cancel not used yet. */
+    public void resetCancel() {
+        long hh = handle;
+        if (hh != 0) nativeResetCancel(hh);
     }
 
     public Stats lastStats() {
@@ -145,6 +155,13 @@ public final class LocalLlm implements Closeable {
 
     public int context() {
         return nativeContext(h());
+    }
+
+    /** Does the grammar take this text as the model would write it? (For tests of the grammars.) */
+    public boolean grammarAccepts(String grammar, String text) {
+        int r = nativeGrammarAccepts(h(), grammar, text);
+        if (r < 0) throw new IllegalArgumentException("bad grammar");
+        return r == 1;
     }
 
     /** A string from the model file ("general.name"…), or null. */
@@ -202,6 +219,8 @@ public final class LocalLlm implements Closeable {
 
     static native void nativeCancel(long h);
 
+    static native void nativeResetCancel(long h);
+
     static native String nativeGenerate(long h, String prefix, String suffix, String grammar, int maxTokens, float temperature, int seed);
 
     static native String nativeStats(long h);
@@ -213,4 +232,6 @@ public final class LocalLlm implements Closeable {
     static native String nativeMeta(long h, String key);
 
     static native int nativeSpecial(long h, String text);
+
+    static native int nativeGrammarAccepts(long h, String grammar, String text);
 }
