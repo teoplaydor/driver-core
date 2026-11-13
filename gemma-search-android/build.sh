@@ -3,6 +3,8 @@
 #   Ubuntu/Debian packages: aapt2 (android-sdk-build-tools), dalvik-exchange (dx), zipalign,
 #                           apksigner, android-sdk-platform-23 (android.jar), a JDK (javac/keytool)
 #   Maven Central:          com.microsoft.onnxruntime:onnxruntime-android (AAR + sources)
+#   GitHub + Google:        PrismML's llama.cpp fork (a pinned commit) and the Android NDK, for libsecllm.so
+#                           (tools/build_secllm.sh; also needs git, cmake, unzip)
 # usage: ./build.sh            -> build/SemSearch.apk
 set -euo pipefail
 cd "$(dirname "$0")"
@@ -51,6 +53,16 @@ z = zipfile.ZipFile(sys.argv[1])
 for n in ("libonnxruntime.so", "libonnxruntime4j_jni.so"):
     open(f"{sys.argv[2]}/{n}", "wb").write(z.read(f"jni/arm64-v8a/{n}"))
 PY
+
+# --- the secretary's own language model: llama.cpp (PrismML's fork, for the ternary Bonsai models) + native/secllm,
+# built with the Android NDK by tools/build_secllm.sh; rebuilt only when native/secllm or the script change.
+SECLLM="$B/deps/secllm/libsecllm.so"
+SECLLM_KEY=$(cat native/secllm/* tools/build_secllm.sh | sha256sum | cut -c1-16)
+if [ ! -s "$SECLLM" ] || [ "$(cat "$SECLLM.key" 2>/dev/null)" != "$SECLLM_KEY" ]; then
+  tools/build_secllm.sh "$SECLLM"
+  echo "$SECLLM_KEY" > "$SECLLM.key"
+fi
+cp "$SECLLM" "$B/apk/lib/arm64-v8a/libsecllm.so"
 
 # --- resources + manifest
 # The manifest uses Android 14 attributes (foreground service type): link it against the Android 14

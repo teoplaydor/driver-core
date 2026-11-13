@@ -5,6 +5,7 @@
 #                          on a dummy model with the same ONNX inputs/outputs (text, images, video)
 #                          and SigLIP 2 (the fast photo model) vs transformers.js SiglipText/VisionModel
 #   2a'. OCR             — text on pictures (PaddleOCR models on ONNX Runtime) vs RapidOCR: same text, same boxes
+#   2f. secretary LLM   — libsecllm (llama.cpp + our JNI) on a tiny Qwen3: prompt cache, grammar, cancel, UTF-8
 #   2d. LiteRT-LM        — our Java side against a stand-in library with LiteRT-LM 0.18's own JNI glue
 #                          (engine settings, prompts, budgets, batches, errors), install from mock
 #                          Google Maven + Hub (version, arm64 libraries, bundle choice, resume)
@@ -187,6 +188,22 @@ javac --release 8 -XDstringConcat=inline -nowarn -encoding UTF-8 -cp "$T/cls" -d
 java -Dfile.encoding=UTF-8 -Dstdout.encoding=UTF-8 -cp "$T/cls" LiteRtJniTest "$L/lib" 2>&1 | grep -v "stack guard\|execstack"
 java -Dfile.encoding=UTF-8 -Dstdout.encoding=UTF-8 -Dhttp.nonProxyHosts=127.0.0.1 -cp "$T/cls" LiteRtInstallTest
 java -Dfile.encoding=UTF-8 -Dstdout.encoding=UTF-8 -Dhttp.nonProxyHosts=127.0.0.1 -cp "$T/cls" QnnInstallTest
+
+echo "== 2f. the secretary's own language model: libsecllm (llama.cpp, PrismML fork) on a tiny Qwen3 (Q2_0, Q4_0)"
+SL="$T/secllm"
+mkdir -p "$SL"
+tools/build_secllm.sh --host "$SL"
+python3 -m pip install -q pyyaml
+if [ ! -f "$SL/qwen3/tokenizer.json" ]; then
+  (cd "$SL" && npm pack --silent @lenml/tokenizer-qwen3@3.7.2 >/dev/null && mkdir -p q3 && tar xzf lenml-tokenizer-qwen3-*.tgz -C q3)
+  mkdir -p "$SL/qwen3" && cp "$SL/q3/package/models/tokenizer.json" "$SL/q3/package/models/tokenizer_config.json" "$SL/qwen3/"
+fi
+PYTHONPATH="$(cat "$SL/llama-src")/gguf-py" python3 test/secretary/make_tiny_qwen3.py "$SL/qwen3" "$SL/tiny-f16.gguf"
+for q in Q2_0 Q4_0; do "$SL/llama-quantize" "$SL/tiny-f16.gguf" "$SL/tiny-$q.gguf" $q >"$SL/quantize-$q.log" 2>&1; done
+javac --release 8 -XDstringConcat=inline -nowarn -encoding UTF-8 -cp "$T/cls" -d "$T/cls" \
+  src/io/github/teoplaydor/semsearch/secretary/LocalLlm.java test/secretary/LocalLlmTest.java
+java -Dsecllm.lib="$SL/libsecllm.so" -Dfile.encoding=UTF-8 -Dstdout.encoding=UTF-8 -cp "$T/cls" \
+  LocalLlmTest "$SL/tiny-Q2_0.gguf" "$SL/tiny-Q4_0.gguf" 2>"$SL/llama.log"
 
 echo "== 3. Hub download"
 python3 tools/mock_hub.py 18765 & HUB=$!
