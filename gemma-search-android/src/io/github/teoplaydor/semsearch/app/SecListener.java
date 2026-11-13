@@ -80,6 +80,7 @@ public class SecListener extends NotificationListenerService {
     public void onListenerConnected() {
         instance = this;
         hub = SecHub.get(this);
+        SecLog.i("listener: connected");
         hub.ensureChannels();
         thread = new HandlerThread("sec-listen");
         thread.start();
@@ -113,6 +114,7 @@ public class SecListener extends NotificationListenerService {
     }
 
     private void stop() {
+        if (thread != null) SecLog.i("listener: disconnected");
         if (instance == this) instance = null;
         if (unlock != null) {
             try {
@@ -155,6 +157,11 @@ public class SecListener extends NotificationListenerService {
             synchronized (infos) {
                 infos.put(sbn.getKey(), info);
             }
+            List<Object> ms = MiniJson.arr(item.get("messages"));
+            SecLog.i("listener: " + (initial ? "in the shade " : "posted ") + info.pkg + " «" + info.app + "» chat «"
+                    + (info.conversation == null || info.conversation.isEmpty() ? info.title : info.conversation) + "»"
+                    + (Boolean.TRUE.equals(item.get("is_group")) ? " (group)" : "") + ", " + (ms == null ? 0 : ms.size()) + " message(s), "
+                    + (info.text == null ? 0 : info.text.length()) + " chars");
             // a confirmation code is awaited right now — shown at once, before any reading
             String all = info.title + " " + info.text;
             if (hub.focus() && !initial && (OTP.matcher(all).find() || REDACTED.matcher(all).find())) {
@@ -194,7 +201,7 @@ public class SecListener extends NotificationListenerService {
                     for (Map.Entry<String, String> v : verdicts.entrySet()) applyVerdict(v.getKey(), v.getValue());
                 }
             } catch (Exception e) {
-                Log.w(TAG, "pass", e);
+                SecLog.e("listener pass", e);
             }
         }
     };
@@ -210,6 +217,7 @@ public class SecListener extends NotificationListenerService {
         if (info.alerted) ((NotificationManager) getSystemService(NOTIFICATION_SERVICE)).cancel(sbn.getKey().hashCode());
         // why it went — evidence of «did the owner do it»; our own clean-ups are not counted
         String why = reason == REASON_CLICK ? "click" : reason == REASON_APP_CANCEL ? "app_cancel" : reason == REASON_CANCEL ? "cancel" : null;
+        SecLog.i("listener: removed " + info.pkg + " «" + info.title + "» reason " + reason + (why == null ? "" : " (" + why + ")"));
         if (why == null) return;
         Map<String, Object> o = new LinkedHashMap<String, Object>();
         o.put("type", "removed");
@@ -246,7 +254,13 @@ public class SecListener extends NotificationListenerService {
         synchronized (infos) {
             info = infos.get(key);
         }
-        if (info == null) return;
+        if (info == null) {
+            SecLog.i("listener: verdict " + level + " for a notification no longer known");
+            return;
+        }
+        SecLog.i("listener: verdict " + level + " → " + info.pkg + " «" + info.title + "»"
+                + ("urgent".equals(level) ? (info.alerted || info.initial ? " (not shown again)" : " shown again with sound")
+                : "junk".equals(level) ? " removed" : "normal".equals(level) ? (hiddenByDnd(this) ? " hidden by «Не беспокоить»" : " removed") : ""));
         if ("urgent".equals(level)) {
             if (!info.alerted && !info.initial) {
                 info.alerted = true;
@@ -297,7 +311,10 @@ public class SecListener extends NotificationListenerService {
         NotificationManager nm = (NotificationManager) c.getSystemService(NOTIFICATION_SERVICE);
         android.content.SharedPreferences p = hub.prefs;
         if (on) {
-            if (!nm.isNotificationPolicyAccessGranted()) return null;
+            if (!nm.isNotificationPolicyAccessGranted()) {
+                SecLog.i("Тишина: no «Не беспокоить» access");
+                return null;
+            }
             hub.ensureChannels();
             if (!p.getBoolean("saved_policy", false)) {
                 NotificationManager.Policy old = nm.getNotificationPolicy(); // null where none was ever set
@@ -313,11 +330,13 @@ public class SecListener extends NotificationListenerService {
             nm.setNotificationPolicy(SecCompat.policy(cats, PRIORITY_SENDERS_ANY, PRIORITY_SENDERS_STARRED, HIDE_ALL));
             nm.setInterruptionFilter(NotificationManager.INTERRUPTION_FILTER_PRIORITY);
             p.edit().putBoolean("focus", true).apply();
+            SecLog.i("Тишина: on");
             SecListener l = instance;
             if (l != null) l.sweep(); // what already lies in the shade goes to be weighed too
             return "Тишина включена: на экране только важное. Звонки и будильники проходят как обычно.";
         }
         p.edit().putBoolean("focus", false).apply();
+        SecLog.i("Тишина: off");
         if (nm.isNotificationPolicyAccessGranted()) {
             if (p.getBoolean("saved_policy", false)) {
                 nm.setNotificationPolicy(SecCompat.policy(p.getInt("old_cat", 0), p.getInt("old_calls", 0), p.getInt("old_msgs", 0),

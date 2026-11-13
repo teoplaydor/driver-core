@@ -57,11 +57,19 @@ public final class LocalBrain implements Brain {
         if (llm != null && f.equals(loadedFile)) return llm;
         if (llm != null) llm.close();
         llm = null;
+        long t0 = System.currentTimeMillis();
+        Secretary.log("model: loading " + f.getName() + " (" + f.length() / 1000000 + " MB), context " + options.context + ", slots "
+                + options.slots + ", threads " + options.threads + ", KV " + (options.kvQ8 ? "q8_0" : "f16"));
         try {
             llm = LocalLlm.open(f, options);
             loadedFile = f;
+            Secretary.log("model: loaded in " + (System.currentTimeMillis() - t0) + " ms, «" + llm.meta("general.name") + "», context "
+                    + llm.context());
         } catch (IOException | UnsatisfiedLinkError e) {
+            Secretary.log("model: did not load after " + (System.currentTimeMillis() - t0) + " ms", e);
             throw new LlmError("модель не загрузилась: " + e.getMessage());
+        } finally {
+            nativeLog();
         }
         return llm;
     }
@@ -78,6 +86,16 @@ public final class LocalBrain implements Brain {
             if (llm != null) llm.close();
             llm = null;
             loadedFile = null;
+        }
+    }
+
+    /** llama.cpp's own lines (what it found in the file, the memory it took, its errors) into the log. */
+    static void nativeLog() {
+        try {
+            String lines = LocalLlm.takeNativeLog();
+            if (lines != null && !lines.isEmpty()) Secretary.log("llama.cpp:\n" + lines.trim());
+        } catch (Throwable ignored) {
+            // the library not loaded
         }
     }
 
@@ -147,18 +165,38 @@ public final class LocalBrain implements Brain {
     }
 
     public Map<String, Object> json(boolean smart, boolean urgent, String system, String user, Prompts.Schema schema) throws LlmError {
-        String out = run(urgent, system + JSON_HINT + schema.json, user, grammarFor(schema, user), maxTokens(schema, user), 0f);
+        // the conversation with the owner (smart) is waited for too: before the background
+        String out = run(schema.name, urgent || smart, system + JSON_HINT + schema.json, user, grammarFor(schema, user),
+                maxTokens(schema, user), 0f);
         try {
             Map<String, Object> m = MiniJson.obj(MiniJson.parse(out.trim()));
             if (m == null) throw new LlmError("ответ не JSON: " + SecUtil.head(out, 200));
             return m;
         } catch (IOException e) {
+            Secretary.log("model: " + schema.name + " answer is not JSON: " + SecUtil.head(out, 600));
             throw new LlmError("ответ не JSON (обрезан?): " + SecUtil.head(out, 200));
         }
     }
 
     public String text(boolean smart, String system, String user) throws LlmError {
-        return run(false, system, user, null, 600, 0.7f).trim();
+        return run("text", smart, system, user, null, 600, 0.7f).trim();
+    }
+
+    private String run(String kind, boolean urgent, String system, String user, String grammar, int maxTokens, float temperature)
+            throws LlmError {
+        long t0 = System.currentTimeMillis();
+        Secretary.log("model: " + kind + (urgent ? " (urgent)" : "") + " asked: system " + system.length() + " chars, request "
+                + user.length() + " chars, answer up to " + maxTokens + " tokens");
+        try {
+            String out = run(urgent, system, user, grammar, maxTokens, temperature);
+            Secretary.log("model: " + kind + " answered in " + (System.currentTimeMillis() - t0) + " ms — " + lastStats + "\n  → "
+                    + SecUtil.head(out, 400).replace("\n", "⏎"));
+            return out;
+        } catch (LlmError e) {
+            Secretary.log("model: " + kind + " failed after " + (System.currentTimeMillis() - t0) + " ms: " + e.getMessage());
+            nativeLog();
+            throw e;
+        }
     }
 
     /** One request; the urgent ones go before and interrupt the rest. */
@@ -171,6 +209,7 @@ public final class LocalBrain implements Brain {
                     if (runningBackground && llm != null) {
                         llm.cancel(); // the background one is read again later
                         preempted = true;
+                        Secretary.log("model: an urgent request interrupts the background one");
                     }
                 }
                 try {

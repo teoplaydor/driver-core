@@ -164,6 +164,15 @@ public final class LocalLlm implements Closeable {
         return r == 1;
     }
 
+    /**
+     * llama.cpp's own log lines since the last call (what it found in the model file, the buffers it took, why it
+     * failed), then forgotten. "" when there are none, null when the library is not loaded.
+     */
+    public static String takeNativeLog() {
+        if (!loaded) return null;
+        return nativeTakeLog();
+    }
+
     /** A string from the model file ("general.name"…), or null. */
     public String meta(String key) {
         return nativeMeta(h(), key);
@@ -234,4 +243,6 @@ public final class LocalLlm implements Closeable {
     static native int nativeSpecial(long h, String text);
 
     static native int nativeGrammarAccepts(long h, String grammar, String text);
+
+    static native String nativeTakeLog();
 }

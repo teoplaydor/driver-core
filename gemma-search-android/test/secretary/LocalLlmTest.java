@@ -45,6 +45,10 @@ public class LocalLlmTest {
         LocalLlm m = LocalLlm.open(new File(a[0]), o);
         ok(m.context() == 2048, "loaded " + m.file.getName() + ": «" + m.meta("general.name") + "», context " + m.context());
         ok(m.meta("no.such.key") == null, "a missing metadata key: null");
+        String native1 = LocalLlm.takeNativeLog();
+        ok(native1 != null && native1.contains("qwen3") && native1.split("\n").length > 20,
+                "llama.cpp's own lines kept for the app's log (" + (native1 == null ? 0 : native1.split("\n").length) + " lines)");
+        ok("".equals(LocalLlm.takeNativeLog()), "…and taken once");
 
         // the same request twice: the second takes the system prompt from the cache, the answer is the same
         String first = m.chat(system, user, null, 24, 0);

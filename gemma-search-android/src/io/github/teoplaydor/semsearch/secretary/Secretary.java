@@ -39,7 +39,7 @@ public final class Secretary {
     private final List<ChatSink> sinks = new ArrayList<ChatSink>();
     private final Object chatLock = new Object();
     private long chatVersion;
-    private final ExecutorService worker;
+    private final ExecutorService worker, interactive;
     private final AtomicInteger pending = new AtomicInteger();
 
     public Secretary(SecConfig cfg, SecDb db, Brain llm) {
@@ -54,6 +54,13 @@ public final class Secretary {
         this.worker = Executors.newSingleThreadExecutor(new ThreadFactory() {
             public Thread newThread(Runnable r) {
                 Thread t = new Thread(r, "secretary");
+                t.setDaemon(true);
+                return t;
+            }
+        });
+        this.interactive = Executors.newSingleThreadExecutor(new ThreadFactory() {
+            public Thread newThread(Runnable r) {
+                Thread t = new Thread(r, "secretary-chat");
                 t.setDaemon(true);
                 return t;
             }
@@ -88,7 +95,7 @@ public final class Secretary {
             try {
                 s.onChat(id, text, notify);
             } catch (RuntimeException e) {
-                log("chat sink: " + e);
+                log("chat sink", e);
             }
         }
     }
@@ -141,20 +148,35 @@ public final class Secretary {
         try {
             send(text);
         } catch (RuntimeException e) {
-            log("alert: " + e);
+            log("alert", e);
         }
     }
 
     /** Work in the background, one at a time (the server's app.spawn). */
     public void spawn(final Runnable r) {
-        pending.incrementAndGet();
-        worker.execute(new Runnable() {
+        submit(worker, "background", r);
+    }
+
+    /**
+     * Work the owner waits for (an answer in the chat, a draft, a button): its own thread, not behind the reading of
+     * notifications; the model puts it before the background too.
+     */
+    public void spawnInteractive(final Runnable r) {
+        submit(interactive, "chat", r);
+    }
+
+    private void submit(ExecutorService ex, final String what, final Runnable r) {
+        final int queued = pending.incrementAndGet();
+        final long t0 = System.currentTimeMillis();
+        if (queued > 1) log(what + ": queued behind " + (queued - 1));
+        ex.execute(new Runnable() {
             public void run() {
+                long waited = System.currentTimeMillis() - t0;
+                if (waited > 1000) log(what + ": started after waiting " + waited + " ms");
                 try {
                     r.run();
                 } catch (Throwable t) {
-                    log("background work failed: " + t);
-                    t.printStackTrace();
+                    log(what + " work failed", t);
                 } finally {
                     pending.decrementAndGet();
                 }
@@ -176,6 +198,7 @@ public final class Secretary {
 
     public void close() {
         worker.shutdown();
+        interactive.shutdown();
     }
 
     /** The log (the app sets one; on a computer — stderr). */
@@ -191,5 +214,12 @@ public final class Secretary {
 
     public static void log(String s) {
         logger.log(s);
+    }
+
+    /** A failure with its stack, into the log. */
+    public static void log(String s, Throwable t) {
+        java.io.StringWriter w = new java.io.StringWriter();
+        t.printStackTrace(new java.io.PrintWriter(w));
+        logger.log(s + ": " + w.toString().trim());
     }
 }

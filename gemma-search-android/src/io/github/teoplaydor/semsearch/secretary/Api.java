@@ -21,7 +21,8 @@ import io.github.teoplaydor.semsearch.secretary.Sql.Row;
  */
 public final class Api {
     static final String APP = "app";
-    static final int MAX_WAIT = 30;
+    /** The longest a «new messages?» call waits (the page asks again): short, so a WebView's thread is not held long. */
+    static final int MAX_WAIT = 10;
     static final Map<String, String> COMMAND_LABELS = new HashMap<String, String>();
     static final Set<String> TASK_ACTIONS = new HashSet<String>(Arrays.asList("done", "accept", "drop", "snooze", "asked"));
     static final Set<String> KEEP_BUTTONS = new HashSet<String>(Arrays.asList("edit", "full", "tsnz")); // the message stays as it was
@@ -78,12 +79,14 @@ public final class Api {
 
     /** Runs in the background; a failure becomes a message in the chat. */
     void run(final Work w, final String what) {
-        app.spawn(new Runnable() {
+        app.spawnInteractive(new Runnable() {
             public void run() {
+                long t0 = System.currentTimeMillis();
                 try {
                     w.run();
+                    Secretary.log("app: " + what + " done in " + (System.currentTimeMillis() - t0) + " ms");
                 } catch (Exception e) {
-                    Secretary.log("app: " + what + ": " + e);
+                    Secretary.log("app: " + what + " failed after " + (System.currentTimeMillis() - t0) + " ms", e);
                     app.send("⚠️ Не получилось: " + SecUtil.esc(e.getMessage() == null ? e.toString() : e.getMessage()), null, APP);
                 }
             }
@@ -115,6 +118,24 @@ public final class Api {
 
     /** One call: "/api/messages?after=5&wait=25" (body null) or "/api/message" with {"text": …}. */
     public Reply handle(String path, String body) {
+        long t0 = System.currentTimeMillis();
+        Reply r;
+        try {
+            r = handleInner(path, body);
+        } catch (RuntimeException e) {
+            Secretary.log("api " + path + " failed", e);
+            r = new Reply(500, map("error", String.valueOf(e)));
+        }
+        long ms = System.currentTimeMillis() - t0;
+        // the chat's polling quietly unless it brought something; everything else always
+        boolean poll = path.startsWith("/api/messages") || path.startsWith("/api/tasks?active");
+        if (!poll || r.status != 200 || r.json.length() > 20)
+            Secretary.log("api " + (body == null ? "GET " : "POST ") + path + (body == null ? "" : " " + SecUtil.head(body, 300))
+                    + " → " + r.status + " in " + ms + " ms, " + SecUtil.head(r.json, poll ? 120 : 300));
+        return r;
+    }
+
+    private Reply handleInner(String path, String body) {
         String route = path.indexOf('?') >= 0 ? path.substring(0, path.indexOf('?')) : path;
         Map<String, String> q = query(path);
         Map<String, Object> data = new HashMap<String, Object>();

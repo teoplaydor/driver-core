@@ -139,6 +139,29 @@ public class SecSetup extends Activity {
                 Toast.makeText(SecSetup.this, "Сохранено", Toast.LENGTH_SHORT).show();
             }
         }));
+        head("Журнал");
+        note("Подробный журнал секретаря: страница и её ошибки, каждый запрос, очередь, модель (загрузка, строки самой "
+                + "llama.cpp, скорость каждого ответа и сам ответ), уведомления (приложение, чат, сколько сообщений — без их текста), "
+                + "«Тишина», «Сделал?», будильники, загрузка модели. Что-то не так — «Поделиться журналом» и прислать файл.");
+        row(button("Поделиться журналом", new View.OnClickListener() {
+            public void onClick(View v) {
+                if (SecLog.share(SecSetup.this) == null)
+                    Toast.makeText(SecSetup.this, "Не удалось сохранить журнал", Toast.LENGTH_LONG).show();
+            }
+        }), button("Скопировать", new View.OnClickListener() {
+            public void onClick(View v) {
+                SecLog.copy(SecSetup.this);
+                Toast.makeText(SecSetup.this, "Последние 400 строк скопированы", Toast.LENGTH_SHORT).show();
+            }
+        }));
+        final TextView tail = note("");
+        tail.setTypeface(Typeface.MONOSPACE);
+        tail.setTextSize(11);
+        row(button("Показать последние строки", new View.OnClickListener() {
+            public void onClick(View v) {
+                tail.setText(SecLog.tail(80));
+            }
+        }));
         refresh.run();
     }
 

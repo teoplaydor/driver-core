@@ -11,12 +11,17 @@
 #include <chrono>
 #include <cstdio>
 #include <cstring>
+#include <deque>
 #include <memory>
 #include <mutex>
 #include <string>
 #include <vector>
 
 #include "llama.h"
+
+#ifdef __ANDROID__
+#include <android/log.h>
+#endif
 
 namespace {
 
@@ -190,6 +195,27 @@ bool ensure_room(Engine &e, int need, int keep) {
     }
 }
 
+// llama.cpp's log: kept (the last 1500 lines) for the app's log, and in logcat on the phone
+std::mutex log_lock;
+std::deque<std::string> log_lines;
+std::string log_partial;
+
+void on_log(ggml_log_level level, const char *text, void *) {
+#ifdef __ANDROID__
+    __android_log_print(level == GGML_LOG_LEVEL_ERROR ? ANDROID_LOG_ERROR : level == GGML_LOG_LEVEL_WARN ? ANDROID_LOG_WARN
+                        : ANDROID_LOG_INFO, "secllm", "%s", text);
+#endif
+    if (level == GGML_LOG_LEVEL_DEBUG) return;
+    std::lock_guard<std::mutex> g(log_lock);
+    log_partial += text; // a line may come in pieces (GGML_LOG_LEVEL_CONT)
+    size_t nl;
+    while ((nl = log_partial.find('\n')) != std::string::npos) {
+        log_lines.push_back(log_partial.substr(0, nl));
+        log_partial.erase(0, nl + 1);
+        if (log_lines.size() > 1500) log_lines.pop_front();
+    }
+}
+
 double ms_since(Clock::time_point t) {
     return std::chrono::duration<double, std::milli>(Clock::now() - t).count();
 }
@@ -201,7 +227,10 @@ extern "C" {
 JNIEXPORT jlong JNICALL Java_io_github_teoplaydor_semsearch_secretary_LocalLlm_nativeLoad(
         JNIEnv *env, jclass, jstring jpath, jint n_ctx, jint n_threads, jint n_slots, jboolean kv_q8) {
     static std::once_flag once;
-    std::call_once(once, [] { llama_backend_init(); });
+    std::call_once(once, [] {
+        llama_log_set(on_log, nullptr);
+        llama_backend_init();
+    });
     const std::string path = to_utf8(env, jpath);
     llama_model_params mp = llama_model_default_params();
     mp.load_mode = LLAMA_LOAD_MODE_MMAP;  // the file stays the model: pages the system can drop and read back
@@ -492,6 +521,17 @@ JNIEXPORT jint JNICALL Java_io_github_teoplaydor_semsearch_secretary_LocalLlm_na
     } catch (const std::exception &) {
         return 0;
     }
+}
+
+/** llama.cpp's log lines since the last call. */
+JNIEXPORT jstring JNICALL Java_io_github_teoplaydor_semsearch_secretary_LocalLlm_nativeTakeLog(JNIEnv *env, jclass) {
+    std::string out;
+    {
+        std::lock_guard<std::mutex> g(log_lock);
+        for (auto &l : log_lines) out += l + "\n";
+        log_lines.clear();
+    }
+    return from_utf8(env, out);
 }
 
 }  // extern "C"

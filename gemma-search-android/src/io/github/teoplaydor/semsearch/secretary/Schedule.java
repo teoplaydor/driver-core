@@ -45,6 +45,7 @@ public final class Schedule {
         SecConfig cfg = app.cfg;
         if (now == null) now = now();
         for (Row r : db.dueReminders(now)) {
+            Secretary.log("schedule: reminder #" + r.lng("id") + " due " + r.text("at"));
             app.send("⏰ <b>Напоминание:</b> " + esc(r.text("text")));
             db.markReminderSent(r.lng("id"));
         }
@@ -71,7 +72,8 @@ public final class Schedule {
             ZonedDateTime slotDt = loc.toLocalDate().atTime(slot).atZone(cfg.tz);
             String key = "digest:" + date + ":" + SecUtil.two(slot.getHour()) + ":" + SecUtil.two(slot.getMinute());
             if (!loc.isBefore(slotDt) && loc.isBefore(slotDt.plus(DIGEST_GRACE)) && db.kvGet(key) == null) {
-                Digests.send(app, slot.getHour() < 15 ? "morning" : "evening", false, null);
+                boolean sent = Digests.send(app, slot.getHour() < 15 ? "morning" : "evening", false, null);
+                Secretary.log("schedule: digest " + key + (sent ? " sent" : " empty"));
                 db.kvSet(key, "1");
             }
         }

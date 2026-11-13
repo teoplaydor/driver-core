@@ -74,9 +74,10 @@ public final class SecHub {
     private SecHub(Context c) {
         app = c;
         prefs = c.getSharedPreferences(PREFS, Context.MODE_PRIVATE);
+        SecLog.start(c);
         Secretary.logger = new Secretary.Log() {
             public void log(String s) {
-                Log.i(TAG, s);
+                SecLog.i(s);
             }
         };
         SecConfig cfg = new SecConfig();
@@ -96,6 +97,12 @@ public final class SecHub {
         }, o);
         sec = new Secretary(cfg, db, brain);
         api = new Api(sec);
+        File mf = modelFile();
+        SecLog.i("hub: model " + (mf == null ? "not downloaded" : mf.getName() + " " + mf.length() / 1000000 + " MB")
+                + ", context " + o.context + ", threads " + o.threads + ", «Тишина» " + (prefs.getBoolean("focus", false) ? "on" : "off")
+                + ", about me " + cfg.aboutMe.length() + " chars, digests " + cfg.digestTimes + ", tz " + cfg.tz.getId()
+                + ", chat messages " + db.one("SELECT count(*) n FROM chat_log").lng("n")
+                + ", open tasks " + db.openTasks(500).size() + ", phone messages " + db.one("SELECT count(*) n FROM phone_msgs").lng("n"));
         sec.addSink(new Secretary.ChatSink() {
             public void onChat(long id, String html, boolean notify) {
                 if (notify && !visible && id > prefs.getLong("seen_id", 0)) showChat(id, html);
@@ -190,17 +197,29 @@ public final class SecHub {
         new Thread(new Runnable() {
             public void run() {
                 try {
+                    SecLog.i("download: listing " + repo);
                     HfRepo r = new HfRepo(repo, null);
-                    HfRepo.RemoteFile f = pickGguf(r.listFiles());
+                    List<HfRepo.RemoteFile> listed = r.listFiles();
+                    StringBuilder names = new StringBuilder();
+                    for (HfRepo.RemoteFile x : listed) names.append(x.path).append(" (").append(x.size / 1000000).append(" MB) ");
+                    SecLog.i("download: files " + names);
+                    HfRepo.RemoteFile f = pickGguf(listed);
                     if (f == null) throw new java.io.IOException("в " + repo + " нет файла .gguf");
+                    SecLog.i("download: taking " + f.path);
                     download.file = f.path;
                     download.total = f.size;
                     File dst = new File(modelDir(), f.path.substring(f.path.lastIndexOf('/') + 1));
                     r.downloadFile(f, dst, new HfRepo.Progress() {
                         long last;
+                        int tenth = -1;
 
                         public boolean onProgress(String file, long fileDone, long fileTotal, long allDone, long allTotal) {
                             download.done = fileDone;
+                            int t = fileTotal > 0 ? (int) (fileDone * 10 / fileTotal) : -1;
+                            if (t != tenth) {
+                                tenth = t;
+                                SecLog.i("download: " + fileDone / 1000000 + " of " + fileTotal / 1000000 + " MB");
+                            }
                             if (fileTotal > 0) download.total = fileTotal;
                             long now = SystemClock.uptimeMillis();
                             if (now - last > 500) {
@@ -215,9 +234,10 @@ public final class SecHub {
                     if (old != null) for (File x : old) if (!x.equals(dst) && x.getName().endsWith(".gguf")) x.delete();
                     prefs.edit().putString("model_file", dst.getName()).putString("model_repo", repo).apply();
                     brain.unload();
+                    SecLog.i("download: done, " + dst.getName() + " " + dst.length() / 1000000 + " MB");
                 } catch (Exception e) {
                     download.error = download.cancel ? "остановлено" : String.valueOf(e.getMessage());
-                    Log.w(TAG, "download", e);
+                    SecLog.e("download failed", e);
                 } finally {
                     download.running = false;
                     if (changed != null) changed.run();
@@ -260,7 +280,9 @@ public final class SecHub {
                     .append(" · важность ").append(card.get("importance"));
         } catch (Exception e) {
             out.append("Не получилось: ").append(e.getMessage());
+            SecLog.e("benchmark failed", e);
         }
+        SecLog.i("benchmark:\n" + out);
         return out.toString();
     }
 
@@ -298,7 +320,21 @@ public final class SecHub {
     };
 
     /** One step: read quiet chats (in the background, one at a time), keep the schedule, set the next alarm. */
+    private long lastBeat;
+    private Instant lastAlarm;
+
     void stepNow() {
+        long now = System.currentTimeMillis();
+        if (now - lastBeat > 5 * 60_000) { // a heartbeat every 5 minutes: alive, what is waiting
+            lastBeat = now;
+            try {
+                SecLog.i("loop: alive; chats waiting " + sec.db.phonePendingGroups().size() + ", tasks due " + sec.tasks.due(null).size()
+                        + ", model " + (brain.loaded() ? "loaded" : "not loaded") + ", «Тишина» " + (focus() ? "on" : "off")
+                        + ", listener " + (SecListener.instance != null ? "connected" : "NOT connected"));
+            } catch (RuntimeException e) {
+                SecLog.e("loop beat", e);
+            }
+        }
         try {
             if (!phoneStepQueued) {
                 phoneStepQueued = true;
@@ -315,7 +351,7 @@ public final class SecHub {
             Schedule.tick(sec, null);
             scheduleAlarm();
         } catch (RuntimeException e) {
-            Log.w(TAG, "step", e);
+            SecLog.e("loop step failed", e);
         }
     }
 
@@ -359,6 +395,10 @@ public final class SecHub {
             return;
         }
         long when = at.toEpochMilli() + 1000;
+        if (!at.equals(lastAlarm)) {
+            lastAlarm = at;
+            SecLog.i("alarm: next at " + at.atZone(sec.cfg.tz).toLocalDateTime());
+        }
         try {
             am.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, when, pi);
         } catch (SecurityException e) {
@@ -372,6 +412,7 @@ public final class SecHub {
         public void onReceive(Context c, Intent i) {
             final PendingResult done = goAsync();
             final SecHub hub = get(c);
+            SecLog.i("alarm: fired");
             new Thread(new Runnable() {
                 public void run() {
                     try {
@@ -407,6 +448,7 @@ public final class SecHub {
         if (bypass != null && !bypass && nm.isNotificationPolicyAccessGranted()) {
             int next = prefs.getInt("alert_ch", 1) + 1;
             prefs.edit().putInt("alert_ch", next).apply();
+            SecLog.i("channels: «Важное» made again (" + next + ") to sound through «Не беспокоить»");
             SecCompat.deleteChannel(app, id);
             id = alertChannel();
         }
@@ -442,7 +484,9 @@ public final class SecHub {
                 .build();
         try {
             ((NotificationManager) app.getSystemService(Context.NOTIFICATION_SERVICE)).notify(CHAT_TAG, (int) id, n);
-        } catch (SecurityException ignored) {
+            SecLog.i("notify: chat message #" + id + " «" + title + "»");
+        } catch (SecurityException e) {
+            SecLog.e("notify: not allowed", e);
         }
     }
 

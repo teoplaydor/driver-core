@@ -35,6 +35,7 @@ public final class SecAsk {
         long now = System.currentTimeMillis();
         if (now - lastCheck < 120_000) return;
         lastCheck = now;
+        SecLog.i("ask: unlocked");
         askNext(c);
     }
 
@@ -45,12 +46,13 @@ public final class SecAsk {
                 try {
                     SecHub hub = SecHub.get(app);
                     List<Row> due = hub.sec.tasks.due(null);
+                    SecLog.i("ask: " + due.size() + " task(s) due");
                     if (due.isEmpty()) return;
                     Map<String, Object> t = hub.sec.tasks.asJson(due.get(0));
                     show(app, hub, t, due.size() - 1);
                     hub.sec.tasks.act(due.get(0).lng("id"), "asked", "");
                 } catch (Exception e) {
-                    Log.w(SecHub.TAG, "tasks: " + e);
+                    SecLog.e("ask failed", e);
                 }
             }
         }, "sec-tasks").start();
@@ -110,7 +112,7 @@ public final class SecAsk {
                     String reply = hub.sec.tasks.act(id, action, choice);
                     if (!reply.isEmpty()) hub.sec.send(reply, null, "app"); // into the chat's history too
                 } catch (Exception e) {
-                    Log.w(SecHub.TAG, "task answer: " + e);
+                    SecLog.e("ask: answer failed", e);
                 }
                 askNext(app);
             }

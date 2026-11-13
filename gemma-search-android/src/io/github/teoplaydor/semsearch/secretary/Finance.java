@@ -153,6 +153,8 @@ public final class Finance {
         String cl = SecUtil.lower(card);
         if (cl.equals("null") || cl.equals("none") || cl.equals("нет") || cl.equals("-")) card = "";
         long txId = db.addTx(ts, SecUtil.head(source, 50), direction, amount, currency, merchant, key, category, card, flagged, text, h);
+        Secretary.log("money: #" + txId + " " + direction + " " + amount + " " + currency + " «" + merchant + "» " + category
+                + (flagged ? " (flagged)" : "") + " from " + source);
 
         String cur = "RUB".equals(currency) ? "" : " " + currency;
         if ("expense".equals(direction) && "RUB".equals(currency) && amount >= app.cfg.largeExpense) {

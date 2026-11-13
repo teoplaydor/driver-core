@@ -468,6 +468,7 @@
       ["Что умеет секретарь", () => navigate("help")],
     ];
     if (native) items.push(["Настройки секретаря", () => native.openSetup()]);
+    if (native && native.shareLog) items.push(["Журнал для разработчика", () => native.shareLog()]);
     openSheet("Ещё", items);
   };
 

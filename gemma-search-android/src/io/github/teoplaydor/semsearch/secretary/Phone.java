@@ -271,6 +271,7 @@ public final class Phone {
                 }
             }
         }
+        if (stats.get("stored") + stats.get("bank") + stats.get("skipped") > 0) Secretary.log("phone: ingest " + stats);
         return stats;
     }
 
@@ -316,6 +317,7 @@ public final class Phone {
             else undecided.add(new Object[]{key, item, msgs});
         }
 
+        if (!out.isEmpty()) Secretary.log("phone: Тишина by rules " + out);
         if (!undecided.isEmpty()) {
             List<String> listing = new ArrayList<String>();
             for (int i = 0; i < undecided.size(); i++) {
@@ -352,6 +354,8 @@ public final class Phone {
                 boolean person = SecUtil.truthy(item.get("messages")) && !msgs.get(0).isGroup && anyFromOthers(msgs);
                 String lv = levels.get(i);
                 out.put((String) u[0], lv != null ? lv : person ? "urgent" : "normal");
+                Secretary.log("phone: Тишина " + msgs.get(0).app + " · " + msgs.get(0).chat + " → " + out.get(u[0])
+                        + (lv != null ? " (model)" : " (model silent: " + (person ? "a person" : "not a person") + ")"));
             }
         }
 
@@ -382,7 +386,11 @@ public final class Phone {
             boolean quiet = Duration.between(fromDb(g.text("last_at")), now).compareTo(Duration.ofSeconds(app.cfg.quietSeconds)) >= 0;
             boolean waited = Duration.between(fromDb(g.text("first_at")), now).compareTo(Duration.ofSeconds(app.cfg.maxWaitSeconds)) >= 0;
             if (quiet || waited || g.lng("n") >= MAX_BATCH) {
+                long t0 = System.currentTimeMillis();
+                Secretary.log("phone: reading chat " + g.text("app") + " · " + g.text("chat") + " (" + g.lng("n") + " new"
+                        + (quiet ? ", quiet" : waited ? ", waited long" : ", many") + ")");
                 triageChat(g.text("package"), g.text("chat"), now);
+                Secretary.log("phone: chat " + g.text("chat") + " read in " + (System.currentTimeMillis() - t0) + " ms");
                 synchronized (toCheck) {
                     toCheck.add(chatKey(g.text("package"), g.text("chat"))); // «order received» closes a task too
                 }
@@ -458,7 +466,11 @@ public final class Phone {
             db.phoneMark(ids, 0);
             return;
         }
-        Triage.applyVerdict(app, itemId, data, rule);
+        int imp = Triage.applyVerdict(app, itemId, data, rule);
+        Row card = db.getMail(itemId);
+        Secretary.log("phone: card #" + itemId + " " + appName + " · " + chat + ": importance " + imp + ", " + card.text("category")
+                + ", status " + card.text("status") + (card.truthy("action") ? ", action «" + card.text("action") + "»" : "")
+                + (card.truthy("deadline") ? ", until " + card.text("deadline") : ""));
         if (anyAlerted) db.markNotified(itemId); // the phone already showed it with sound — not a second time
         db.phoneMark(ids, itemId);
     }

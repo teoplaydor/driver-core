@@ -60,6 +60,14 @@ public class SecActivity extends Activity {
         s.setDomStorageEnabled(true);
         web.addJavascriptInterface(new Bridge(), "Android");
         web.setWebViewClient(new Client());
+        web.setWebChromeClient(new android.webkit.WebChromeClient() {
+            @Override
+            public boolean onConsoleMessage(android.webkit.ConsoleMessage m) {
+                SecLog.i("page " + m.messageLevel() + ": " + m.message() + " (" + m.sourceId() + ":" + m.lineNumber() + ")");
+                return true;
+            }
+        });
+        SecLog.i("screen: opened" + (hub.modelFile() == null ? ", no model yet" : ""));
         setContentView(web);
         web.loadUrl(ORIGIN + "/app");
         if (Build.VERSION.SDK_INT >= 33 && checkSelfPermission("android.permission.POST_NOTIFICATIONS") != PackageManager.PERMISSION_GRANTED)
@@ -72,6 +80,7 @@ public class SecActivity extends Activity {
     protected void onResume() {
         super.onResume();
         SecHub.visible = true;
+        SecLog.i("screen: shown");
         hub.startLoop();
         hub.reloadPrefs();
         hub.clearChatNotifications();
@@ -80,6 +89,7 @@ public class SecActivity extends Activity {
     @Override
     protected void onPause() {
         SecHub.visible = false;
+        SecLog.i("screen: hidden");
         hub.stopLoop();
         super.onPause();
     }
@@ -126,9 +136,22 @@ public class SecActivity extends Activity {
                     return json(r.status, r.json);
                 }
             } catch (Exception e) {
+                SecLog.e("page request " + path, e);
                 return json(500, "{\"error\":\"" + e.getClass().getSimpleName() + "\"}");
             }
+            SecLog.i("page request not found: " + u);
             return json(404, "{\"error\":\"not found\"}");
+        }
+
+        @Override
+        public void onPageFinished(WebView view, String url) {
+            SecLog.i("page loaded: " + url);
+        }
+
+        @SuppressWarnings("deprecation")
+        @Override
+        public void onReceivedError(WebView view, int code, String description, String url) {
+            SecLog.i("page error " + code + " " + description + " at " + url);
         }
 
         // Android 7's
@@ -213,6 +236,16 @@ public class SecActivity extends Activity {
         }
 
         @JavascriptInterface
+        public void shareLog() {
+            runOnUiThread(new Runnable() {
+                public void run() {
+                    if (SecLog.share(SecActivity.this) == null)
+                        Toast.makeText(SecActivity.this, "Не удалось сохранить журнал", Toast.LENGTH_LONG).show();
+                }
+            });
+        }
+
+        @JavascriptInterface
         public void retry() {
             runOnUiThread(new Runnable() {
                 public void run() {
@@ -229,7 +262,9 @@ public class SecActivity extends Activity {
             requestPermissions(new String[]{Manifest.permission.RECORD_AUDIO}, REQ_MIC);
             return false;
         }
+        SecLog.i("voice: start");
         if (!Engine.get(this).speechInstalled()) {
+            SecLog.i("voice: GigaAM not downloaded");
             Toast.makeText(this, "Распознавание речи не скачано: Смысловой поиск → настройки → голос", Toast.LENGTH_LONG).show();
             return false;
         }
@@ -288,17 +323,21 @@ public class SecActivity extends Activity {
 
     private void stopVoice() {
         final byte[] audio = stopRecording();
+        SecLog.i("voice: stop, " + (audio == null ? 0 : audio.length / 32) + " ms recorded");
         if (audio == null) return;
         new Thread(new Runnable() {
             public void run() {
                 String error = null;
                 try {
+                    long t0 = System.currentTimeMillis();
                     String text = Speech.text(Engine.get(SecActivity.this), Speech.samples(audio), null);
+                    SecLog.i("voice: heard " + text.length() + " chars in " + (System.currentTimeMillis() - t0) + " ms");
                     Map<String, Object> body = new HashMap<String, Object>();
                     body.put("text", text);
                     hub.api.handle("/api/voice", MiniJson.write(body));
                 } catch (Exception e) {
                     error = "Не расслышал: " + e.getMessage();
+                    SecLog.e("voice failed", e);
                 }
                 final String err = error;
                 runOnUiThread(new Runnable() {

@@ -219,6 +219,12 @@ public final class Tasks {
 
     /** done / drop / accept / snooze (choice) / asked. A short answer for the owner. */
     public String act(long taskId, String action, String choice) {
+        String r = actInner(taskId, action, choice);
+        Secretary.log("tasks: #" + taskId + " " + action + (choice == null || choice.isEmpty() ? "" : " " + choice) + " → " + r);
+        return r;
+    }
+
+    private String actInner(long taskId, String action, String choice) {
         SecDb db = app.db;
         ZoneId tz = app.cfg.tz;
         Row t = db.getTask(taskId);
@@ -360,6 +366,7 @@ public final class Tasks {
                     verdicts.put(t.lng("id"), v);
                 }
         }
+        Secretary.log("tasks: judged " + tasks.size() + " task(s) of " + sourceKey + " on " + evidence.size() + " piece(s) of evidence: " + verdicts);
         int closed = 0;
         for (Row t : tasks) {
             Map<String, Object> v = verdicts.get(t.lng("id"));

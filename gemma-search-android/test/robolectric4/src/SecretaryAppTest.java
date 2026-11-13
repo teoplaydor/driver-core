@@ -270,6 +270,15 @@ public class SecretaryAppTest {
         // the settings screen
         SecSetup s = Robolectric.buildActivity(SecSetup.class).setup().get();
         assertNotNull(s);
+
+        // the log: what happened, line by line
+        String log = SecLog.tail(2000);
+        for (String want : new String[]{"==== start: SemSearch", "hub: model not downloaded", "listener: connected",
+                "listener: posted com.whatsapp", "phone: ingest {stored=1", "Тишина: on", "listener: verdict urgent",
+                "Тишина: off", "notify: chat message", "tasks: #", "screen: opened", "api POST /api/message",
+                "model: ASSISTANT_SCHEMA (urgent) asked", "модель не скачана", "app: message failed", "alarm: next at"})
+            assertTrue("in the log: " + want + "\n" + log, log.contains(want));
+        assertFalse("no notification text in the log", log.contains("Ты где? Мы уже у входа"));
         l.onDestroy();
     }
 }
