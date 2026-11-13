@@ -288,7 +288,7 @@ public final class Actions {
         return screen("Помощь", one(HELP, null));
     }
 
-    /** What the model did: on the phone it costs nothing — requests, tokens and time are shown instead of dollars. */
+    /** The server version's usage report: requests, tokens and the cost estimate per model (prices in GeminiBrain). */
     static String usageReport(Secretary app) {
         Instant now = now();
         List<String> lines = new ArrayList<String>();
@@ -297,12 +297,20 @@ public final class Actions {
                 {"За 30 дней", SecUtil.toDb(now.minus(Duration.ofDays(30))).substring(0, 10)}};
         for (String[] p : periods) {
             List<Row> rows = app.db.usageSince(p[1]);
+            double total = 0;
+            boolean priced = false;
             lines.add("\n<b>" + p[0] + "</b>");
             for (Row r : rows) {
+                Double cost = GeminiBrain.estimateCost(r.text("model"), r.lng("tokens_in"), r.lng("tokens_out"));
+                if (cost != null) {
+                    total += cost;
+                    priced = true;
+                }
+                String price = cost != null ? "≈ $" + SecUtil.fixed(cost, 3) : "цена неизвестна";
                 String tokens = SecUtil.groupThousands(String.valueOf(r.lng("tokens_in") + r.lng("tokens_out")));
-                lines.add("• " + esc(r.text("model")) + ": " + r.lng("calls") + " запр., " + tokens + " ток.");
+                lines.add("• " + esc(r.text("model")) + ": " + r.lng("calls") + " запр., " + tokens + " ток., " + price);
             }
-            lines.add(rows.isEmpty() ? "Запросов не было." : "Всё на телефоне — бесплатно и без интернета.");
+            lines.add(rows.isEmpty() ? "Запросов не было." : priced ? "Итого ≈ $" + SecUtil.fixed(total, 2) : "Всё на телефоне — бесплатно.");
         }
         return SecUtil.join("\n", lines);
     }

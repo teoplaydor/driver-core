@@ -211,6 +211,8 @@ java -Dsecllm.lib="$SL/libsecllm.so" -Dfile.encoding=UTF-8 -Dstdout.encoding=UTF
 # the secretary's prompts and grammars on the engine; the urgent first; long chats cut; the context shared
 java -Dsecllm.lib="$SL/libsecllm.so" -Dfile.encoding=UTF-8 -Dstdout.encoding=UTF-8 -cp "$T/cls" \
   BrainTest "$SL/tiny-Q2_0.gguf" 2>>"$SL/llama.log"
+# the secretary on Gemini from the phone (the server's llm.py) against a stand-in Gemini
+java -Dfile.encoding=UTF-8 -Dstdout.encoding=UTF-8 -Dhttp.nonProxyHosts=127.0.0.1 -cp "$T/cls" GeminiBrainTest 2>>"$SL/secretary.log"
 # the server version's tests, ported: notifications, «Тишина», tasks, evidence, money, digests, the app's API
 java -Dfile.encoding=UTF-8 -Dstdout.encoding=UTF-8 -cp "$T/cls:$SQ" SecretaryTest 2>"$SL/secretary.log"
 
