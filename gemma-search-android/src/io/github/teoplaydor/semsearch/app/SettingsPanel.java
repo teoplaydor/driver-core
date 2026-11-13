@@ -3,6 +3,7 @@ package io.github.teoplaydor.semsearch.app;
 import android.content.ClipData;
 import android.content.ClipboardManager;
 import android.content.Context;
+import android.content.Intent;
 import android.text.InputType;
 import android.view.Gravity;
 import android.view.View;
@@ -115,6 +116,7 @@ final class SettingsPanel extends FrameLayout implements Engine.Listener {
         sv.addView(list);
         column.addView(sv, new LinearLayout.LayoutParams(-1, 0, 1));
 
+        buildSecretary();
         buildModel();
         buildQuick();
         buildPlaces();
@@ -293,6 +295,18 @@ final class SettingsPanel extends FrameLayout implements Engine.Listener {
     }
 
     // ------------------------------------------------------------------ sections
+
+    /** The secretary (its own screen and icon): reached from here too. */
+    private void buildSecretary() {
+        LinearLayout card = section("Секретарь");
+        row(card, "Открыть секретаря", "сортирует уведомления, «Тишина», дела «Сделал?», сводки и расходы — "
+                + "своей моделью на телефоне; у него и свой значок «Секретарь»", new Runnable() {
+            @Override
+            public void run() {
+                getContext().startActivity(new Intent(getContext(), SecActivity.class).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
+            }
+        });
+    }
 
     private void buildModel() {
         LinearLayout card = section("Модель");
