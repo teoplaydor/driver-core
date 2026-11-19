@@ -339,7 +339,7 @@ public final class Tasks {
         Map<Long, Map<String, Object>> verdicts = new HashMap<Long, Map<String, Object>>();
         try {
             Map<String, Object> data = app.llm.json(false, false, Prompts.RESOLVE_SYSTEM,
-                    Prompts.fill(Prompts.RESOLVE_USER, "now", SecUtil.isoMinutes(now, tz), "tasks", SecUtil.join("\n", listing),
+                    Prompts.fill(Prompts.RESOLVE_USER, "now", SecUtil.nowWithWeek(now, tz), "tasks", SecUtil.join("\n", listing),
                             "evidence", SecUtil.join("\n", evidence.subList(Math.max(0, evidence.size() - 40), evidence.size()))),
                     Prompts.RESOLVE_SCHEMA);
             List<Object> vs = MiniJson.arr(data.get("tasks"));

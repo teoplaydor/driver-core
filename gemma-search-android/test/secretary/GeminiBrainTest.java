@@ -37,6 +37,11 @@ public class GeminiBrainTest {
     static final List<String[]> got = new ArrayList<String[]>();
 
     public static void main(String[] a) throws Exception {
+        // a check that throws must fail the run, not leave it hanging on the stand-in server's thread
+        Thread.setDefaultUncaughtExceptionHandler((t, e) -> {
+            e.printStackTrace();
+            System.exit(1);
+        });
         HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
         server.createContext("/", new HttpHandler() {
             public void handle(HttpExchange ex) {
@@ -68,9 +73,9 @@ public class GeminiBrainTest {
         String base = "http://127.0.0.1:" + server.getAddress().getPort();
 
         final GeminiBrain.Config cfg = new GeminiBrain.Config();
-        ok(cfg.fastModel.equals("polza:qwen/qwen3.6-35b-a3b@yandex") && cfg.smartModel.equals(cfg.fastModel)
+        ok(cfg.fastModel.equals("polza:qwen/qwen3.5-9b@polza") && cfg.smartModel.equals("polza:qwen/qwen3.6-35b-a3b@yandex")
                         && cfg.audioModel.equals("polza:ai-sage/gigaam-v3") && cfg.polzaUrl.equals("https://polza.ai/api/v1"),
-                "by default: Qwen from Yandex via Polza for everything, GigaAM for voice");
+                "by default via Polza: Qwen 9B for simple tasks, Qwen 35B from Yandex for the conversation, GigaAM for voice");
         cfg.geminiKey = "test-key";
         cfg.fastModel = "gemini:gemini-3.1-flash-lite";
         cfg.smartModel = "gemini:gemini-3.8-flash";
@@ -185,10 +190,12 @@ public class GeminiBrainTest {
         r = g.json(false, false, "Извлеки операцию.", "Покупка 350 ₽", Prompts.FIN_SCHEMA);
         req = got.get(got.size() - 1);
         Map<String, Object> ob = MiniJson.obj(MiniJson.parse(req[2]));
+        String sys0 = (String) MiniJson.obj(MiniJson.arr(ob.get("messages")).get(0)).get("content");
         ok(Boolean.TRUE.equals(r.get("is_transaction")) && "/api/v1/chat/completions".equals(req[0]) && req[1].contains("auth=Bearer or-key")
                         && "deepseek/deepseek-v4-flash".equals(ob.get("model"))
                         && "json_object".equals(MiniJson.obj(ob.get("response_format")).get("type"))
-                        && ((String) MiniJson.obj(MiniJson.arr(ob.get("messages")).get(0)).get("content")).contains("по этой JSON-схеме"),
+                        && sys0.contains("с полями \"is_transaction\", \"direction\", \"amount\"")
+                        && sys0.contains("(не схемой). Типы и допустимые значения полей — в этой JSON-схеме:"),
                 "openai:…: chat/completions, Bearer key, json_object, the schema in the system prompt");
         ok("deepseek/deepseek-v4-flash".equals(used.get(used.size() - 1)[0]) && (Long) used.get(used.size() - 1)[1] == 300, "its tokens counted");
 
@@ -206,8 +213,8 @@ public class GeminiBrainTest {
                 && GeminiBrain.estimateCost("local", 1, 1) == null, "the cost estimate (USD per million tokens)");
 
         // Polza AI: Qwen from Yandex only — the provider block, no fallback; the thinking left out; rubles as said
-        cfg.fastModel = GeminiBrain.POLZA_MODEL;
-        cfg.smartModel = GeminiBrain.POLZA_MODEL;
+        cfg.fastModel = GeminiBrain.POLZA_SMART;
+        cfg.smartModel = GeminiBrain.POLZA_SMART;
         cfg.audioModel = GeminiBrain.POLZA_AUDIO;
         cfg.polzaUrl = base + "/polza/v1/";
         try {
@@ -230,7 +237,7 @@ public class GeminiBrainTest {
         ok("qwen/qwen3.6-35b-a3b".equals(pb.get("model")) && prov != null && "[\"yandex\"]".equals(MiniJson.write(prov.get("only")))
                         && Boolean.FALSE.equals(prov.get("allow_fallbacks")) && !pb.containsKey("max_tokens") && !pb.containsKey("reasoning")
                         && !pb.containsKey("response_format")
-                        && ((String) MiniJson.obj(MiniJson.arr(pb.get("messages")).get(0)).get("content")).contains("по этой JSON-схеме"),
+                        && ((String) MiniJson.obj(MiniJson.arr(pb.get("messages")).get(0)).get("content")).contains("Ответь одним JSON-объектом с полями \"items\" (не схемой)"),
                 "Polza: «model@yandex» → that provider only, no fallback; no max_tokens (thinking needs room); "
                         + "no JSON mode (garbles Yandex's Qwen) — the schema in the prompt: " + MiniJson.write(prov));
         Object[] u = used.get(used.size() - 1);
@@ -271,6 +278,70 @@ public class GeminiBrainTest {
             ok(e.getMessage().contains("пополни баланс") && got.get(got.size() - 1)[0].endsWith("/chat/completions"),
                     "Polza: no money — said so, not tried again: «" + e.getMessage() + "»");
         }
+        // «now» in the prompts that count dates: the weekday and the week ahead (without it the 9B misses «до пятницы»)
+        String nw = io.github.teoplaydor.semsearch.secretary.SecUtil.nowWithWeek(java.time.Instant.parse("2026-11-19T14:50:00Z"),
+                java.time.ZoneId.of("Europe/Moscow"));
+        ok(nw.equals("2026-11-19T17:50+03:00 (четверг)\nБлижайшие дни: пт 20.11, сб 21.11, вс 22.11, пн 23.11, вт 24.11, ср 25.11, чт 26.11"),
+                "now with the week ahead: " + nw.replace("\n", " | "));
+
+        // two models: the 9B for simple tasks; a prompt too long for its 32k window — read by the smart one
+        cfg.fastModel = GeminiBrain.POLZA_FAST;
+        cfg.smartModel = GeminiBrain.POLZA_SMART;
+        answers.add(new Object[]{200, "{\"choices\":[{\"message\":{\"content\":\"{\\\"items\\\": []}\"}}]}"});
+        g.json(false, true, "s", "u", Prompts.QUICK_SCHEMA);
+        pb = MiniJson.obj(MiniJson.parse(got.get(got.size() - 1)[2]));
+        ok("qwen/qwen3.5-9b".equals(pb.get("model")) && "[\"polza\"]".equals(MiniJson.write(MiniJson.obj(pb.get("provider")).get("only"))),
+                "the fast model: Qwen 9B on Polza's own servers");
+        int before = got.size();
+        answers.add(new Object[]{400, "{\"error\":{\"code\":\"BAD_REQUEST\",\"message\":\"Некорректный запрос.\",\"metadata\":{\"raw\":"
+                + "\"This model's maximum context length is 32768 tokens. However, your prompt contains at least 32769 input tokens\"}}}"});
+        answers.add(new Object[]{200, "{\"choices\":[{\"message\":{\"content\":\"{\\\"items\\\": [{\\\"i\\\": 0, \\\"level\\\": \\\"urgent\\\"}]}\"}}]}"});
+        r = g.json(false, true, "s", "очень длинный чат", Prompts.QUICK_SCHEMA);
+        ok(got.size() == before + 2 && "qwen/qwen3.5-9b".equals(MiniJson.obj(MiniJson.parse(got.get(before)[2])).get("model"))
+                        && "qwen/qwen3.6-35b-a3b".equals(MiniJson.obj(MiniJson.parse(got.get(before + 1)[2])).get("model"))
+                        && "urgent".equals(MiniJson.obj(MiniJson.arr(r.get("items")).get(0)).get("level")),
+                "too long for the 9B — the smart model read it");
+        // the 9B's slips: its data wrapped in the schema — unwrapped, no second call; a bare schema twice — the smart one
+        String finData = "{\\\"is_transaction\\\": true, \\\"direction\\\": \\\"expense\\\", \\\"amount\\\": 1250, "
+                + "\\\"currency\\\": \\\"RUB\\\", \\\"merchant\\\": \\\"ПЯТЁРОЧКА\\\", \\\"category\\\": \\\"Продукты\\\", \\\"card\\\": \\\"4512\\\"}";
+        before = got.size();
+        answers.add(new Object[]{200, "{\"choices\":[{\"message\":{\"content\":\"{\\\"type\\\": \\\"object\\\", \\\"properties\\\": "
+                + finData + "}\"}}]}"});
+        r = g.json(false, false, "s", "Покупка 1 250р", Prompts.FIN_SCHEMA);
+        ok(got.size() == before + 1 && Boolean.TRUE.equals(r.get("is_transaction")) && "4512".equals(r.get("card")),
+                "the data wrapped in the schema — unwrapped: " + MiniJson.write(r));
+        String bare = "{\"choices\":[{\"message\":{\"content\":\"{\\\"type\\\": \\\"object\\\", \\\"properties\\\": {\\\"items\\\": "
+                + "{\\\"type\\\": \\\"array\\\"}}, \\\"required\\\": [\\\"items\\\"]}\"}}]}";
+        answers.add(new Object[]{200, bare});
+        answers.add(new Object[]{200, "{\"choices\":[{\"message\":{\"content\":\"не знаю\"}}]}"});
+        answers.add(new Object[]{200, "{\"choices\":[{\"message\":{\"content\":\"{\\\"items\\\": [{\\\"i\\\": 0, \\\"level\\\": \\\"junk\\\"}]}\"}}]}"});
+        r = g.json(false, true, "s", "u", Prompts.QUICK_SCHEMA);
+        ok(got.size() == before + 4 && "qwen/qwen3.5-9b".equals(MiniJson.obj(MiniJson.parse(got.get(before + 2)[2])).get("model"))
+                        && "qwen/qwen3.6-35b-a3b".equals(MiniJson.obj(MiniJson.parse(got.get(before + 3)[2])).get("model"))
+                        && "junk".equals(MiniJson.obj(MiniJson.arr(r.get("items")).get(0)).get("level")),
+                "a bare schema, then not JSON from the 9B — the smart model answered");
+        before = got.size();
+        answers.add(new Object[]{200, "{\"choices\":[{\"message\":{\"content\":\"{\\\"reply\\\": \\\"Хорошо.\\\"}\"}}]}"});
+        answers.add(new Object[]{200, "{\"choices\":[{\"message\":{\"content\":\"{\\\"reply\\\": \\\"Хорошо!\\\"}\"}}]}"});
+        r = g.json(true, false, "s", "u", Prompts.ASSISTANT_SCHEMA);
+        ok(got.size() == before + 2 && "Хорошо!".equals(r.get("reply")),
+                "the smart model without a field twice — what it said is taken (asked once more, nobody bigger)");
+        answers.add(new Object[]{200, "<html>Доступ ограничен</html>"});
+        try {
+            g.text(true, "s", "u");
+            ok(false, "a page instead of JSON is an error");
+        } catch (LlmError e) {
+            ok(e.getMessage().contains("Неожиданный ответ API"), "a page instead of JSON — an error, not a crash: «" + e.getMessage() + "»");
+        }
+        answers.add(new Object[]{400, "{\"error\":{\"message\":\"bad request\"}}"});
+        before = got.size();
+        try {
+            g.text(false, "s", "u");
+            ok(false, "another 400 is an error");
+        } catch (LlmError e) {
+            ok(got.size() == before + 1, "another 400 — an error, not sent to the smart model");
+        }
+
         // the balance for the settings check; a refusal — not known, no error
         answers.add(new Object[]{200, "{\"amount\":\"924.83409882\",\"available\":\"924.83409882\",\"reservedAmount\":\"0.00000000\"}"});
         String bal = g.polzaBalance();

@@ -2,7 +2,7 @@
 # Сборка APK без Gradle: aapt2 -> javac -> d8 -> zipalign -> apksigner.
 # Сервер больше не нужен: секретарь (его логика — общий код с SemSearch в
 # ../gemma-search-android/src/io/github/teoplaydor/semsearch/secretary) работает в самом приложении,
-# нейросеть — Qwen от Яндекса через Polza AI прямо с телефона, ключ вписывается в приложении («Настройка» → «Ключ Polza»).
+# нейросеть — Qwen через Polza AI прямо с телефона (простое — 9B, разговор — 35B от Яндекса), ключ — «Настройка» → «Ключ Polza».
 #
 # Инструменты — в ~/.secretary-android (как раньше: sdk/build-tools/35.0.0, sdk/platforms/android-35, jdk, release.jks).
 # Чего там нет, берётся из системы (aapt2, zipalign, apksigner — пакеты Ubuntu; android.jar и d8 скачиваются с Google).

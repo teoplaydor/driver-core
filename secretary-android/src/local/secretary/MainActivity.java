@@ -290,14 +290,18 @@ public class MainActivity extends Activity {
     /** Модели — как в config.toml: «polza:имя@поставщик», «gemini:имя» или «openai:имя» (OpenRouter, DeepSeek). */
     void editModels() {
         io.github.teoplaydor.semsearch.secretary.GeminiBrain.Config g = core.geminiConfig();
-        String def = io.github.teoplaydor.semsearch.secretary.GeminiBrain.POLZA_MODEL;
+        String defFast = io.github.teoplaydor.semsearch.secretary.GeminiBrain.POLZA_FAST,
+                defSmart = io.github.teoplaydor.semsearch.secretary.GeminiBrain.POLZA_SMART;
         LinearLayout box = box();
         android.widget.TextView help = new android.widget.TextView(this);
-        help.setText("«polza:модель@поставщик» — модель через Polza только у этого поставщика (без «@…» — Polza выберет "
-                + "сама); «gemini:…» — Gemini по своему ключу (нужен VPN); «openai:…» — любой OpenAI-совместимый API.");
+        help.setText("По умолчанию простое (сортировка, чаты, банки) — Qwen 9B на серверах Polza в России, копейки за "
+                + "запрос; разговор и черновики — Qwen 35B от Яндекса. «polza:модель@поставщик» — модель через Polza только у "
+                + "этого поставщика (без «@…» — Polza выберет сама); «gemini:…» — Gemini по своему ключу (нужен VPN); "
+                + "«openai:…» — любой OpenAI-совместимый API.");
         box.addView(help);
-        EditText fast = field(box, "Быстрая — сортировка уведомлений, разбор чатов, банки", g.fastModel, def, false);
-        EditText smart = field(box, "Умная — разговор с тобой и черновики", g.smartModel, def, false);
+        EditText fast = field(box, "Быстрая — сортировка уведомлений, разбор чатов, банки, проверка дел", g.fastModel, defFast, false);
+        EditText smart = field(box, "Умная — разговор с тобой и черновики (и чаты длиннее, чем влезает в быструю)",
+                g.smartModel, defSmart, false);
         EditText audio = field(box, "Голос — распознавание голосовых", g.audioModel,
                 io.github.teoplaydor.semsearch.secretary.GeminiBrain.POLZA_AUDIO, false);
         EditText think = field(box, "Размышления: пусто — как решит модель; low / medium / high (Яндекс понимает только их); "
@@ -328,7 +332,7 @@ public class MainActivity extends Activity {
                 .setNeutralButton("По умолчанию", (d, w) -> {
                     core.prefs.edit().remove(Core.K_FAST).remove(Core.K_SMART).remove(Core.K_AUDIO).remove(Core.K_THINK)
                             .remove(Core.K_POLZA_URL).apply();
-                    toast("Модели по умолчанию: Qwen от Яндекса через Polza, голос — GigaAM");
+                    toast("Модели по умолчанию: простое — Qwen 9B, разговор — Qwen 35B от Яндекса, голос — GigaAM");
                 })
                 .show();
     }

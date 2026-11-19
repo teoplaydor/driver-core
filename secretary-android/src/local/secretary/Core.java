@@ -110,17 +110,25 @@ final class Core {
             K_WAIT = "max_wait_seconds", K_IGNORE = "ignore_apps", K_BANKS = "bank_apps", K_REMIND = "remind_before";
 
     /** 2.13: всё на Qwen через Polza — модели Gemini, вписанные раньше, уступают место новым по умолчанию
-     *  (ключ Gemini остаётся: вернуть — «Модели»). */
+     *  (ключ Gemini остаётся: вернуть — «Модели»). 2.14: простое — на Qwen 9B, большая Qwen от Яндекса — для
+     *  разговора; сохранённая в 2.13 большая модель на месте быстрой уступает место 9B. */
     void migratePrefs() {
-        if (prefs.getInt(K_MODELS_V, 0) >= 2) return;
+        int v = prefs.getInt(K_MODELS_V, 0);
+        if (v >= 3) return;
         android.content.SharedPreferences.Editor e = prefs.edit();
-        for (String k : new String[]{K_FAST, K_SMART, K_AUDIO})
-            if (prefs.getString(k, "").startsWith("gemini:")) {
-                Journal.line("settings: " + k + " " + prefs.getString(k, "") + " → Polza (Qwen from Yandex)");
-                e.remove(k);
-            }
-        if (prefs.getString(K_THINK, "").matches("\\d+")) e.remove(K_THINK); // бюджет Gemini; Яндекс его не примет
-        e.putInt(K_MODELS_V, 2).apply();
+        if (v < 2) {
+            for (String k : new String[]{K_FAST, K_SMART, K_AUDIO})
+                if (prefs.getString(k, "").startsWith("gemini:")) {
+                    Journal.line("settings: " + k + " " + prefs.getString(k, "") + " → Polza (Qwen)");
+                    e.remove(k);
+                }
+            if (prefs.getString(K_THINK, "").matches("\\d+")) e.remove(K_THINK); // бюджет Gemini; Яндекс его не примет
+        }
+        if (GeminiBrain.POLZA_SMART.equals(prefs.getString(K_FAST, ""))) {
+            Journal.line("settings: fast model → " + GeminiBrain.POLZA_FAST);
+            e.remove(K_FAST);
+        }
+        e.putInt(K_MODELS_V, 3).apply();
     }
 
     /** Чей ключ нужен моделям из настроек: «Polza», «Gemini» или null — всё есть. */

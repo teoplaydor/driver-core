@@ -115,6 +115,23 @@ public final class SecUtil {
         return v < 10 ? "0" + v : String.valueOf(v);
     }
 
+    static final String[] WEEKDAY_NAMES = {"понедельник", "вторник", "среда", "четверг", "пятница", "суббота", "воскресенье"};
+
+    /** «Сейчас» for a prompt that counts dates: the time, its weekday and the week ahead with dates —
+     *  2026-11-19T17:50+03:00 (четверг)\nБлижайшие дни: пт 20.11, сб 21.11, … Without the list a small model
+     *  («до пятницы») misses the date; with it — right. */
+    public static String nowWithWeek(Instant t, ZoneId tz) {
+        ZonedDateTime z = t.atZone(tz);
+        StringBuilder sb = new StringBuilder(isoMinutes(t, tz)).append(" (")
+                .append(WEEKDAY_NAMES[z.getDayOfWeek().getValue() - 1]).append(")\nБлижайшие дни:");
+        for (int i = 1; i <= 7; i++) {
+            ZonedDateTime d = z.plusDays(i);
+            sb.append(i == 1 ? " " : ", ").append(WEEKDAYS[d.getDayOfWeek().getValue() - 1]).append(' ')
+                    .append(two(d.getDayOfMonth())).append('.').append(two(d.getMonthValue()));
+        }
+        return sb.toString();
+    }
+
     /** Python's isoformat(timespec="minutes") of a local time: 2026-11-13T19:05+03:00. */
     public static String isoMinutes(Instant t, ZoneId tz) {
         ZonedDateTime z = t.atZone(tz);

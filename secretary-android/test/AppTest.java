@@ -123,8 +123,9 @@ public class AppTest {
         snm.setNotificationPolicyAccessGranted(true);
 
         // the previous version's Gemini models and key: the models give way to Qwen via Polza, the key stays
-        Listener.prefs(app).edit().putString(Core.K_FAST, "gemini:gemini-3.1-flash-lite").putString(Core.K_KEY, "AIza-old")
-                .putString(Core.K_THINK, "512").apply();
+        // (and 2.13's big Qwen saved as the fast model gives way to the 9B)
+        Listener.prefs(app).edit().putString(Core.K_AUDIO, "gemini:gemini-3.1-flash-lite").putString(Core.K_KEY, "AIza-old")
+                .putString(Core.K_THINK, "512").putString(Core.K_FAST, "polza:qwen/qwen3.6-35b-a3b@yandex").apply();
         // first start: no Polza key — asked for it
         MainActivity a = Robolectric.buildActivity(MainActivity.class).setup().get();
         AlertDialog d = ShadowAlertDialog.getLatestAlertDialog();
@@ -132,7 +133,8 @@ public class AppTest {
         assertEquals("Ключ Polza", Shadows.shadowOf(d).getTitle().toString());
         Core core = Core.instance();
         assertNotNull(core);
-        assertEquals("polza:qwen/qwen3.6-35b-a3b@yandex", core.geminiConfig().fastModel);
+        assertEquals("polza:qwen/qwen3.5-9b@polza", core.geminiConfig().fastModel);
+        assertEquals("polza:qwen/qwen3.6-35b-a3b@yandex", core.geminiConfig().smartModel);
         assertEquals("polza:ai-sage/gigaam-v3", core.geminiConfig().audioModel);
         assertEquals("AIza-old", core.geminiConfig().geminiKey);
         assertEquals("", core.geminiConfig().thinking);
@@ -156,7 +158,7 @@ public class AppTest {
         assertTrue(r, r.contains("\"ok\":true"));
         waitFor("Qwen's answer in the chat", () -> core.sec.db.chatTail(5).stream().anyMatch(m -> m.text("html").contains("Завтра свободно.")));
         String q = asked.get(asked.size() - 1);
-        assertTrue("Qwen from Yandex only, via Polza: " + q.substring(0, 200), q.startsWith("/api/v1/chat/completions ")
+        assertTrue("the conversation: Qwen 35B from Yandex only, via Polza: " + q.substring(0, 200), q.startsWith("/api/v1/chat/completions ")
                 && q.contains("\"model\":\"qwen/qwen3.6-35b-a3b\"") && q.contains("\"provider\":{\"only\":[\"yandex\"],\"allow_fallbacks\":false}")
                 && !q.contains("response_format"));
         assertTrue("the context and the owner's profile sent", q.contains("Расписание на 7 дней") && q.contains("Работаю менеджером."));
@@ -196,8 +198,9 @@ public class AppTest {
         Row pm = core.sec.db.q("SELECT * FROM phone_msgs").get(0);
         assertEquals("Олег", pm.text("sender"));
         waitFor("shown with sound by the secretary", () -> titled(snm, "Олег") != null);
-        assertTrue("the fast model filtered it", asked.stream().anyMatch(x -> x.startsWith("/api/v1/chat/completions ") && x.contains("Олег")
-                && x.contains("фильтр уведомлений")));
+        assertTrue("the fast model (Qwen 9B) filtered it", asked.stream().anyMatch(x -> x.startsWith("/api/v1/chat/completions ")
+                && x.contains("Олег") && x.contains("фильтр уведомлений") && x.contains("\"model\":\"qwen/qwen3.5-9b\"")
+                && x.contains("\"only\":[\"polza\"]")));
         assertNotNull(Listener.setFocus(app, false));
 
         // «Сделал?» at unlock

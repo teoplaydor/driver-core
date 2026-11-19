@@ -33,9 +33,14 @@ public final class GeminiBrain implements Brain {
 
     /** Polza AI: Russian, so reachable from Russia without a VPN; one key for Qwen, YandexGPT, speech recognition. */
     public static final String POLZA_URL = "https://polza.ai/api/v1";
-    /** The cheapest Qwen served by Yandex (288 ₽ in, 72 ₽ out per 1M tokens; data stays in Russia). It always thinks
-     *  first (Yandex can't turn it off), so its answers are never cut short: no max_tokens. */
-    public static final String POLZA_MODEL = "polza:qwen/qwen3.6-35b-a3b@yandex";
+    /** The fast model — sorting notifications, reading chats, banks, checking tasks: Qwen3.5-9B on Polza's own servers
+     *  in Russia (1.64 ₽ in, 4.91 ₽ out per 1M tokens — a call ≈ 0.002 ₽, 1–3 s, no long thinking). Its window is
+     *  32k tokens: a longer prompt goes to the smart model. */
+    public static final String POLZA_FAST = "polza:qwen/qwen3.5-9b@polza";
+    /** The smart model — the conversation and drafts: the cheapest Qwen served by Yandex (288 ₽ in, 72 ₽ out per 1M
+     *  tokens; data stays in Russia). It always thinks first (Yandex can't turn it off), so its answers are never cut
+     *  short: no max_tokens. */
+    public static final String POLZA_SMART = "polza:qwen/qwen3.6-35b-a3b@yandex";
     /** GigaAM v3 on Polza's own servers in Russia: 0.25 ₽ a minute, takes the recorder's AAC as is. */
     public static final String POLZA_AUDIO = "polza:ai-sage/gigaam-v3";
 
@@ -66,7 +71,7 @@ public final class GeminiBrain implements Brain {
     public static class Config {
         public String geminiKey = "", openaiKey = "", openaiBaseUrl = "https://openrouter.ai/api/v1";
         public String polzaKey = "", polzaUrl = POLZA_URL;
-        public String fastModel = POLZA_MODEL, smartModel = POLZA_MODEL, audioModel = POLZA_AUDIO;
+        public String fastModel = POLZA_FAST, smartModel = POLZA_SMART, audioModel = POLZA_AUDIO;
         /** "" — as the model decides; "low" — less thinking, cheaper and faster; a number — a token budget
          *  (Gemini). For Polza a word goes as reasoning effort (Yandex takes low, medium, high). */
         public String thinking = "";
@@ -139,36 +144,118 @@ public final class GeminiBrain implements Brain {
 
     static final Pattern FENCE = Pattern.compile("^\\s*```(?:json)?\\s*|\\s*```\\s*$");
 
-    /** The model's text as a JSON object (fences around it and words before or after it forgiven). */
+    /** The model's text as a JSON object (fences around it and words before or after it forgiven). Plain words
+     *  («не знаю») are not JSON — an LlmError, never a crash (MiniJson takes a word for a number and throws). */
     static Map<String, Object> parseJson(String text) throws LlmError {
         String s = FENCE.matcher(text.trim()).replaceAll("");
         Object data = null;
         try {
             data = MiniJson.parse(s);
-        } catch (IOException e) {
+        } catch (IOException | RuntimeException e) {
             int a = s.indexOf('{'), b = s.lastIndexOf('}');
             if (0 <= a && a < b) {
                 try {
                     data = MiniJson.parse(s.substring(a, b + 1));
-                } catch (IOException ignored) {
+                } catch (IOException | RuntimeException ignored) {
                     data = null;
                 }
             }
         }
         Map<String, Object> m = MiniJson.obj(data);
-        if (m == null) throw new LlmError("Нейросеть вернула не JSON: " + SecUtil.head(text, 200));
+        if (m == null) throw new LlmError(NOT_JSON + SecUtil.head(text, 200));
         return m;
     }
 
+    /** Too long for the model's window (the 9B's 32k): the API says so in its 400. */
+    static boolean tooLong(LlmError e) {
+        String m = String.valueOf(e.getMessage()).toLowerCase(Locale.ROOT);
+        return m.contains("context length") || m.contains("context_length") || m.contains("context window")
+                || m.contains("prompt is too long") || m.contains("too many tokens");
+    }
+
+    static final String NOT_JSON = "Нейросеть вернула не JSON: ";
+
+    /** The schema in the prompt for APIs without responseSchema. Named fields and «не схемой»: with the server's bare
+     *  «по этой JSON-схеме» Qwen 9B answered the bank parse with the schema itself 5 times in 30; with this — 0 in 30. */
+    static String schemaHint(Prompts.Schema schema) throws IOException {
+        Map<String, Object> props = MiniJson.obj(MiniJson.obj(MiniJson.parse(schema.json)).get("properties"));
+        List<String> names = new ArrayList<String>();
+        if (props != null) for (String k : props.keySet()) names.add("\"" + k + "\"");
+        return "\n\nОтветь одним JSON-объектом с полями " + SecUtil.join(", ", names)
+                + " (не схемой). Типы и допустимые значения полей — в этой JSON-схеме:\n" + schema.json;
+    }
+
+    /** The answer as the schema asks, or null. A small model sometimes wraps its data in the schema
+     *  ({"type": "object", "properties": {…the data…}}) — unwrapped; a bare schema (no data) or missing fields — null. */
+    static Map<String, Object> conform(Map<String, Object> answer, Object schema) {
+        Map<String, Object> s = MiniJson.obj(schema);
+        List<Object> required = s == null ? null : MiniJson.arr(s.get("required"));
+        if (answer == null || required == null || hasAll(answer, required)) return answer;
+        Map<String, Object> inner = MiniJson.obj(answer.get("properties"));
+        if (inner != null && hasAll(inner, required)) {
+            boolean bareSchema = true;
+            for (Object v : inner.values()) {
+                Map<String, Object> m = MiniJson.obj(v);
+                if (m == null || !m.containsKey("type")) bareSchema = false;
+            }
+            if (!bareSchema) return inner;
+        }
+        return null;
+    }
+
+    private static boolean hasAll(Map<String, Object> m, List<Object> keys) {
+        for (Object k : keys) if (!m.containsKey(String.valueOf(k))) return false;
+        return true;
+    }
+
+    /** A JSON answer of the schema. The fast model answered not by it (or not JSON) — asked once more, then the smart
+     *  one; too long for the fast model's window — the smart one at once. */
     public Map<String, Object> json(boolean smart, boolean urgent, String system, String user, Prompts.Schema schema) throws LlmError {
         Config cfg = settings.config();
-        String[] pm = splitSpec(smart ? cfg.smartModel : cfg.fastModel);
+        String main = smart ? cfg.smartModel : cfg.fastModel;
+        boolean escalate = !smart && !cfg.smartModel.equals(cfg.fastModel);
+        String[] order = escalate ? new String[]{main, main, cfg.smartModel} : new String[]{main, main};
+        Object sch;
+        try {
+            sch = MiniJson.parse(schema.json);
+        } catch (IOException e) { // the schema itself (never)
+            throw new LlmError(String.valueOf(e.getMessage()));
+        }
+        Map<String, Object> last = null;
+        LlmError lastError = null;
+        for (int i = 0; i < order.length; i++) {
+            Map<String, Object> answer;
+            try {
+                answer = json(cfg, order[i], system, user, schema);
+            } catch (LlmError e) {
+                if (escalate && i < order.length - 1 && tooLong(e)) {
+                    Secretary.log("llm: too long for " + order[i] + " — the smart model " + cfg.smartModel + " reads it");
+                    i = order.length - 2;
+                    continue;
+                }
+                if (!String.valueOf(e.getMessage()).startsWith(NOT_JSON)) throw e;
+                lastError = e;
+                answer = null;
+            }
+            Map<String, Object> ok = conform(answer, sch);
+            if (ok != null) return ok;
+            if (answer != null) last = answer;
+            Secretary.log("llm: " + order[i] + " answered not by " + schema.name + ": "
+                    + (answer != null ? SecUtil.head(MiniJson.write(answer), 200) : lastError.getMessage())
+                    + (i + 1 < order.length ? " — asking " + order[i + 1] : ""));
+        }
+        if (last == null) throw lastError;
+        return last; // what there is: the callers take a field missing as before
+    }
+
+    private Map<String, Object> json(Config cfg, String spec, String system, String user, Prompts.Schema schema) throws LlmError {
+        String[] pm = splitSpec(spec);
         String text;
         try {
             if ("gemini".equals(pm[0])) {
                 text = gemini(cfg, pm[1], system, textParts(user), MiniJson.parse(schema.json));
             } else {
-                String sys = system + "\n\nОтвечай строго одним JSON-объектом по этой JSON-схеме:\n" + schema.json;
+                String sys = system + schemaHint(schema);
                 text = openai(cfg, pm[0], pm[1], sys, user, true);
             }
         } catch (IOException e) { // the schema itself (never)
@@ -179,7 +266,17 @@ public final class GeminiBrain implements Brain {
 
     public String text(boolean smart, String system, String user) throws LlmError {
         Config cfg = settings.config();
-        String[] pm = splitSpec(smart ? cfg.smartModel : cfg.fastModel);
+        try {
+            return text(cfg, smart ? cfg.smartModel : cfg.fastModel, system, user);
+        } catch (LlmError e) {
+            if (smart || !tooLong(e) || cfg.smartModel.equals(cfg.fastModel)) throw e;
+            Secretary.log("llm: too long for " + cfg.fastModel + " — the smart model " + cfg.smartModel + " writes it");
+            return text(cfg, cfg.smartModel, system, user);
+        }
+    }
+
+    private String text(Config cfg, String spec, String system, String user) throws LlmError {
+        String[] pm = splitSpec(spec);
         if ("gemini".equals(pm[0])) return gemini(cfg, pm[1], system, textParts(user), null).trim();
         return openai(cfg, pm[0], pm[1], system, user, false).trim();
     }
@@ -399,7 +496,12 @@ public final class GeminiBrain implements Brain {
                 int code = c.getResponseCode();
                 String text = read(code >= 400 ? c.getErrorStream() : c.getInputStream());
                 if (code == 200) {
-                    Map<String, Object> m = MiniJson.obj(MiniJson.parse(text));
+                    Map<String, Object> m;
+                    try {
+                        m = MiniJson.obj(MiniJson.parse(text));
+                    } catch (IOException | RuntimeException e) { // not JSON (a proxy's page) — not a network error
+                        m = null;
+                    }
                     if (m == null) throw new LlmError("Неожиданный ответ API: " + SecUtil.head(text, 300));
                     return m;
                 }

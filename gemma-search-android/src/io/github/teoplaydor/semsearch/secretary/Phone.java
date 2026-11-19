@@ -438,7 +438,7 @@ public final class Phone {
         try {
             data = app.llm.json(false, false,
                     Prompts.fill(Prompts.CHAT_TRIAGE_SYSTEM, "about_me", aboutMe(), "tz", app.cfg.tz.getId()),
-                    Prompts.fill(Prompts.CHAT_TRIAGE_USER, "now", SecUtil.isoMinutes(now, app.cfg.tz), "app", appName, "chat", chat,
+                    Prompts.fill(Prompts.CHAT_TRIAGE_USER, "now", SecUtil.nowWithWeek(now, app.cfg.tz), "app", appName, "chat", chat,
                             "group", anyGroup ? " (групповой)" : "", "context", context, "messages", transcript),
                     Prompts.TRIAGE_SCHEMA);
         } catch (LlmError e) {
