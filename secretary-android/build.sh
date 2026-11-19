@@ -2,7 +2,7 @@
 # Сборка APK без Gradle: aapt2 -> javac -> d8 -> zipalign -> apksigner.
 # Сервер больше не нужен: секретарь (его логика — общий код с SemSearch в
 # ../gemma-search-android/src/io/github/teoplaydor/semsearch/secretary) работает в самом приложении,
-# нейросеть — Gemini напрямую с телефона, ключ вписывается в приложении («Настройка» → «Ключ Gemini»).
+# нейросеть — Qwen от Яндекса через Polza AI прямо с телефона, ключ вписывается в приложении («Настройка» → «Ключ Polza»).
 #
 # Инструменты — в ~/.secretary-android (как раньше: sdk/build-tools/35.0.0, sdk/platforms/android-35, jdk, release.jks).
 # Чего там нет, берётся из системы (aapt2, zipalign, apksigner — пакеты Ubuntu; android.jar и d8 скачиваются с Google).
@@ -52,7 +52,7 @@ rm -rf build && mkdir -p build/gen build/classes build/dex
 "$AAPT2" link -o build/app.unaligned.apk -I "$JAR" --manifest AndroidManifest.xml -R build/res.zip -A assets \
     --java build/gen --min-sdk-version 26 --target-sdk-version 34 \
     --version-code "$VERSION_CODE" --version-name "$VERSION_NAME" --auto-add-overlay
-# Логика секретаря — общая с SemSearch; без модели на телефоне (LocalLlm/LocalBrain): здесь думает Gemini.
+# Логика секретаря — общая с SemSearch; без модели на телефоне (LocalLlm/LocalBrain): здесь думает облако (Polza).
 javac --release 11 -encoding UTF-8 -Xlint:-options -nowarn -cp "$JAR" -d build/classes \
     $(find src build/gen -name '*.java') "$CORE/core/MiniJson.java" \
     $(ls "$CORE"/secretary/*.java | grep -v -e LocalLlm.java -e LocalBrain.java)

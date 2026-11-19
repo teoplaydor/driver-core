@@ -297,20 +297,31 @@ public final class Actions {
                 {"За 30 дней", SecUtil.toDb(now.minus(Duration.ofDays(30))).substring(0, 10)}};
         for (String[] p : periods) {
             List<Row> rows = app.db.usageSince(p[1]);
-            double total = 0;
-            boolean priced = false;
+            double total = 0, totalRub = 0;
+            boolean priced = false, rubles = false;
             lines.add("\n<b>" + p[0] + "</b>");
             for (Row r : rows) {
-                Double cost = GeminiBrain.estimateCost(r.text("model"), r.lng("tokens_in"), r.lng("tokens_out"));
-                if (cost != null) {
+                double rub = r.truthy("cost_rub") ? r.dbl("cost_rub") : 0;
+                Double cost = rub > 0 ? null : GeminiBrain.estimateCost(r.text("model"), r.lng("tokens_in"), r.lng("tokens_out"));
+                String price;
+                if (rub > 0) { // what Polza said, in rubles
+                    totalRub += rub;
+                    rubles = true;
+                    price = SecUtil.fixed(rub, 2) + " ₽";
+                } else if (cost != null) {
                     total += cost;
                     priced = true;
-                }
-                String price = cost != null ? "≈ $" + SecUtil.fixed(cost, 3) : "цена неизвестна";
-                String tokens = SecUtil.groupThousands(String.valueOf(r.lng("tokens_in") + r.lng("tokens_out")));
-                lines.add("• " + esc(r.text("model")) + ": " + r.lng("calls") + " запр., " + tokens + " ток., " + price);
+                    price = "≈ $" + SecUtil.fixed(cost, 3);
+                } else price = "цена неизвестна";
+                long tok = r.lng("tokens_in") + r.lng("tokens_out");
+                String tokens = tok > 0 ? SecUtil.groupThousands(String.valueOf(tok)) + " ток., " : "";
+                lines.add("• " + esc(r.text("model")) + ": " + r.lng("calls") + " запр., " + tokens + price);
             }
-            lines.add(rows.isEmpty() ? "Запросов не было." : priced ? "Итого ≈ $" + SecUtil.fixed(total, 2) : "Всё на телефоне — бесплатно.");
+            List<String> sums = new ArrayList<String>();
+            if (rubles) sums.add(SecUtil.fixed(totalRub, 2) + " ₽");
+            if (priced) sums.add("≈ $" + SecUtil.fixed(total, 2));
+            lines.add(rows.isEmpty() ? "Запросов не было." : !sums.isEmpty() ? "Итого " + SecUtil.join(" + ", sums)
+                    : "Всё на телефоне — бесплатно.");
         }
         return SecUtil.join("\n", lines);
     }

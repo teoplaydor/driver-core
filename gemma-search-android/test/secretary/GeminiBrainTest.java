@@ -21,7 +21,8 @@ import io.github.teoplaydor.semsearch.secretary.Prompts;
  * The secretary on Gemini from the phone (the server version's llm.py) against a stand-in server: the request as Gemini
  * takes it (the key in a header, the system instruction, the schema with types in capitals, thinking), the answer read
  * without the model's thoughts, the tokens counted, a busy answer tried again, a refusal told in words, a country not
- * served told so, the OpenAI-compatible path, a voice message sent as audio.
+ * served told so, the OpenAI-compatible path, a voice message sent as audio; Polza AI: the model from one provider
+ * only (Yandex), its thinking not taken for the answer, the cost in rubles as it says, speech recognition, no money.
  */
 public class GeminiBrainTest {
     static int bad = 0;
@@ -67,15 +68,21 @@ public class GeminiBrainTest {
         String base = "http://127.0.0.1:" + server.getAddress().getPort();
 
         final GeminiBrain.Config cfg = new GeminiBrain.Config();
+        ok(cfg.fastModel.equals("polza:qwen/qwen3.6-35b-a3b@yandex") && cfg.smartModel.equals(cfg.fastModel)
+                        && cfg.audioModel.equals("polza:ai-sage/gigaam-v3") && cfg.polzaUrl.equals("https://polza.ai/api/v1"),
+                "by default: Qwen from Yandex via Polza for everything, GigaAM for voice");
         cfg.geminiKey = "test-key";
+        cfg.fastModel = "gemini:gemini-3.1-flash-lite";
+        cfg.smartModel = "gemini:gemini-3.8-flash";
+        cfg.audioModel = "gemini:gemini-3.1-flash-lite";
         final List<Object[]> used = new ArrayList<Object[]>();
         GeminiBrain g = new GeminiBrain(new GeminiBrain.Settings() {
             public GeminiBrain.Config config() {
                 return cfg;
             }
         }, new GeminiBrain.Usage() {
-            public void add(String model, long in, long out) {
-                used.add(new Object[]{model, in, out});
+            public void add(String model, long in, long out, double rub) {
+                used.add(new Object[]{model, in, out, rub});
             }
         });
         g.geminiUrl = base + "/v1beta/models/%s:generateContent";
@@ -164,7 +171,8 @@ public class GeminiBrainTest {
             g.text(false, "s", "u");
             ok(false, "a model without a provider is an error");
         } catch (LlmError e) {
-            ok(e.getMessage().contains("gemini:имя-модели"), "a model without «gemini:» — said how to write it");
+            ok(e.getMessage().contains("polza:имя-модели@поставщик") && e.getMessage().contains("gemini:имя-модели"),
+                    "a model without a provider — said how to write it");
         }
 
         // an OpenAI-compatible API (OpenRouter, DeepSeek): the schema in the system prompt, json_object
@@ -196,6 +204,92 @@ public class GeminiBrainTest {
                 "a voice message: the audio inline, the server's prompt, the audio model");
         ok(Math.abs(GeminiBrain.estimateCost("gemini-3.1-flash-lite", 1_000_000, 1_000_000) - 1.75) < 1e-9
                 && GeminiBrain.estimateCost("local", 1, 1) == null, "the cost estimate (USD per million tokens)");
+
+        // Polza AI: Qwen from Yandex only — the provider block, no fallback; the thinking left out; rubles as said
+        cfg.fastModel = GeminiBrain.POLZA_MODEL;
+        cfg.smartModel = GeminiBrain.POLZA_MODEL;
+        cfg.audioModel = GeminiBrain.POLZA_AUDIO;
+        cfg.polzaUrl = base + "/polza/v1/";
+        try {
+            g.text(false, "s", "u");
+            ok(false, "no Polza key is an error");
+        } catch (LlmError e) {
+            ok(e.getMessage().contains("Ключ Polza"), "no Polza key: «" + e.getMessage() + "»");
+        }
+        cfg.polzaKey = "pza_test";
+        answers.add(new Object[]{200, "{\"model\":\"qwen/qwen3.6-35b-a3b\",\"choices\":[{\"message\":{\"role\":\"assistant\","
+                + "\"content\":\"  ```json\\n{\\\"items\\\": [{\\\"i\\\": 0, \\\"level\\\": \\\"normal\\\"}]}\\n```\",\"reasoning\":\"Thinking process: {не JSON}\"},"
+                + "\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":900,\"completion_tokens\":500,\"cost_rub\":0.2952,\"cost\":0.2952}}"});
+        r = g.json(false, false, "Ты — фильтр уведомлений.", "[0] Банк", Prompts.QUICK_SCHEMA);
+        req = got.get(got.size() - 1);
+        Map<String, Object> pb = MiniJson.obj(MiniJson.parse(req[2]));
+        Map<String, Object> prov = MiniJson.obj(pb.get("provider"));
+        ok("normal".equals(MiniJson.obj(MiniJson.arr(r.get("items")).get(0)).get("level")), "Polza: the answer read (fenced, spaces before), its thinking left out");
+        ok("/polza/v1/chat/completions".equals(req[0]) && req[1].contains("auth=Bearer pza_test") && !req[1].contains("or-key"),
+                "Polza: its own address and key");
+        ok("qwen/qwen3.6-35b-a3b".equals(pb.get("model")) && prov != null && "[\"yandex\"]".equals(MiniJson.write(prov.get("only")))
+                        && Boolean.FALSE.equals(prov.get("allow_fallbacks")) && !pb.containsKey("max_tokens") && !pb.containsKey("reasoning")
+                        && !pb.containsKey("response_format")
+                        && ((String) MiniJson.obj(MiniJson.arr(pb.get("messages")).get(0)).get("content")).contains("по этой JSON-схеме"),
+                "Polza: «model@yandex» → that provider only, no fallback; no max_tokens (thinking needs room); "
+                        + "no JSON mode (garbles Yandex's Qwen) — the schema in the prompt: " + MiniJson.write(prov));
+        Object[] u = used.get(used.size() - 1);
+        ok("qwen/qwen3.6-35b-a3b@yandex".equals(u[0]) && (Long) u[1] == 900 && (Long) u[2] == 500 && Math.abs((Double) u[3] - 0.2952) < 1e-9,
+                "Polza: tokens and rubles counted as it said");
+        cfg.thinking = "low";
+        answers.add(new Object[]{200, "{\"choices\":[{\"message\":{\"content\":\"Добрый день!\"},\"finish_reason\":\"stop\"}]}"});
+        ok("Добрый день!".equals(g.text(true, "Ты пишешь ответ.", "Переписка")), "Polza: free text");
+        pb = MiniJson.obj(MiniJson.parse(got.get(got.size() - 1)[2]));
+        ok("low".equals(MiniJson.obj(pb.get("reasoning")).get("effort")) && !pb.containsKey("response_format"),
+                "Polza: thinking «low» → reasoning effort; no JSON mode for text");
+        cfg.thinking = "";
+        cfg.smartModel = "polza:qwen/qwen3-235b-a22b@provider=yandex&allow_fallbacks=true";
+        answers.add(new Object[]{200, "{\"choices\":[{\"message\":{\"content\":\"ок\"}}]}"});
+        g.text(true, "s", "u");
+        pb = MiniJson.obj(MiniJson.parse(got.get(got.size() - 1)[2]));
+        ok("qwen/qwen3-235b-a22b@provider=yandex&allow_fallbacks=true".equals(pb.get("model")) && !pb.containsKey("provider"),
+                "Polza: its own «@key=value» alias passed as it is");
+        cfg.smartModel = "polza:qwen/qwen3.6-35b-a3b";
+        answers.add(new Object[]{200, "{\"choices\":[{\"message\":{\"content\":\"ок\"}}]}"});
+        g.text(true, "s", "u");
+        pb = MiniJson.obj(MiniJson.parse(got.get(got.size() - 1)[2]));
+        ok("qwen/qwen3.6-35b-a3b".equals(pb.get("model")) && !pb.containsKey("provider"), "Polza: no «@» — Polza chooses the provider");
+        answers.add(new Object[]{200, "{\"choices\":[{\"message\":{\"content\":\"\",\"reasoning\":\"думаю...\"},\"finish_reason\":\"length\"}],"
+                + "\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":400,\"cost_rub\":\"0.03\"}}"});
+        try {
+            g.json(false, false, "s", "u", Prompts.QUICK_SCHEMA);
+            ok(false, "all thinking, no answer is an error");
+        } catch (LlmError e) {
+            ok(e.getMessage().contains("размышления"), "Polza: all thinking, no answer — said so: «" + e.getMessage() + "»");
+        }
+        ok(Math.abs((Double) used.get(used.size() - 1)[3] - 0.03) < 1e-9, "Polza: rubles as a string read too");
+        answers.add(new Object[]{402, "{\"error\":{\"code\":\"INSUFFICIENT_BALANCE\",\"message\":\"Недостаточно средств\"}}"});
+        try {
+            g.text(false, "s", "u");
+            ok(false, "no money is an error");
+        } catch (LlmError e) {
+            ok(e.getMessage().contains("пополни баланс") && got.get(got.size() - 1)[0].endsWith("/chat/completions"),
+                    "Polza: no money — said so, not tried again: «" + e.getMessage() + "»");
+        }
+        // the balance for the settings check; a refusal — not known, no error
+        answers.add(new Object[]{200, "{\"amount\":\"924.83409882\",\"available\":\"924.83409882\",\"reservedAmount\":\"0.00000000\"}"});
+        String bal = g.polzaBalance();
+        ok("924.83".equals(bal) && "/polza/v1/balance".equals(got.get(got.size() - 1)[0]) && got.get(got.size() - 1)[1].contains("Bearer pza_test"),
+                "Polza: the balance learned: " + bal);
+        answers.add(new Object[]{401, "{\"error\":{\"message\":\"bad key\"}}"});
+        ok(g.polzaBalance() == null, "Polza: the balance with a bad key — not known, no error");
+
+        // a voice message: Polza's speech recognition, the recorder's AAC as a data URL, Russian
+        answers.add(new Object[]{200, "{\"text\":\" Напомни мне завтра в 9:00 позвонить в банк. \",\"usage\":{\"cost_rub\":0.0041}}"});
+        heard = g.transcribe(new byte[]{1, 2, 3, 4, 5}, "audio/aac");
+        req = got.get(got.size() - 1);
+        Map<String, Object> sb = MiniJson.obj(MiniJson.parse(req[2]));
+        ok("Напомни мне завтра в 9:00 позвонить в банк.".equals(heard) && "/polza/v1/audio/transcriptions".equals(req[0])
+                        && "ai-sage/gigaam-v3".equals(sb.get("model")) && "data:audio/aac;base64,AQIDBAU=".equals(sb.get("file"))
+                        && "ru".equals(sb.get("language")) && req[1].contains("auth=Bearer pza_test"),
+                "Polza voice: GigaAM, the audio as a data URL, Russian");
+        u = used.get(used.size() - 1);
+        ok("ai-sage/gigaam-v3".equals(u[0]) && Math.abs((Double) u[3] - 0.0041) < 1e-9, "Polza voice: its rubles counted");
 
         server.stop(0);
         System.out.println(bad == 0 ? "GEMINI OK" : bad + " FAILED");

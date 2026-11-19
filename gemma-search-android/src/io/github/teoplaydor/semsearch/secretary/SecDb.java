@@ -71,6 +71,9 @@ public final class SecDb {
         if (!columns("mails").contains("kind")) sql.update("ALTER TABLE mails ADD COLUMN kind TEXT NOT NULL DEFAULT 'mail'");
         if (!columns("phone_msgs").contains("alerted"))
             sql.update("ALTER TABLE phone_msgs ADD COLUMN alerted INTEGER NOT NULL DEFAULT 0");
+        // the phone's own: what the cloud said a call cost, in rubles (Polza)
+        if (!columns("llm_usage").contains("cost_rub"))
+            sql.update("ALTER TABLE llm_usage ADD COLUMN cost_rub REAL NOT NULL DEFAULT 0");
     }
 
     private Set<String> columns(String table) {
@@ -481,15 +484,21 @@ public final class SecDb {
 
     // --- what the model cost: here — tokens and time on the phone ---
     public void addUsage(String model, long tokensIn, long tokensOut) {
+        addUsage(model, tokensIn, tokensOut, 0);
+    }
+
+    /** costRub — what the API said the call cost (Polza), 0 when it didn't. */
+    public synchronized void addUsage(String model, long tokensIn, long tokensOut, double costRub) {
         String day = SecUtil.toDb(now()).substring(0, 10);
-        if (sql.update("UPDATE llm_usage SET calls=calls+1, tokens_in=tokens_in+?, tokens_out=tokens_out+? WHERE day=? AND model=?",
-                tokensIn, tokensOut, day, model) == 0)
-            sql.insert("INSERT INTO llm_usage(day, model, calls, tokens_in, tokens_out) VALUES(?,?,1,?,?)", day, model, tokensIn, tokensOut);
+        if (sql.update("UPDATE llm_usage SET calls=calls+1, tokens_in=tokens_in+?, tokens_out=tokens_out+?, cost_rub=cost_rub+?"
+                + " WHERE day=? AND model=?", tokensIn, tokensOut, costRub, day, model) == 0)
+            sql.insert("INSERT INTO llm_usage(day, model, calls, tokens_in, tokens_out, cost_rub) VALUES(?,?,1,?,?,?)",
+                    day, model, tokensIn, tokensOut, costRub);
     }
 
     public List<Row> usageSince(String day) {
-        return q("SELECT model, SUM(calls) calls, SUM(tokens_in) tokens_in, SUM(tokens_out) tokens_out FROM llm_usage"
-                + " WHERE day >= ? GROUP BY model ORDER BY model", day);
+        return q("SELECT model, SUM(calls) calls, SUM(tokens_in) tokens_in, SUM(tokens_out) tokens_out, SUM(cost_rub) cost_rub"
+                + " FROM llm_usage WHERE day >= ? GROUP BY model ORDER BY model", day);
     }
 
     static Instant at(Row r, String col) {

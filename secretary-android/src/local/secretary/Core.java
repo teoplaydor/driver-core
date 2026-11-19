@@ -57,8 +57,9 @@ import io.github.teoplaydor.semsearch.secretary.Sql;
 
 /**
  * Секретарь целиком на телефоне — то, что раньше делал сервер: разбор уведомлений и чатов, «Тишина», дела и
- * «Сделал?», расходы, сводки и напоминания, разговор с владельцем. Нейросеть — Gemini напрямую с телефона по ключу
- * из настроек (модели те же, что были в config.toml: быстрая для сортировки, умная для разговора и черновиков, голос).
+ * «Сделал?», расходы, сводки и напоминания, разговор с владельцем. Нейросеть — Qwen от Яндекса через Polza AI прямо с
+ * телефона по ключу из настроек (из России без VPN; голос — GigaAM там же); можно и Gemini или любой OpenAI-совместимый
+ * API — модели как в config.toml: быстрая для сортировки, умная для разговора и черновиков, голос.
  * База — та же схема SQLite, что у сервера. Циклы сервера (чаты каждые 20 с, расписание каждые 30 с) крутятся, пока
  * живёт служба уведомлений или открыт чат, а напоминания и сводки ещё и точным будильником — даже во сне телефона.
  */
@@ -86,14 +87,17 @@ final class Core {
         prefs = Listener.prefs(c);
         Journal.start(c);
         Secretary.logger = Journal::line;
+        migratePrefs();
         SecConfig cfg = new SecConfig();
         applyPrefs(cfg);
         SecDb db = new SecDb(new Db(c.getDatabasePath("secretary.db")));
         brain = new GeminiBrain(this::geminiConfig, db::addUsage);
         sec = new Secretary(cfg, db, brain);
         api = new Api(sec);
-        Journal.line("core: " + Journal.about(c) + "; key " + (geminiConfig().geminiKey.isEmpty() ? "NOT set" : "set")
-                + ", models " + geminiConfig().fastModel + " / " + geminiConfig().smartModel + " / " + geminiConfig().audioModel
+        GeminiBrain.Config g = geminiConfig();
+        Journal.line("core: " + Journal.about(c) + "; Polza key " + (g.polzaKey.isEmpty() ? "NOT set" : "set")
+                + ", Gemini key " + (g.geminiKey.isEmpty() ? "not set" : "set")
+                + ", models " + g.fastModel + " / " + g.smartModel + " / " + g.audioModel
                 + ", about me " + cfg.aboutMe.length() + " chars, digests " + cfg.digestTimes);
     }
 
@@ -101,11 +105,39 @@ final class Core {
 
     static final String K_KEY = "gemini_key", K_FAST = "fast_model", K_SMART = "smart_model", K_AUDIO = "audio_model",
             K_THINK = "gemini_thinking", K_OPENAI_KEY = "openai_key", K_OPENAI_URL = "openai_base_url", K_ABOUT = "about_me",
+            K_POLZA_KEY = "polza_key", K_POLZA_URL = "polza_url", K_MODELS_V = "models_version",
             K_NAME = "my_name", K_DIGESTS = "digest_times", K_LARGE = "large_expense", K_QUIET = "quiet_seconds",
             K_WAIT = "max_wait_seconds", K_IGNORE = "ignore_apps", K_BANKS = "bank_apps", K_REMIND = "remind_before";
 
+    /** 2.13: всё на Qwen через Polza — модели Gemini, вписанные раньше, уступают место новым по умолчанию
+     *  (ключ Gemini остаётся: вернуть — «Модели»). */
+    void migratePrefs() {
+        if (prefs.getInt(K_MODELS_V, 0) >= 2) return;
+        android.content.SharedPreferences.Editor e = prefs.edit();
+        for (String k : new String[]{K_FAST, K_SMART, K_AUDIO})
+            if (prefs.getString(k, "").startsWith("gemini:")) {
+                Journal.line("settings: " + k + " " + prefs.getString(k, "") + " → Polza (Qwen from Yandex)");
+                e.remove(k);
+            }
+        if (prefs.getString(K_THINK, "").matches("\\d+")) e.remove(K_THINK); // бюджет Gemini; Яндекс его не примет
+        e.putInt(K_MODELS_V, 2).apply();
+    }
+
+    /** Чей ключ нужен моделям из настроек: «Polza», «Gemini» или null — всё есть. */
+    String missingKey() {
+        GeminiBrain.Config g = geminiConfig();
+        for (String m : new String[]{g.fastModel, g.smartModel, g.audioModel}) {
+            if (m.startsWith("polza:") && g.polzaKey.isEmpty()) return "Polza";
+            if (m.startsWith("gemini:") && g.geminiKey.isEmpty()) return "Gemini";
+        }
+        return null;
+    }
+
     GeminiBrain.Config geminiConfig() {
         GeminiBrain.Config g = new GeminiBrain.Config();
+        g.polzaKey = prefs.getString(K_POLZA_KEY, "").trim();
+        g.polzaUrl = prefs.getString(K_POLZA_URL, g.polzaUrl);
+        if (g.polzaUrl.trim().isEmpty()) g.polzaUrl = GeminiBrain.POLZA_URL;
         g.geminiKey = prefs.getString(K_KEY, "").trim();
         g.fastModel = prefs.getString(K_FAST, g.fastModel);
         g.smartModel = prefs.getString(K_SMART, g.smartModel);
@@ -165,7 +197,7 @@ final class Core {
         return out;
     }
 
-    /** Голосовое: Gemini слышит его, текст — в чат, как от сервера. */
+    /** Голосовое: его слышит модель для голоса (GigaAM через Polza или Gemini), текст — в чат, как от сервера. */
     void voice(byte[] audio, String mime) throws LlmError, IOException {
         long t0 = System.currentTimeMillis();
         String text = brain.transcribe(audio, mime);

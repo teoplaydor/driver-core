@@ -46,7 +46,7 @@ import java.util.concurrent.TimeUnit;
 
 /**
  * Экран чата. Сервера больше нет: страница (app.html) лежит в приложении, на её запросы отвечает секретарь здесь же
- * ({@link Core}), нейросеть — Gemini напрямую с телефона по ключу из «Настройки». Здесь — окно для страницы, голос,
+ * ({@link Core}), нейросеть — Qwen через Polza AI по ключу из «Настройки». Здесь — окно для страницы, голос,
  * копирование и настройки: телефона и те, что раньше были в config.toml.
  */
 public class MainActivity extends Activity {
@@ -93,7 +93,9 @@ public class MainActivity extends Activity {
 
         if (Build.VERSION.SDK_INT >= 33 && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED)
             requestPermissions(new String[]{Manifest.permission.POST_NOTIFICATIONS}, REQ_NOTIFY);
-        if (core.geminiConfig().geminiKey.isEmpty()) askKey(); // без ключа Gemini секретарь не думает
+        String missing = core.missingKey(); // без ключа секретарь не думает
+        if ("Polza".equals(missing)) askKey();
+        else if ("Gemini".equals(missing)) askGeminiKey();
         else if (!hasNotificationAccess()) showSetup();
     }
 
@@ -149,8 +151,10 @@ public class MainActivity extends Activity {
         boolean bypass = alerts != null && alerts.canBypassDnd();
         io.github.teoplaydor.semsearch.secretary.GeminiBrain.Config g = core.geminiConfig();
         String about = core.prefs.getString(Core.K_ABOUT, "");
+        String missing = core.missingKey();
         String[] items = {
-                (g.geminiKey.isEmpty() ? "❌ Ключ Gemini не задан" : "✅ Ключ Gemini задан") + " — нажми, чтобы вписать или проверить",
+                (missing != null ? "❌ Ключ " + missing + " не задан" : "✅ Ключ задан") + " — нажми, чтобы вписать или проверить"
+                        + " (и узнать баланс)",
                 "🤖 Модели: " + g.fastModel + " (сортировка), " + g.smartModel + " (разговор), голос — " + g.audioModel
                         + (g.thinking.isEmpty() ? "" : ", размышления: " + g.thinking),
                 "👤 О себе: " + (about.isEmpty() ? "не заполнено — секретарь сортирует хуже" : about.length() + " знаков"),
@@ -170,7 +174,10 @@ public class MainActivity extends Activity {
         new AlertDialog.Builder(this)
                 .setTitle("Настройка")
                 .setItems(items, (d, which) -> {
-                    if (which == 0) askKey();
+                    if (which == 0) {
+                        if ("Gemini".equals(missing)) askGeminiKey();
+                        else askKey();
+                    }
                     else if (which == 1) editModels();
                     else if (which == 2) editText("О себе", "Кто я и что для меня важно: работа, учёба (занятия по вторникам), "
                             + "важные люди, что не интересно", Core.K_ABOUT, "", true);
@@ -222,8 +229,26 @@ public class MainActivity extends Activity {
         return box;
     }
 
-    /** Ключ Gemini (aistudio.google.com → Get API key): вписать и сразу проверить. */
+    /** Ключ Polza AI (polza.ai → «Ключи API»): вписать и сразу проверить. */
     void askKey() {
+        LinearLayout box = box();
+        EditText key = field(box, "Ключ Polza AI (polza.ai → «Ключи API»). Polza — российский посредник: работает без VPN, "
+                + "оплата в рублях; секретарь думает на Qwen от Яндекса (данные остаются в России), голос — GigaAM. "
+                + "Хранится только на этом телефоне.", core.prefs.getString(Core.K_POLZA_KEY, ""), "pza_…", false);
+        new AlertDialog.Builder(this)
+                .setTitle("Ключ Polza")
+                .setView(box)
+                .setPositiveButton("Сохранить и проверить", (d, w) -> {
+                    core.prefs.edit().putString(Core.K_POLZA_KEY, key.getText().toString().trim()).apply();
+                    Core.Journal.line("settings: Polza key " + (key.getText().toString().trim().isEmpty() ? "cleared" : "set"));
+                    checkModel();
+                })
+                .setNegativeButton("Отмена", null)
+                .show();
+    }
+
+    /** Ключ Gemini (aistudio.google.com → Get API key) — если модели в настройках «gemini:…». */
+    void askGeminiKey() {
         LinearLayout box = box();
         EditText key = field(box, "Ключ Gemini API (aistudio.google.com → Get API key; лучше платный тариф — "
                 + "иначе Google учится на твоих данных). Хранится только на этом телефоне.", core.prefs.getString(Core.K_KEY, ""), "AIza…", false);
@@ -239,15 +264,20 @@ public class MainActivity extends Activity {
                 .show();
     }
 
-    /** Короткий запрос к быстрой модели: ключ и связь работают? */
+    /** Короткий запрос к быстрой модели: ключ и связь работают? (И сколько денег на счёте Polza.) */
     void checkModel() {
-        toast("Проверяю связь с Gemini…");
+        String model = core.geminiConfig().fastModel;
+        toast("Проверяю связь с нейросетью…");
         new Thread(() -> {
             String msg;
             try {
                 long t0 = System.currentTimeMillis();
                 String r = core.brain.text(false, "Отвечай одним словом.", "Скажи «работает».");
-                msg = "✅ Gemini отвечает (" + (System.currentTimeMillis() - t0) + " мс): " + r;
+                msg = "✅ " + model + " отвечает (" + (System.currentTimeMillis() - t0) + " мс): " + r;
+                if (model.startsWith("polza:")) {
+                    String b = core.brain.polzaBalance();
+                    if (b != null) msg += "\n\nНа счёте Polza: " + b + " ₽";
+                }
             } catch (LlmError e) {
                 msg = "❌ " + e.getMessage();
             }
@@ -257,15 +287,23 @@ public class MainActivity extends Activity {
         }, "check").start();
     }
 
-    /** Модели — как в config.toml: «gemini:имя» или «openai:имя» (OpenRouter, DeepSeek). */
+    /** Модели — как в config.toml: «polza:имя@поставщик», «gemini:имя» или «openai:имя» (OpenRouter, DeepSeek). */
     void editModels() {
         io.github.teoplaydor.semsearch.secretary.GeminiBrain.Config g = core.geminiConfig();
+        String def = io.github.teoplaydor.semsearch.secretary.GeminiBrain.POLZA_MODEL;
         LinearLayout box = box();
-        EditText fast = field(box, "Быстрая — сортировка уведомлений, разбор чатов, банки", g.fastModel, "gemini:gemini-3.1-flash-lite", false);
-        EditText smart = field(box, "Умная — разговор с тобой и черновики", g.smartModel, "gemini:gemini-3.8-flash", false);
-        EditText audio = field(box, "Голос — распознавание голосовых", g.audioModel, "gemini:gemini-3.1-flash-lite", false);
-        EditText think = field(box, "Размышления: пусто — как решит модель; low — меньше, дешевле и быстрее; число — бюджет",
-                g.thinking, "", false);
+        android.widget.TextView help = new android.widget.TextView(this);
+        help.setText("«polza:модель@поставщик» — модель через Polza только у этого поставщика (без «@…» — Polza выберет "
+                + "сама); «gemini:…» — Gemini по своему ключу (нужен VPN); «openai:…» — любой OpenAI-совместимый API.");
+        box.addView(help);
+        EditText fast = field(box, "Быстрая — сортировка уведомлений, разбор чатов, банки", g.fastModel, def, false);
+        EditText smart = field(box, "Умная — разговор с тобой и черновики", g.smartModel, def, false);
+        EditText audio = field(box, "Голос — распознавание голосовых", g.audioModel,
+                io.github.teoplaydor.semsearch.secretary.GeminiBrain.POLZA_AUDIO, false);
+        EditText think = field(box, "Размышления: пусто — как решит модель; low / medium / high (Яндекс понимает только их); "
+                + "для Gemini — ещё число (бюджет)", g.thinking, "", false);
+        EditText purl = field(box, "Адрес Polza AI", g.polzaUrl, io.github.teoplaydor.semsearch.secretary.GeminiBrain.POLZA_URL, false);
+        EditText gkey = field(box, "Ключ Gemini — для «gemini:…» моделей, если нужны", g.geminiKey, "AIza…", false);
         EditText okey = field(box, "Ключ для «openai:…» моделей (OpenRouter, DeepSeek), если нужны", g.openaiKey, "", false);
         EditText ourl = field(box, "Адрес OpenAI-совместимого API", g.openaiBaseUrl, "https://openrouter.ai/api/v1", false);
         android.widget.ScrollView sv = new android.widget.ScrollView(this);
@@ -278,6 +316,8 @@ public class MainActivity extends Activity {
                             .putString(Core.K_SMART, smart.getText().toString().trim())
                             .putString(Core.K_AUDIO, audio.getText().toString().trim())
                             .putString(Core.K_THINK, think.getText().toString().trim())
+                            .putString(Core.K_POLZA_URL, purl.getText().toString().trim())
+                            .putString(Core.K_KEY, gkey.getText().toString().trim())
                             .putString(Core.K_OPENAI_KEY, okey.getText().toString().trim())
                             .putString(Core.K_OPENAI_URL, ourl.getText().toString().trim()).apply();
                     Core.Journal.line("settings: models " + fast.getText() + " / " + smart.getText() + " / " + audio.getText()
@@ -286,8 +326,9 @@ public class MainActivity extends Activity {
                 })
                 .setNegativeButton("Отмена", null)
                 .setNeutralButton("По умолчанию", (d, w) -> {
-                    core.prefs.edit().remove(Core.K_FAST).remove(Core.K_SMART).remove(Core.K_AUDIO).remove(Core.K_THINK).apply();
-                    toast("Модели — как в config.example.toml");
+                    core.prefs.edit().remove(Core.K_FAST).remove(Core.K_SMART).remove(Core.K_AUDIO).remove(Core.K_THINK)
+                            .remove(Core.K_POLZA_URL).apply();
+                    toast("Модели по умолчанию: Qwen от Яндекса через Polza, голос — GigaAM");
                 })
                 .show();
     }
@@ -388,7 +429,7 @@ public class MainActivity extends Activity {
             try {
                 byte[] audio = Files.readAllBytes(f.toPath());
                 if (audio.length < 1000) error = "Слишком коротко";
-                else core.voice(audio, "audio/aac"); // Gemini слышит голосовое, текст и ответ — в чат
+                else core.voice(audio, "audio/aac"); // модель для голоса слышит голосовое, текст и ответ — в чат
             } catch (LlmError e) {
                 error = "Не расслышал: " + e.getMessage();
                 Core.Journal.line("voice: " + e.getMessage());
